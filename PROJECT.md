@@ -33,7 +33,7 @@ and milestones M0–M5 are planned but not built. `scripts/workflow-check.sh` ru
 | Milestone | What it delivers | Slices | Status | Record |
 | :--- | :--- | :--- | :--- | :--- |
 | — | **Migration baseline**: the VM core from the previous iteration, without its own class library or synthetic `Object` | S1–S3 | done | notes S1–S3 |
-| M0 | Boot: read the host image, bootstrap `Object`/`String`/`Class`/`System`, first JCL natives, `println` | S4–S7 | todo | — |
+| M0 | Boot: read the host image, complete the instruction set the library uses, bootstrap `Object`/`String`/`Class`/`System`, first JCL natives, `println` | S4–S8 | todo | — |
 | M1 | The core library: strings, arrays, exceptions, `Class` basics | — | todo | — |
 | M2 | Loaders and modules: `(loader, name)` identity, resources | — | todo | — |
 | M3 | Real threads and monitors | — | todo | ADR-0010 |
@@ -79,9 +79,10 @@ A slice is done only when all of the following hold:
 | S2 | Heap, class model, resolution, monitors and the interpreter, migrated | R6–R9 | `cargo test -p rava-vm -p rava-interp` exits 0 | done |
 | S3 | The plan documents and the ledger for the hosting model | process | `bash scripts/workflow-check.sh .` exits 0 | done |
 | S4 | Read the host image: enumerate `java.base`, load `java/lang/Object` from `lib/modules` or an extracted image | R3 | `cargo test -p rava-vm --test image` exits 0 | todo |
-| S5 | Bootstrap the core classes from the host; delete the synthetic `Object` path | R4 | `cargo test -p rava-vm --test bootstrap` exits 0 | todo |
-| S6 | First JCL natives: `System.out`, `PrintStream`, `FileOutputStream`, `FileDescriptor` | R5 | `cargo test -p rava-cli --test natives` exits 0 | todo |
-| S7 | M0 acceptance: a program that prints, compared with the host launcher | R1 | `cargo test -p rava-cli --test boot` exits 0 | todo |
+| S5 | Complete the instruction set the library uses: `dup2`, `dup_x1`, `dup_x2`, `dup2_x1`, `dup2_x2`, `swap`, and `wide`/`goto_w` if the host needs them | R2 | `cargo test -p rava-vm --test instr` exits 0 | todo |
+| S6 | Bootstrap the core classes from the host; the synthetic `Object` path is already gone | R4 | `cargo test -p rava-vm --test bootstrap` exits 0 | todo |
+| S7 | First JCL natives: `System.out`, `PrintStream`, `FileOutputStream`, `FileDescriptor` | R5 | `cargo test -p rava-cli --test natives` exits 0 | todo |
+| S8 | M0 acceptance: a program that prints, compared with the host launcher | R1 | `cargo test -p rava-cli --test boot` exits 0 | todo |
 
 ## Slice log
 
@@ -132,6 +133,10 @@ A slice is done only when all of the following hold:
 3. **Next is S4**: read the host image. The JDK's classes live in `lib/modules`; the first
    acceptance is loading `java/lang/Object.class` from it, with an extracted directory as the
    fallback. Nothing can run until the bootstrap classes load, so this is the critical path.
+   **S5 exists because of a measurement**: the host library's own methods use opcodes this
+   interpreter does not decode (`dup2` in `java.lang.String`, `dup_x1`/`dup_x2` in
+   `ArrayList`/`HashMap`/`Thread`), and decoding happens at load, so the set must be complete
+   before the bootstrap classes can even be loaded.
 4. **The previous project is archived** at `/home/yusiwen/git/jvm` and is read-only history.
    The GitHub repository is deleted and recreated by the human; the local origin in
    `## Environments` is the intended remote, not a live one.
