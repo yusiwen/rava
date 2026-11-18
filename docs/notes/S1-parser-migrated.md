@@ -2,7 +2,7 @@
 
 - **Slice:** S1
 - **Requirements:** R2
-- **Acceptance:** `cargo test -p rava-classfile` exited 0 on 2026-11-18 (13 tests: 7 unit, 6 in
+- **Acceptance:** `cargo test -p rava-classfile` exited 0 on 2026-11-18 (12 tests: 7 unit, 5 in
   `tests/parse.rs`).
 
 ## What surprised me
