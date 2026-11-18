@@ -1,0 +1,11 @@
+# Rust build output
+/target
+
+# direnv and nix build outcomes
+/.direnv
+/result
+/result-*
+
+# Local editor and OS noise
+**/*.rs.bk
+.DS_Store

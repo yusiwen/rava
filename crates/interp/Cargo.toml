@@ -1,0 +1,11 @@
+[package]
+name = "rava-interp"
+description = "Bytecode dispatch loop for the rava Java runtime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+rava-vm.workspace = true

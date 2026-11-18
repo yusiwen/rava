@@ -1,0 +1,166 @@
+//! A tiny instruction assembler (G5's second increment).
+//!
+//! [`ClassBuilder`](crate::ClassBuilder) owns constant-pool indices; this owns bytecode offsets.
+//! The two failure modes left in a hand-assembled fixture were a branch offset computed against the
+//! wrong origin and an operand written in the wrong width — labels and a single `finish` pass remove
+//! both, for the opcodes implemented here.
+//!
+//! What it covers is exactly what the fixtures need: integer constants, loads and stores, `iadd`,
+//! `iinc`, two conditional branches, `goto`, `getstatic`, `invokevirtual`, `ldc`, and the two return
+//! forms. Everything else is still raw bytes through [`Assembler::op`].
+//!
+//! `tableswitch` and `lookupswitch` are deliberately absent: their padding depends on the switch
+//! opcode's own address, which is a different encoding problem (and the decoder already handles the
+//! result).
+
+use crate::Error;
+
+/// A jump destination, bound by [`Assembler::place`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Label(usize);
+
+/// One 16-bit branch offset waiting for its label’s address.
+struct Fixup {
+    /// Offset of the branch's *opcode*, which is what the relative offset is measured from.
+    opcode: usize,
+    label: Label,
+}
+
+/// Bytecode under construction.
+pub struct Assembler {
+    bytes: Vec<u8>,
+    labels: Vec<Option<usize>>,
+    fixups: Vec<Fixup>,
+}
+
+impl Default for Assembler {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Assembler {
+    pub fn new() -> Self {
+        Self {
+            bytes: Vec::new(),
+            labels: Vec::new(),
+            fixups: Vec::new(),
+        }
+    }
+
+    /// Creates a label; bind it later with [`place`](Self::place).
+    pub fn label(&mut self) -> Label {
+        self.labels.push(None);
+        Label(self.labels.len() - 1)
+    }
+
+    /// Binds `label` to the current offset.
+    pub fn place(&mut self, label: Label) {
+        self.labels[label.0] = Some(self.bytes.len());
+    }
+
+    /// Emits a raw opcode and operands, for anything without a helper.
+    pub fn op(&mut self, opcode: u8, operands: &[u8]) {
+        self.bytes.push(opcode);
+        self.bytes.extend_from_slice(operands);
+    }
+
+    /// `iconst_<n>` for -1..=5, `bipush` for the next range, `sipush` beyond it.
+    pub fn iconst(&mut self, value: i32) {
+        match value {
+            // `iconst_m1` is 0x02, `iconst_0` is 0x03, ... `iconst_5` is 0x08.
+            -1 => self.bytes.push(0x02),
+            0..=5 => self.bytes.push(0x03 + value as u8),
+            -128..=127 => {
+                self.bytes.push(0x10);
+                self.bytes.push(value as u8);
+            }
+            _ => {
+                self.bytes.push(0x11);
+                self.bytes.extend_from_slice(&(value as i16).to_be_bytes());
+            }
+        }
+    }
+
+    pub fn iload(&mut self, slot: u8) {
+        self.op(0x15, &[slot]);
+    }
+
+    pub fn istore(&mut self, slot: u8) {
+        self.op(0x36, &[slot]);
+    }
+
+    pub fn iinc(&mut self, slot: u8, increment: i8) {
+        self.op(0x84, &[slot, increment as u8]);
+    }
+
+    pub fn iadd(&mut self) {
+        self.bytes.push(0x60);
+    }
+
+    pub fn ldc(&mut self, index: u16) {
+        // Only the one-byte form; a wider constant pool needs `ldc_w`, which no fixture does yet.
+        debug_assert!(index < 256, "ldc index {index} needs ldc_w");
+        self.op(0x12, &[index as u8]);
+    }
+
+    pub fn getstatic(&mut self, index: u16) {
+        self.op(0xb2, &index.to_be_bytes());
+    }
+
+    pub fn invokevirtual(&mut self, index: u16) {
+        self.op(0xb6, &index.to_be_bytes());
+    }
+
+    /// `ifeq`, `ifne`, `iflt`, `ifge`, `ifgt`, `ifle` by their JVMS opcodes.
+    pub fn if_cond(&mut self, opcode: u8, label: Label) {
+        self.branch(opcode, label);
+    }
+
+    /// `if_icmpeq`..`if_icmple` (0x9f..=0xa4) by their JVMS opcodes.
+    pub fn if_icmp(&mut self, opcode: u8, label: Label) {
+        self.branch(opcode, label);
+    }
+
+    pub fn goto(&mut self, label: Label) {
+        self.branch(0xa7, label);
+    }
+
+    pub fn ireturn(&mut self) {
+        self.bytes.push(0xac);
+    }
+
+    pub fn return_(&mut self) {
+        self.bytes.push(0xb1);
+    }
+
+    /// Resolves every branch and returns the bytes.
+    pub fn finish(self) -> Result<Vec<u8>, Error> {
+        let mut bytes = self.bytes;
+        for fixup in &self.fixups {
+            let target = self.labels[fixup.label.0].ok_or(Error::InvalidAssembly {
+                detail: format!("label {} was never placed", fixup.label.0),
+            })?;
+            // A branch offset is relative to the opcode's own address (JVMS §6.5).
+            let offset = target as isize - fixup.opcode as isize;
+            let offset = i16::try_from(offset).map_err(|_| Error::InvalidAssembly {
+                detail: format!(
+                    "branch to label {} is {offset} bytes away, beyond a signed 16-bit offset",
+                    fixup.label.0
+                ),
+            })?;
+            bytes[fixup.opcode + 1..fixup.opcode + 3].copy_from_slice(&offset.to_be_bytes());
+        }
+        Ok(bytes)
+    }
+
+    fn branch(&mut self, opcode: u8, label: Label) {
+        let opcode_offset = self.bytes.len();
+        self.bytes.push(opcode);
+        self.bytes.extend_from_slice(&[0, 0]); // placeholder
+        self.fixups.push(Fixup {
+            opcode: opcode_offset,
+            label,
+        });
+    }
+}

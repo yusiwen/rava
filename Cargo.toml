@@ -1,0 +1,25 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/classfile",
+    "crates/vm",
+    "crates/interp",
+    "crates/native",
+    "crates/cli",
+    "xtask",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+authors = ["yusiwen"]
+rust-version = "1.85"
+
+[workspace.dependencies]
+# Member dependencies are declared here as members start using them; cargo warns about
+# entries nothing depends on yet.
+rava-classfile = { path = "crates/classfile" }
+rava-vm = { path = "crates/vm" }
+rava-interp = { path = "crates/interp" }
+rava-native = { path = "crates/native" }

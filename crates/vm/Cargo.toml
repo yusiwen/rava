@@ -1,0 +1,11 @@
+[package]
+name = "rava-vm"
+description = "Runtime model, heap, loader and linker for the rava Java runtime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+rava-classfile.workspace = true

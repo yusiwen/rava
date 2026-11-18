@@ -1,0 +1,20 @@
+[package]
+name = "rava-cli"
+description = "Command-line entry point for the rava Java runtime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "rava"
+path = "src/main.rs"
+
+# `--dump` needs the parser; the conformance harness (S2) also drives the interpreter,
+# so both edges exist here. ADR-0002 allows this crate to depend on everything.
+[dependencies]
+rava-classfile.workspace = true
+rava-interp.workspace = true
+rava-native.workspace = true
+rava-vm.workspace = true

@@ -1,0 +1,1073 @@
+//! Runtime model for the rava Java runtime.
+//!
+//! The seams are fixed by the ADRs:
+//!
+//! - [`ObjRef`] is an index into a VM-owned heap, never a pointer (ADR-0004).
+//! - [`Shared`] and [`ThreadState`] are separate types, so true parallelism later means
+//!   deleting one lock rather than rewriting signatures (ADR-0006).
+//! - [`JavaCall`] lets `rava-native` invoke Java code without depending on
+//!   `rava-interp` (ADR-0002).
+//! - Bytecode is decoded into [`Instr`] at load time (ADR-0003).
+
+pub mod class;
+pub mod code;
+pub mod error;
+pub mod format;
+pub mod heap;
+pub mod indy;
+pub mod loader;
+pub mod native;
+pub mod resolve;
+pub mod value;
+pub mod verify;
+
+use std::collections::HashMap;
+
+pub use class::{Class, ClassId, ClassState, FieldInfo, FieldSlot, MethodInfo};
+pub use code::{BinOp, Code, Compare, Convert, Instr, UnOp};
+pub use error::VmError;
+pub use heap::{Array, ArrayKind, HeapObject, Instance, Lambda, ObjRef};
+pub use indy::{CallSite, CallSiteInfo, Component, RecipePart, RecordMethodKind};
+pub use loader::ClassPath;
+pub use native::{NativeCtx, NativeFn};
+pub use value::Value;
+
+/// One frame of a throwable's captured stack trace.
+#[derive(Debug, Clone)]
+pub struct TraceFrame {
+    pub class: String,
+    pub method: String,
+    pub line: u16,
+}
+
+/// One object's monitor.
+#[derive(Debug, Default)]
+pub struct Monitor {
+    /// The thread holding it, or `None` when free.
+    pub owner: Option<u64>,
+    pub depth: u32,
+}
+
+/// What one collection did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CollectionStats {
+    /// Heap slots before the sweep.
+    pub slots: usize,
+    /// Slots reachable from the roots.
+    pub live: usize,
+    /// Slots available for reuse after the sweep.
+    pub freed: usize,
+}
+
+/// What a call to [`Shared::begin_initialization`] should do next.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Initialization {
+    /// Run the `<clinit>` at this method index, then finish initialization.
+    Run(usize),
+    /// Nothing to run: already initialized, or already being initialized on this thread.
+    AlreadyDone,
+    /// A previous `<clinit>` threw; use must raise `NoClassDefFoundError`.
+    Erroneous,
+}
+
+/// How a native invokes Java code: the interpreter registers one of these on [`Shared`], which
+/// keeps `rava-native` unable to name `rava-interp` (ADR-0002).
+pub type Invoker = fn(
+    &mut Shared,
+    &mut ThreadState,
+    &ClassPath,
+    ClassId,
+    usize,
+    Vec<Value>,
+) -> Result<Value, VmError>;
+
+/// Builds the initial heap object for a class, or `None` to get a plain instance.
+pub type ObjectFactory = fn(class_name: &str, class: ClassId) -> Option<HeapObject>;
+
+/// State shared by every thread: heap, class table, interned strings, natives, and the
+/// output sink (ADR-0006).
+pub struct Shared {
+    pub heap: Vec<HeapObject>,
+    /// Slots freed by the last collection, reused by the next allocation.
+    pub free: Vec<ObjRef>,
+    /// Set by the allocator when the heap reaches its budget. The interpreter collects at
+    /// the next instruction boundary, where the frame stack is the complete root set.
+    pub pending_gc: bool,
+    /// Heap size that triggers the next collection; grows with the live set after each one.
+    next_gc: usize,
+    pub classes: Vec<Class>,
+    pub class_ids: HashMap<String, ClassId>,
+    pub natives: HashMap<String, NativeFn>,
+    pub interned: HashMap<String, ObjRef>,
+    /// Per-object monitors, created on first entry. `depth` is re-entrancy: a thread that
+    /// already holds the monitor may enter again, which is what makes a `synchronized` block
+    /// calling a `synchronized` method on the same object legal.
+    ///
+    /// Level 3 (true parallelism) adds an owner and a condition variable; with a single thread
+    /// they would be constants (ADR-0012).
+    pub monitors: HashMap<ObjRef, Monitor>,
+    /// Installed by the interpreter at start-up; natives use it to call Java code.
+    pub invoker: Option<Invoker>,
+    /// One `java.lang.Class` object per class, so class objects compare by identity.
+    pub class_objects: HashMap<ClassId, ObjRef>,
+    /// Class objects for primitive and array types, keyed by descriptor.
+    pub type_classes: HashMap<String, ObjRef>,
+    /// One `Field`/`Method` object per declared member, for the same reason.
+    pub field_objects: HashMap<(ClassId, usize), ObjRef>,
+    pub method_objects: HashMap<(ClassId, usize), ObjRef>,
+    pub constructor_objects: HashMap<(ClassId, usize), ObjRef>,
+    /// Boxed `Integer` objects for the JDK-cached range, so `Integer.valueOf(5) ==
+    /// Integer.valueOf(5)` holds.
+    pub int_cache: HashMap<i32, ObjRef>,
+    /// Boxed `Long` objects for the same JDK-cached range.
+    pub long_cache: HashMap<i64, ObjRef>,
+    /// Boxed `Double` objects. Only the common values are cached; the rest are fresh, which is
+    /// what the JDK does for `Double` as well.
+    pub double_cache: HashMap<u64, ObjRef>,
+    /// Stack traces captured when each throwable was created. The frames are gone once the
+    /// exception unwinds, so the trace has to be taken at the throw, not at the report.
+    pub traces: HashMap<ObjRef, Vec<TraceFrame>>,
+    /// Exceptions suppressed by a resource's `close()` during unwinding, keyed by the primary
+    /// exception. Native storage, because `Throwable` has no field for it in this VM and an
+    /// array field would need `System.arraycopy` to grow.
+    pub suppressed: HashMap<ObjRef, Vec<ObjRef>>,
+    /// Whether a class is verified when it loads. `true` by default; tests that build malformed
+    /// class files on purpose turn it off (ADR-0014's follow-up).
+    pub verify_on_load: bool,
+    /// Instructions dispatched since the VM was created. A `u64` add in the loop costs
+    /// nothing measurable and makes "how much work was this run" a number instead of an
+    /// impression (G8).
+    pub steps: u64,
+    /// Everything the program wrote to stdout. Buffered because the only consumer is the
+    /// end of the run; streaming output is a later concern.
+    pub out: Vec<u8>,
+    /// How the replacement class library gives its instances storage the VM does not
+    /// model: a `StringBuilder` is a Rust `String`, an ordinary object is a field vector.
+    /// `new` asks this first, so the VM stays free of library-specific knowledge.
+    pub object_factory: Option<ObjectFactory>,
+}
+
+impl Shared {
+    pub fn new() -> Self {
+        Self {
+            // Index 0 is the null object, so every ObjRef is a valid index.
+            heap: vec![HeapObject::Null],
+            free: Vec::new(),
+            pending_gc: false,
+            verify_on_load: true,
+            next_gc: 256,
+            classes: Vec::new(),
+            class_ids: HashMap::new(),
+            natives: HashMap::new(),
+            interned: HashMap::new(),
+            monitors: HashMap::new(),
+            invoker: None,
+            class_objects: HashMap::new(),
+            type_classes: HashMap::new(),
+            field_objects: HashMap::new(),
+            method_objects: HashMap::new(),
+            constructor_objects: HashMap::new(),
+            int_cache: HashMap::new(),
+            long_cache: HashMap::new(),
+            double_cache: HashMap::new(),
+            traces: HashMap::new(),
+            suppressed: HashMap::new(),
+            steps: 0,
+            out: Vec::new(),
+            object_factory: None,
+        }
+    }
+
+    pub fn allocate(&mut self, object: HeapObject) -> ObjRef {
+        let reference = match self.free.pop() {
+            Some(reference) => {
+                self.heap[reference.index()] = object;
+                reference
+            }
+            None => {
+                let reference = ObjRef(self.heap.len() as u32);
+                self.heap.push(object);
+                reference
+            }
+        };
+        // A hint, not a collection: the allocator does not see the thread, and frames are
+        // roots. The interpreter collects at its next instruction boundary.
+        if self.heap.len() >= self.next_gc {
+            self.pending_gc = true;
+        }
+        reference
+    }
+
+    /// Mark-sweep over the handle table (ADR-0004, M2).
+    ///
+    /// Roots are the threads' frames, the static fields of loaded classes, the interned
+    /// strings and the suppressed-exception map. Everything reachable survives; everything
+    /// else becomes [`HeapObject::Free`] and its slot joins the free list.
+    ///
+    /// Collection is only correct at a point where every live reference is reachable from
+    /// those roots, which is why it is invoked explicitly (`System.gc()`) rather than from
+    /// the allocator: allocation does not see the thread.
+    pub fn collect(&mut self, thread: &ThreadState) -> CollectionStats {
+        self.pending_gc = false;
+        let mut marked = vec![false; self.heap.len()];
+
+        let mut worklist: Vec<ObjRef> = Vec::new();
+        worklist.push(ObjRef::NULL);
+        for frame in &thread.frames {
+            for value in frame.locals.iter().chain(frame.stack.iter()) {
+                if let Some(reference) = value.as_ref() {
+                    worklist.push(reference);
+                }
+            }
+        }
+        for class in &self.classes {
+            for value in class.statics.values() {
+                if let Some(reference) = value.as_ref() {
+                    worklist.push(reference);
+                }
+            }
+        }
+        worklist.extend(self.interned.values().copied());
+        worklist.extend(self.class_objects.values().copied());
+        worklist.extend(self.type_classes.values().copied());
+        worklist.extend(self.field_objects.values().copied());
+        worklist.extend(self.method_objects.values().copied());
+        worklist.extend(self.constructor_objects.values().copied());
+        worklist.extend(self.int_cache.values().copied());
+        worklist.extend(self.long_cache.values().copied());
+        worklist.extend(self.double_cache.values().copied());
+        for (primary, suppressed) in &self.suppressed {
+            worklist.push(*primary);
+            worklist.extend(suppressed.iter().copied());
+        }
+
+        while let Some(reference) = worklist.pop() {
+            let index = reference.index();
+            if index >= self.heap.len() || marked[index] {
+                continue;
+            }
+            marked[index] = true;
+            match &self.heap[index] {
+                HeapObject::Instance(instance) => {
+                    worklist.extend(instance.fields.iter().filter_map(|value| value.as_ref()));
+                }
+                HeapObject::Array(array) => {
+                    worklist.extend(array.elements.iter().filter_map(|value| value.as_ref()));
+                }
+                // A lambda's captured values are references too; missing this arm would free
+                // objects that a live lambda still needs.
+                HeapObject::Lambda(lambda) => {
+                    worklist.extend(lambda.captured.iter().filter_map(|value| value.as_ref()));
+                }
+                // A class object holds no references: the class is a root by being loaded,
+                // and the cache keeps its object alive.
+                HeapObject::Null
+                | HeapObject::Free
+                | HeapObject::Str(_)
+                | HeapObject::Builder(_)
+                | HeapObject::ClassRef(_)
+                | HeapObject::FieldRef(_, _)
+                | HeapObject::MethodRef(_, _)
+                | HeapObject::ConstructorRef(_, _)
+                | HeapObject::TypeClassRef(_) => {}
+            }
+        }
+
+        let before = self.heap.len();
+        for index in 1..self.heap.len() {
+            if marked[index] || matches!(self.heap[index], HeapObject::Free) {
+                continue;
+            }
+            self.heap[index] = HeapObject::Free;
+            self.free.push(ObjRef(index as u32));
+        }
+        let live = marked.iter().filter(|marked| **marked).count();
+        // Grow the budget with the live set so a program that keeps more does not collect
+        // after every allocation.
+        self.next_gc = (live * 2).max(256);
+        CollectionStats {
+            slots: before,
+            live,
+            freed: self.free.len(),
+        }
+    }
+
+    /// Returns the canonical reference for a string constant (JVMS §5.3: `ldc` of the
+    /// same string always yields the same object).
+    pub fn intern(&mut self, text: &str) -> ObjRef {
+        if let Some(reference) = self.interned.get(text) {
+            return *reference;
+        }
+        let reference = self.allocate(HeapObject::Str(text.to_owned()));
+        self.interned.insert(text.to_owned(), reference);
+        reference
+    }
+
+    pub fn write_out(&mut self, bytes: &[u8]) {
+        self.out.extend_from_slice(bytes);
+    }
+
+    /// Reads a string object's payload, or reports what the reference actually is.
+    pub fn string(&self, reference: ObjRef) -> Result<&str, VmError> {
+        match self.heap.get(reference.index()) {
+            Some(HeapObject::Str(text)) => Ok(text),
+            Some(other) => Err(VmError::Native(format!("expected a String, got {other:?}"))),
+            None => Err(VmError::Native(format!("dangling reference {reference:?}"))),
+        }
+    }
+
+    pub fn class(&self, id: ClassId) -> &Class {
+        &self.classes[id.index()]
+    }
+
+    /// Resolves an exact `(name, descriptor)`: the class and its superclasses first, then the
+    /// superinterfaces, which is where a `default` method lives (JVMS §5.4.3.3).
+    pub fn resolve_method(
+        &self,
+        id: ClassId,
+        name: &str,
+        descriptor: &str,
+    ) -> Option<(ClassId, usize)> {
+        let mut current = Some(id);
+        while let Some(class_id) = current {
+            let class = self.class(class_id);
+            if let Some(index) = class.method_index(name, descriptor) {
+                return Some((class_id, index));
+            }
+            current = class.super_class;
+        }
+        let mut visited = Vec::new();
+        self.resolve_in_interfaces(id, name, descriptor, &mut visited)
+    }
+
+    fn resolve_in_interfaces(
+        &self,
+        id: ClassId,
+        name: &str,
+        descriptor: &str,
+        visited: &mut Vec<ClassId>,
+    ) -> Option<(ClassId, usize)> {
+        if visited.contains(&id) {
+            return None;
+        }
+        visited.push(id);
+
+        for interface in &self.class(id).interfaces {
+            if let Some(index) = self.class(*interface).method_index(name, descriptor) {
+                return Some((*interface, index));
+            }
+            if let Some(found) = self.resolve_in_interfaces(*interface, name, descriptor, visited) {
+                return Some(found);
+            }
+        }
+        None
+    }
+
+    /// The `java.lang.Class` object for a class, allocated once and cached.
+    pub fn class_object(&mut self, class: ClassId) -> ObjRef {
+        if let Some(reference) = self.class_objects.get(&class) {
+            return *reference;
+        }
+        let reference = self.allocate(HeapObject::ClassRef(class));
+        self.class_objects.insert(class, reference);
+        reference
+    }
+
+    /// The `Field` object for a declared field, allocated once and cached.
+    pub fn field_object(&mut self, class: ClassId, index: usize) -> ObjRef {
+        if let Some(reference) = self.field_objects.get(&(class, index)) {
+            return *reference;
+        }
+        let reference = self.allocate(HeapObject::FieldRef(class, index));
+        self.field_objects.insert((class, index), reference);
+        reference
+    }
+
+    /// The `Method` object for a declared method, allocated once and cached.
+    pub fn method_object(&mut self, class: ClassId, index: usize) -> ObjRef {
+        if let Some(reference) = self.method_objects.get(&(class, index)) {
+            return *reference;
+        }
+        let reference = self.allocate(HeapObject::MethodRef(class, index));
+        self.method_objects.insert((class, index), reference);
+        reference
+    }
+
+    /// The `Constructor` object for a declared constructor, allocated once and cached.
+    pub fn constructor_object(&mut self, class: ClassId, index: usize) -> ObjRef {
+        if let Some(reference) = self.constructor_objects.get(&(class, index)) {
+            return *reference;
+        }
+        let reference = self.allocate(HeapObject::ConstructorRef(class, index));
+        self.constructor_objects.insert((class, index), reference);
+        reference
+    }
+
+    /// What a heap reference names, if it is a field or method object.
+    pub fn field_ref(&self, reference: ObjRef) -> Option<(ClassId, usize)> {
+        match self.heap.get(reference.index()) {
+            Some(HeapObject::FieldRef(class, index)) => Some((*class, *index)),
+            _ => None,
+        }
+    }
+
+    pub fn method_ref(&self, reference: ObjRef) -> Option<(ClassId, usize)> {
+        match self.heap.get(reference.index()) {
+            Some(HeapObject::MethodRef(class, index)) => Some((*class, *index)),
+            _ => None,
+        }
+    }
+
+    pub fn constructor_ref(&self, reference: ObjRef) -> Option<(ClassId, usize)> {
+        match self.heap.get(reference.index()) {
+            Some(HeapObject::ConstructorRef(class, index)) => Some((*class, *index)),
+            _ => None,
+        }
+    }
+
+    /// The class object for a primitive or array type, allocated once per descriptor.
+    pub fn type_class(&mut self, descriptor: &str) -> ObjRef {
+        if let Some(reference) = self.type_classes.get(descriptor) {
+            return *reference;
+        }
+        let reference = self.allocate(HeapObject::TypeClassRef(descriptor.to_owned()));
+        self.type_classes.insert(descriptor.to_owned(), reference);
+        reference
+    }
+
+    /// The descriptor a heap reference names, if it is a primitive or array class object.
+    pub fn type_class_ref(&self, reference: ObjRef) -> Option<&str> {
+        match self.heap.get(reference.index()) {
+            Some(HeapObject::TypeClassRef(descriptor)) => Some(descriptor),
+            _ => None,
+        }
+    }
+
+    /// The class id a heap reference names, if it is a class object.
+    pub fn class_ref(&self, reference: ObjRef) -> Option<ClassId> {
+        match self.heap.get(reference.index()) {
+            Some(HeapObject::ClassRef(class)) => Some(*class),
+            _ => None,
+        }
+    }
+
+    /// The most-invoked methods, highest first, as `(Class.method(descriptor), count)`.
+    pub fn hot_methods(&self, limit: usize) -> Vec<(String, u64)> {
+        let mut entries: Vec<(String, u64)> = self
+            .classes
+            .iter()
+            .flat_map(|class| {
+                class
+                    .methods
+                    .iter()
+                    .zip(class.invocations.iter())
+                    .map(|(method, count)| {
+                        (
+                            format!("{}.{}{}", class.name, method.name, method.descriptor),
+                            *count,
+                        )
+                    })
+            })
+            .filter(|(_, count)| *count > 0)
+            .collect();
+        entries.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        entries.truncate(limit);
+        entries
+    }
+
+    /// Methods invoked at least `threshold` times: the candidates a JIT would compile.
+    pub fn hot_candidates(&self, threshold: u64) -> Vec<(String, u64)> {
+        self.hot_methods(usize::MAX)
+            .into_iter()
+            .filter(|(_, count)| *count >= threshold)
+            .collect()
+    }
+
+    /// Captures the current stack as a trace, innermost frame first.
+    pub fn capture_trace(&mut self, thread: &ThreadState) -> Vec<TraceFrame> {
+        thread
+            .frames
+            .iter()
+            .rev()
+            .map(|frame| {
+                let class = self.class(frame.class);
+                let method = &class.methods[frame.method];
+                TraceFrame {
+                    class: class.name.clone(),
+                    method: method.name.clone(),
+                    // `pc` is the *next* instruction, so the line of the one that threw is the
+                    // previous index.
+                    line: method.line_at(frame.pc.saturating_sub(1) as u32),
+                }
+            })
+            .collect()
+    }
+
+    /// The Java-style report for an uncaught throwable.
+    pub fn describe_throwable(&self, object: ObjRef) -> String {
+        let class_name = self
+            .class_of(object)
+            .map(|class| self.class(class).name.clone())
+            .unwrap_or_else(|| "java/lang/Throwable".to_owned());
+        let mut text = format!(
+            "Exception in thread \"main\" {}",
+            class_name.replace('/', ".")
+        );
+        if let Some(message) = self.throwable_message(object) {
+            text.push_str(": ");
+            text.push_str(&message);
+        }
+        for frame in self.traces.get(&object).into_iter().flatten() {
+            let source = self
+                .class_ids
+                .get(&frame.class)
+                .and_then(|class| self.class(*class).source_file.clone())
+                .unwrap_or_else(|| "Unknown Source".to_owned());
+            text.push_str(&format!(
+                "\n\tat {}.{}({}:{})",
+                frame.class.replace('/', "."),
+                frame.method,
+                source,
+                frame.line
+            ));
+        }
+        text
+    }
+
+    /// The `message` field of a throwable, if it survived to be read.
+    fn throwable_message(&self, object: ObjRef) -> Option<String> {
+        let class = self.class_of(object)?;
+        let slot = self
+            .class(class)
+            .field_slot("message", "Ljava/lang/String;")?;
+        let value = self.instance_field(object, slot).ok()?;
+        match value.as_ref() {
+            Some(reference) => match self.heap.get(reference.index()) {
+                Some(HeapObject::Str(text)) => Some(text.clone()),
+                _ => None,
+            },
+            None => None,
+        }
+    }
+
+    /// Acquires the monitor of `reference`, re-entering if this thread already holds it.
+    pub fn monitor_enter(&mut self, reference: ObjRef, thread: u64) -> Result<(), VmError> {
+        if reference.is_null() {
+            return Err(VmError::Unsupported {
+                feature: "monitorenter",
+                detail: "a null monitor would be a NullPointerException".to_owned(),
+            });
+        }
+        let monitor = self.monitors.entry(reference).or_default();
+        match monitor.owner {
+            None => {
+                monitor.owner = Some(thread);
+                monitor.depth = 1;
+            }
+            Some(owner) if owner == thread => monitor.depth += 1,
+            Some(_) => {
+                // A real VM blocks here. Level 1 has one thread, so this can only be reached
+                // if a future level forgets to wait.
+                return Err(VmError::Unsupported {
+                    feature: "monitor contention",
+                    detail: "blocking for another thread is level 3 (ADR-0012)".to_owned(),
+                });
+            }
+        }
+        Ok(())
+    }
+
+    /// Releases one level of the monitor.
+    pub fn monitor_exit(&mut self, reference: ObjRef, thread: u64) {
+        if let Some(monitor) = self.monitors.get_mut(&reference) {
+            if monitor.owner == Some(thread) {
+                monitor.depth = monitor.depth.saturating_sub(1);
+                if monitor.depth == 0 {
+                    monitor.owner = None;
+                }
+            }
+        }
+    }
+
+    /// Whether `thread` currently holds `reference`'s monitor.
+    pub fn holds_monitor(&self, reference: ObjRef, thread: u64) -> bool {
+        self.monitors
+            .get(&reference)
+            .is_some_and(|monitor| monitor.owner == Some(thread) && monitor.depth > 0)
+    }
+
+    /// Resolves a constant-pool entry that `ldc`/`ldc2_w` can push.
+    ///
+    /// A `CONSTANT_Dynamic` is resolved through the same bootstrap machinery as `invokedynamic`,
+    /// once, and cached on the class: the bootstrap of a dynamic constant is a pure function of
+    /// its arguments, so the value cannot change between executions.
+    pub fn resolve_constant(
+        &mut self,
+        path: &ClassPath,
+        class: ClassId,
+        index: u16,
+    ) -> Result<Value, VmError> {
+        if let Some(value) = self.classes[class.index()].condy.get(&index) {
+            return Ok(*value);
+        }
+        let value = match self
+            .class(class)
+            .file
+            .as_ref()
+            .and_then(|file| file.constant_pool.get(index).ok())
+        {
+            Some(rava_classfile::Constant::Dynamic { .. }) => self.resolve_condy(class, index)?,
+            Some(rava_classfile::Constant::Class { .. }) => {
+                // `Foo.class`: the class object, allocated once so two reads are the same object.
+                // A primitive or array type has no class file, so it becomes a type class object.
+                let name = crate::resolve::class_constant(self.class(class), index)?;
+                if is_type_descriptor(&name) {
+                    Value::Ref(self.type_class(&name))
+                } else {
+                    let target = self.load_class(path, &name)?;
+                    Value::Ref(self.class_object(target))
+                }
+            }
+            _ => {
+                let class_ref = self.class(class);
+                match crate::resolve::constant(class_ref, index)? {
+                    crate::resolve::ConstantValue::Int(value) => Value::Int(value),
+                    crate::resolve::ConstantValue::Float(value) => Value::Float(value),
+                    crate::resolve::ConstantValue::Long(value) => Value::Long(value),
+                    crate::resolve::ConstantValue::Double(value) => Value::Double(value),
+                    crate::resolve::ConstantValue::String(text) => Value::Ref(self.intern(&text)),
+                }
+            }
+        };
+        self.classes[class.index()].condy.insert(index, value);
+        Ok(value)
+    }
+
+    /// Evaluates one `CONSTANT_Dynamic`.
+    fn resolve_condy(&mut self, class: ClassId, index: u16) -> Result<Value, VmError> {
+        let (owner, name) = {
+            let file = self.class(class).file.as_ref().ok_or_else(|| {
+                VmError::BadConstantPool(format!("{} is synthetic", self.class(class).name))
+            })?;
+            let pool = &file.constant_pool;
+            let bootstrap_index = match pool.get(index)? {
+                rava_classfile::Constant::Dynamic {
+                    bootstrap_method_attr_index,
+                    ..
+                } => *bootstrap_method_attr_index,
+                other => {
+                    return Err(VmError::BadConstantPool(format!(
+                        "entry {index} is {other:?}, expected a Dynamic constant"
+                    )));
+                }
+            };
+            let bootstrap = file
+                .bootstrap_methods
+                .get(usize::from(bootstrap_index))
+                .ok_or_else(|| {
+                    VmError::BadConstantPool(format!(
+                        "condy #{index} names bootstrap method {bootstrap_index}, which is absent"
+                    ))
+                })?;
+            crate::indy::bootstrap_target_name(pool, bootstrap)?
+        };
+
+        match (owner.as_str(), name.as_str()) {
+            ("java/lang/invoke/ConstantBootstraps", "nullConstant") => Ok(Value::NULL),
+            _ => Err(VmError::Unsupported {
+                feature: "condy bootstrap",
+                detail: format!("{owner}.{name}"),
+            }),
+        }
+    }
+
+    /// Resolves an `invokedynamic` call site once and caches it on the class.
+    pub fn indy_site(
+        &mut self,
+        path: &ClassPath,
+        class: ClassId,
+        index: u16,
+    ) -> Result<indy::CallSiteInfo, VmError> {
+        if let Some(site) = self.classes[class.index()].indy_sites.get(&index) {
+            return Ok(site.clone());
+        }
+        let resolved = indy::resolve(self, path, class, index)?;
+        self.classes[class.index()]
+            .indy_sites
+            .insert(index, resolved.clone());
+        Ok(resolved)
+    }
+
+    /// Begins initialization and reports the `<clinit>` that must run first, if any.
+    ///
+    /// Single-threaded form of JVMS §5.5: a re-entrant initialization sees `Initializing`
+    /// and returns `AlreadyDone` rather than looping, and a class whose `<clinit>` threw is
+    /// `Erroneous` forever.
+    pub fn begin_initialization(&mut self, id: ClassId) -> Initialization {
+        match self.classes[id.index()].state {
+            ClassState::Uninitialized => {
+                match self.classes[id.index()].method_index("<clinit>", "()V") {
+                    Some(index) => {
+                        self.classes[id.index()].state = ClassState::Initializing;
+                        Initialization::Run(index)
+                    }
+                    None => {
+                        self.classes[id.index()].state = ClassState::Initialized;
+                        Initialization::AlreadyDone
+                    }
+                }
+            }
+            ClassState::Initializing | ClassState::Initialized => Initialization::AlreadyDone,
+            ClassState::Erroneous => Initialization::Erroneous,
+        }
+    }
+
+    pub fn finish_initialization(&mut self, id: ClassId) {
+        self.classes[id.index()].state = ClassState::Initialized;
+    }
+
+    /// Records that `<clinit>` threw: the class stays erroneous (JVMS §5.5).
+    pub fn fail_initialization(&mut self, id: ClassId) {
+        self.classes[id.index()].state = ClassState::Erroneous;
+    }
+}
+
+impl Default for Shared {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Per-thread execution state: call frames and their operand stacks (ADR-0006).
+pub struct ThreadState {
+    pub frames: Vec<Frame>,
+    /// Frames returned when a call returned, ready to be reused. The ceiling experiment (S37)
+    /// found two `Vec` allocations per call were a large part of the call cost; a pooled frame
+    /// allocates only when the pool is empty.
+    pub pool: Vec<Frame>,
+    /// Stable identity, used as the owner of a monitor (ADR-0012).
+    pub id: u64,
+    /// The `java.lang.Thread` object this state is running, if any. `Thread.currentThread()`
+    /// creates one lazily for the main thread.
+    pub current: Option<ObjRef>,
+}
+
+static NEXT_THREAD_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+impl ThreadState {
+    pub fn new() -> Self {
+        Self {
+            frames: Vec::new(),
+            pool: Vec::new(),
+            id: NEXT_THREAD_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            current: None,
+        }
+    }
+}
+
+impl Default for ThreadState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+pub struct Frame {
+    pub class: ClassId,
+    pub method: usize,
+    pub pc: usize,
+    pub locals: Vec<Value>,
+    pub stack: Vec<Value>,
+}
+
+/// How many returned frames a thread keeps for reuse.
+const FRAME_POOL_LIMIT: usize = 64;
+
+impl ThreadState {
+    /// A frame for a new call, reusing a pooled one when there is one.
+    ///
+    /// A reused frame's locals are reset to `null`, not left as they were: a stale reference in a
+    /// local is a value the program could read, and (if the pool were ever scanned) a GC root that
+    /// should not exist.
+    pub fn take_frame(&mut self, class: ClassId, method: usize, max_locals: usize) -> Frame {
+        match self.pool.pop() {
+            Some(mut frame) => {
+                frame.class = class;
+                frame.method = method;
+                frame.pc = 0;
+                frame.locals.clear();
+                frame.locals.resize(max_locals, Value::NULL);
+                frame.stack.clear();
+                frame
+            }
+            None => Frame {
+                class,
+                method,
+                pc: 0,
+                locals: vec![Value::NULL; max_locals],
+                stack: Vec::new(),
+            },
+        }
+    }
+
+    /// Returns a finished frame to the pool, or drops it when the pool is full.
+    pub fn recycle_frame(&mut self, mut frame: Frame) {
+        if self.pool.len() >= FRAME_POOL_LIMIT {
+            return;
+        }
+        // Keep the capacity, drop every value: the next call starts from `null` locals.
+        frame.locals.clear();
+        frame.stack.clear();
+        self.pool.push(frame);
+    }
+}
+
+/// Invokes Java code from a native method.
+///
+/// Defined here so `rava-native` depends on this crate alone (ADR-0002). S3's natives do
+/// not call back into Java; the first one that does (any `toString` on an object) will
+/// take this parameter.
+pub trait JavaCall {
+    fn invoke(
+        &mut self,
+        shared: &mut Shared,
+        target: &str,
+        name: &str,
+        descriptor: &str,
+        args: &[Value],
+    ) -> Result<Value, VmError>;
+}
+
+impl Shared {
+    pub fn register_native(
+        &mut self,
+        owner: &str,
+        name: &str,
+        descriptor: &str,
+        function: NativeFn,
+    ) {
+        self.natives
+            .insert(native::key(owner, name, descriptor), function);
+    }
+
+    /// A `String[]` holding fresh strings for `main`'s arguments.
+    pub fn string_array(&mut self, values: &[String]) -> ObjRef {
+        let elements: Vec<Value> = values
+            .iter()
+            .map(|value| Value::Ref(self.new_string(value.clone())))
+            .collect();
+        self.allocate(HeapObject::Array(Array {
+            kind: ArrayKind::Reference,
+            elements,
+        }))
+    }
+
+    pub fn array(&self, reference: ObjRef) -> Result<&Array, VmError> {
+        match self.heap.get(reference.index()) {
+            Some(HeapObject::Array(array)) => Ok(array),
+            Some(_) => Err(VmError::TypeMismatch {
+                expected: "an array reference",
+                found: Value::Ref(reference),
+            }),
+            None => Err(VmError::Native(format!("dangling reference {reference:?}"))),
+        }
+    }
+
+    pub fn array_mut(&mut self, reference: ObjRef) -> Result<&mut Array, VmError> {
+        match self.heap.get_mut(reference.index()) {
+            Some(HeapObject::Array(array)) => Ok(array),
+            Some(_) => Err(VmError::TypeMismatch {
+                expected: "an array reference",
+                found: Value::Ref(reference),
+            }),
+            None => Err(VmError::Native(format!("dangling reference {reference:?}"))),
+        }
+    }
+
+    /// The runtime class of a reference: the instance's class for objects, the library
+    /// class for the strings and builders the VM owns storage for.
+    pub fn class_of(&self, reference: ObjRef) -> Option<ClassId> {
+        match self.heap.get(reference.index())? {
+            HeapObject::Instance(instance) => Some(instance.class),
+            HeapObject::Str(_) => self.class_ids.get("java/lang/String").copied(),
+            HeapObject::Builder(_) => self.class_ids.get("java/lang/StringBuilder").copied(),
+            HeapObject::Array(_)
+            | HeapObject::Lambda(_)
+            | HeapObject::ClassRef(_)
+            | HeapObject::FieldRef(_, _)
+            | HeapObject::MethodRef(_, _)
+            | HeapObject::ConstructorRef(_, _)
+            | HeapObject::TypeClassRef(_)
+            | HeapObject::Null
+            | HeapObject::Free => None,
+        }
+    }
+
+    /// Allocates an instance whose field vector matches the class layout.
+    pub fn new_instance(&mut self, class: ClassId) -> ObjRef {
+        let fields = self.classes[class.index()]
+            .layout
+            .iter()
+            .map(|slot| Value::default_for(&slot.descriptor))
+            .collect();
+        self.allocate(HeapObject::Instance(Instance { class, fields }))
+    }
+
+    pub fn instance_field(&self, reference: ObjRef, slot: usize) -> Result<Value, VmError> {
+        match self.heap.get(reference.index()) {
+            Some(HeapObject::Instance(instance)) => {
+                instance
+                    .fields
+                    .get(slot)
+                    .copied()
+                    .ok_or_else(|| VmError::FieldNotFound {
+                        class: "<instance>".to_owned(),
+                        name: format!("slot {slot}"),
+                    })
+            }
+            Some(_) => Err(VmError::TypeMismatch {
+                expected: "an object reference",
+                found: Value::Ref(reference),
+            }),
+            None => Err(VmError::Native(format!("dangling reference {reference:?}"))),
+        }
+    }
+
+    pub fn set_instance_field(
+        &mut self,
+        reference: ObjRef,
+        slot: usize,
+        value: Value,
+    ) -> Result<(), VmError> {
+        match self.heap.get_mut(reference.index()) {
+            Some(HeapObject::Instance(instance)) => {
+                let cell = instance
+                    .fields
+                    .get_mut(slot)
+                    .ok_or_else(|| VmError::FieldNotFound {
+                        class: "<instance>".to_owned(),
+                        name: format!("slot {slot}"),
+                    })?;
+                *cell = value;
+                Ok(())
+            }
+            Some(_) => Err(VmError::TypeMismatch {
+                expected: "an object reference",
+                found: Value::Ref(reference),
+            }),
+            None => Err(VmError::Native(format!("dangling reference {reference:?}"))),
+        }
+    }
+
+    /// A zero-length array of references, used for `main`'s argument array.
+    pub fn empty_reference_array(&mut self) -> ObjRef {
+        self.allocate(HeapObject::Array(Array {
+            kind: ArrayKind::Reference,
+            elements: Vec::new(),
+        }))
+    }
+
+    /// The payload of a `StringBuilder` instance.
+    pub fn builder(&self, reference: ObjRef) -> Result<&str, VmError> {
+        match self.heap.get(reference.index()) {
+            Some(HeapObject::Builder(text)) => Ok(text),
+            Some(other) => Err(VmError::Native(format!(
+                "expected a StringBuilder, got {other:?}"
+            ))),
+            None => Err(VmError::Native(format!("dangling reference {reference:?}"))),
+        }
+    }
+
+    pub fn builder_mut(&mut self, reference: ObjRef) -> Result<&mut String, VmError> {
+        match self.heap.get_mut(reference.index()) {
+            Some(HeapObject::Builder(text)) => Ok(text),
+            Some(other) => Err(VmError::Native(format!(
+                "expected a StringBuilder, got {other:?}"
+            ))),
+            None => Err(VmError::Native(format!("dangling reference {reference:?}"))),
+        }
+    }
+
+    /// Allocates a `String` object, with interning only where the JVM requires it.
+    pub fn new_string(&mut self, text: String) -> ObjRef {
+        self.allocate(HeapObject::Str(text))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn collection_keeps_roots_and_frees_the_rest() {
+        let mut shared = Shared::new();
+        let thread = ThreadState::new();
+
+        // Interned strings are roots.
+        let kept = shared.intern("kept");
+        let orphan = shared.new_string("orphan".to_owned());
+
+        let stats = shared.collect(&thread);
+        assert_eq!(stats.freed, 1, "only the orphan is unreachable");
+        assert!(matches!(shared.heap[orphan.index()], HeapObject::Free));
+        assert!(matches!(shared.heap[kept.index()], HeapObject::Str(_)));
+
+        // The freed slot is reused, which is why a stale reference is a bug the VM cannot
+        // detect: the index stays valid and now names a different object.
+        let reused = shared.new_string("reused".to_owned());
+        assert_eq!(reused, orphan);
+    }
+
+    #[test]
+    fn collection_follows_references_from_objects_and_arrays() {
+        let mut shared = Shared::new();
+        let thread = ThreadState::new();
+
+        let inner = shared.new_string("inner".to_owned());
+        let _orphan = shared.allocate(HeapObject::Array(Array {
+            kind: ArrayKind::Reference,
+            elements: vec![Value::Ref(inner)],
+        }));
+        // The array is not a root, so both it and `inner` go; then make one reachable and
+        // prove the walk keeps its element alive.
+        let stats = shared.collect(&thread);
+        assert_eq!(stats.freed, 2);
+
+        let inner = shared.new_string("inner".to_owned());
+        let outer = shared.allocate(HeapObject::Array(Array {
+            kind: ArrayKind::Reference,
+            elements: vec![Value::Ref(inner)],
+        }));
+        shared.interned.insert("root".to_owned(), outer);
+
+        let stats = shared.collect(&thread);
+        assert_eq!(
+            stats.freed, 0,
+            "the array is a root and the string is reachable from it"
+        );
+        assert!(matches!(shared.heap[inner.index()], HeapObject::Str(_)));
+    }
+}
+
+/// Whether a `CONSTANT_Class` name is a primitive or array descriptor rather than a binary name.
+pub fn is_type_descriptor(name: &str) -> bool {
+    if name.starts_with('[') {
+        return true;
+    }
+    matches!(name, "I" | "J" | "F" | "D" | "Z" | "B" | "C" | "S" | "V")
+}
+
+/// `Class.getName` for a type descriptor: `int`, `[Ljava.lang.String;`, `[[I`.
+pub fn type_name(descriptor: &str) -> String {
+    match descriptor {
+        "I" => "int".to_owned(),
+        "J" => "long".to_owned(),
+        "F" => "float".to_owned(),
+        "D" => "double".to_owned(),
+        "Z" => "boolean".to_owned(),
+        "B" => "byte".to_owned(),
+        "C" => "char".to_owned(),
+        "S" => "short".to_owned(),
+        "V" => "void".to_owned(),
+        array => array.replace('/', "."),
+    }
+}
