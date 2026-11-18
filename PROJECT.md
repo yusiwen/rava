@@ -144,4 +144,6 @@ A slice is done only when all of the following hold:
    `## Environments` is the intended remote, not a live one.
 5. **A JIT is planned, not refused** (ADR-0013): it starts after M5, with one hot method and
    the interpreter as the oracle. It is not on the critical path, so nothing blocks on it.
-6. Known blockers: none.
+6. **The native report is #2**, to land after S7: it answers "which JCL natives does this
+   program need, and which are missing?" without running it. Tooling, not a milestone slice.
+7. Known blockers: none.
