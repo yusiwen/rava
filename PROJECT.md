@@ -39,7 +39,8 @@ and milestones M0–M5 are planned but not built. `scripts/workflow-check.sh` ru
 | M3 | Real threads and monitors | — | todo | ADR-0010 |
 | M4 | `MethodHandle`, `VarHandle`, `Unsafe` | — | todo | ADR-0012 |
 | M5 | Breadth: `java.util`, `java.io`, `java.nio`; a real jar | — | todo | — |
-| — | Deferred: a JIT, JNI for third-party natives, Java SE certification | — | deferred | requirements § Non-goals |
+| G1 | A JIT: compile one hot method, with the interpreter as the fallback and the oracle | — | deferred | requirements § Deferred goals, ADR-0013 |
+| — | Deferred non-goals: JNI for third-party natives, Java SE certification | — | deferred | requirements § Non-goals |
 
 ## Definition of Done
 
@@ -113,6 +114,7 @@ A slice is done only when all of the following hold:
 | [0010](docs/adr/0010-real-threads.md) | Real OS threads and monitors, not serialized `Thread.start` | accepted |
 | [0011](docs/adr/0011-verifier-scope.md) | Structural verification first; type checking only when needed | accepted |
 | [0012](docs/adr/0012-invokedynamic.md) | Bootstraps by name first; real method handles at M4 | accepted |
+| [0013](docs/adr/0013-jit-after-interpreter.md) | A JIT is a deferred goal after M5, with the interpreter as the oracle | accepted |
 
 ## Environments
 
@@ -140,4 +142,6 @@ A slice is done only when all of the following hold:
 4. **The previous project is archived** at `/home/yusiwen/git/jvm` and is read-only history.
    The GitHub repository is deleted and recreated by the human; the local origin in
    `## Environments` is the intended remote, not a live one.
-5. Known blockers: none.
+5. **A JIT is planned, not refused** (ADR-0013): it starts after M5, with one hot method and
+   the interpreter as the oracle. It is not on the critical path, so nothing blocks on it.
+6. Known blockers: none.

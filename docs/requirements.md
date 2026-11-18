@@ -127,8 +127,6 @@ None.
   run. Reversing it takes a superseding ADR.
 - **Shipping a class library.** `java.*` is the host's (ADR-0001). A committed copy would
   change the model and is refused by `scripts/check-invariants.sh`.
-- **A JIT.** The interpreter is the readable artefact; a compiler is a later, separate
-  decision with a measurement behind it.
 - **Java SE certification.** The success criterion is the differential tests, not a
   compatibility badge.
 - **Running arbitrary frameworks as a goal.** Programs are chosen for what they exercise, not
@@ -144,6 +142,27 @@ None.
 | M3 | Real threads and monitors | M2 |
 | M4 | `MethodHandle`, `VarHandle`, `Unsafe` | M3 |
 | M5 | Breadth: `java.util`, `java.io`, `java.nio`; a real jar | M4 |
+
+## Deferred goals
+
+> Committed in direction, not yet scheduled. A deferred goal is work the project intends to do,
+> with the increment that would prove it started; a non-goal is work it will not do.
+
+### G1 — A JIT compiler
+
+- **Goal:** compile the methods the interpreter spends its time in, and fall back to the
+  interpreter everywhere else.
+- **Why deferred:** the interpreter is the readable artefact and the oracle a compiler is
+  checked against; compiling before the VM runs real programs would optimise code that cannot
+  yet execute. It is also the largest single subsystem after the hosted library's native
+  surface.
+- **Priority:** after M5. The first increment is narrow: compile one hot method's body, keep
+  the interpreter as the fallback, and prove the compiled path produces the same output as the
+  interpreter on the same program.
+- **Trigger:** a measurement showing the interpreter is the bottleneck for a program the VM
+  already runs, and a target worth the complexity. The measurement is the entry condition, not
+  the decision: ADR-0013 records the plan.
+- **Risk if the VM never gets there:** none. M5 is a complete, useful VM without a compiler.
 
 ## Constraints
 

@@ -72,11 +72,12 @@ cargo run -p rava-cli -- run Foo --home <jdk> --cp out     # execute main
 - **JNI.** The library's natives are implemented in Rust (ADR-0005). Third-party native
   libraries are out of scope, because supporting them means exposing an object layout and a C
   ABI the VM does not want.
-- **A JIT.** Deferred until the interpreter is the measured bottleneck; the interpreter is
-  the readable artefact.
 - **A shipped class library.** `java.*` is the host's, not ours.
 - **Java SE certification.** The target is a VM that runs real programs, not a
   compatibility badge.
+
+A JIT is not absent, only unscheduled: it is goal **G1**, to start after M5 with the
+interpreter as its oracle ([ADR-0013](docs/adr/0013-jit-after-interpreter.md)).
 
 ## Where the thinking lives
 

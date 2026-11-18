@@ -27,7 +27,7 @@ If a fact is missing, add it to the document that owns it instead of creating a 
 `0001` host the reference class library · `0002` crate boundaries · `0003` load-time
 decoding · `0004` heap-index references · `0005` JCL natives in Rust · `0006` class
 identity by loader · `0007` licence · `0008` target version and the image · `0009`
-collector · `0010` real threads · `0011` verifier scope · `0012` invokedynamic.
+collector · `0010` real threads · `0011` verifier scope · `0012` invokedynamic · `0013` JIT deferred.
 
 ## Commands
 
