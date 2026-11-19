@@ -260,7 +260,7 @@ fn run_frame(
                 | Instr::Fstore(slot)
                 | Instr::Dstore(slot)
                 | Instr::Astore(slot) => {
-                    let value = pop(&mut thread.frames[frame_index], &qualified, code)?;
+                    let value = pop(&mut thread.frames[frame_index], qualified, code)?;
                     let target = thread.frames[frame_index]
                         .locals
                         .get_mut(usize::from(slot))
@@ -273,14 +273,14 @@ fn run_frame(
                 }
 
                 Instr::Pop => {
-                    pop(&mut thread.frames[frame_index], &qualified, code)?;
+                    pop(&mut thread.frames[frame_index], qualified, code)?;
                 }
                 Instr::Pop2 => {
                     // Our stack holds one value per Java value, so a long or double is one
                     // entry and `pop2` must not pop it twice.
-                    let value = pop(&mut thread.frames[frame_index], &qualified, code)?;
+                    let value = pop(&mut thread.frames[frame_index], qualified, code)?;
                     if !matches!(value, Value::Long(_) | Value::Double(_)) {
-                        pop(&mut thread.frames[frame_index], &qualified, code)?;
+                        pop(&mut thread.frames[frame_index], qualified, code)?;
                     }
                 }
                 Instr::Dup => {
@@ -295,23 +295,23 @@ fn run_frame(
                 }
 
                 Instr::BinOp(op) => {
-                    let rhs = pop(&mut thread.frames[frame_index], &qualified, code)?;
-                    let lhs = pop(&mut thread.frames[frame_index], &qualified, code)?;
+                    let rhs = pop(&mut thread.frames[frame_index], qualified, code)?;
+                    let lhs = pop(&mut thread.frames[frame_index], qualified, code)?;
                     let value =
                         binary(op, lhs, rhs).map_err(|error| fault(shared, thread, path, error))?;
                     thread.frames[frame_index].stack.push(value);
                 }
                 Instr::UnOp(op) => {
-                    let value = pop(&mut thread.frames[frame_index], &qualified, code)?;
+                    let value = pop(&mut thread.frames[frame_index], qualified, code)?;
                     thread.frames[frame_index].stack.push(unary(op, value)?);
                 }
                 Instr::Convert(op) => {
-                    let value = pop(&mut thread.frames[frame_index], &qualified, code)?;
+                    let value = pop(&mut thread.frames[frame_index], qualified, code)?;
                     thread.frames[frame_index].stack.push(convert(op, value)?);
                 }
                 Instr::Compare(op) => {
-                    let rhs = pop(&mut thread.frames[frame_index], &qualified, code)?;
-                    let lhs = pop(&mut thread.frames[frame_index], &qualified, code)?;
+                    let rhs = pop(&mut thread.frames[frame_index], qualified, code)?;
+                    let lhs = pop(&mut thread.frames[frame_index], qualified, code)?;
                     thread.frames[frame_index]
                         .stack
                         .push(compare(op, lhs, rhs)?);
@@ -335,110 +335,110 @@ fn run_frame(
 
                 Instr::IfEq(target) => branch_eq(
                     &mut thread.frames[frame_index],
-                    &qualified,
+                    qualified,
                     code,
                     target,
                     true,
                 )?,
                 Instr::IfNe(target) => branch_eq(
                     &mut thread.frames[frame_index],
-                    &qualified,
+                    qualified,
                     code,
                     target,
                     false,
                 )?,
                 Instr::IfLt(target) => branch_cmp_zero(
                     &mut thread.frames[frame_index],
-                    &qualified,
+                    qualified,
                     code,
                     target,
                     |v| v < 0,
                 )?,
                 Instr::IfGe(target) => branch_cmp_zero(
                     &mut thread.frames[frame_index],
-                    &qualified,
+                    qualified,
                     code,
                     target,
                     |v| v >= 0,
                 )?,
                 Instr::IfGt(target) => branch_cmp_zero(
                     &mut thread.frames[frame_index],
-                    &qualified,
+                    qualified,
                     code,
                     target,
                     |v| v > 0,
                 )?,
                 Instr::IfLe(target) => branch_cmp_zero(
                     &mut thread.frames[frame_index],
-                    &qualified,
+                    qualified,
                     code,
                     target,
                     |v| v <= 0,
                 )?,
                 Instr::IfICmpEq(target) => branch_icmp(
                     &mut thread.frames[frame_index],
-                    &qualified,
+                    qualified,
                     code,
                     target,
                     |a, b| a == b,
                 )?,
                 Instr::IfICmpNe(target) => branch_icmp(
                     &mut thread.frames[frame_index],
-                    &qualified,
+                    qualified,
                     code,
                     target,
                     |a, b| a != b,
                 )?,
                 Instr::IfICmpLt(target) => branch_icmp(
                     &mut thread.frames[frame_index],
-                    &qualified,
+                    qualified,
                     code,
                     target,
                     |a, b| a < b,
                 )?,
                 Instr::IfICmpGe(target) => branch_icmp(
                     &mut thread.frames[frame_index],
-                    &qualified,
+                    qualified,
                     code,
                     target,
                     |a, b| a >= b,
                 )?,
                 Instr::IfICmpGt(target) => branch_icmp(
                     &mut thread.frames[frame_index],
-                    &qualified,
+                    qualified,
                     code,
                     target,
                     |a, b| a > b,
                 )?,
                 Instr::IfICmpLe(target) => branch_icmp(
                     &mut thread.frames[frame_index],
-                    &qualified,
+                    qualified,
                     code,
                     target,
                     |a, b| a <= b,
                 )?,
                 Instr::IfACmpEq(target) => {
-                    let rhs = pop_ref(&mut thread.frames[frame_index], &qualified, code)?;
-                    let lhs = pop_ref(&mut thread.frames[frame_index], &qualified, code)?;
+                    let rhs = pop_ref(&mut thread.frames[frame_index], qualified, code)?;
+                    let lhs = pop_ref(&mut thread.frames[frame_index], qualified, code)?;
                     if lhs == rhs {
                         thread.frames[frame_index].pc = target as usize;
                     }
                 }
                 Instr::IfACmpNe(target) => {
-                    let rhs = pop_ref(&mut thread.frames[frame_index], &qualified, code)?;
-                    let lhs = pop_ref(&mut thread.frames[frame_index], &qualified, code)?;
+                    let rhs = pop_ref(&mut thread.frames[frame_index], qualified, code)?;
+                    let lhs = pop_ref(&mut thread.frames[frame_index], qualified, code)?;
                     if lhs != rhs {
                         thread.frames[frame_index].pc = target as usize;
                     }
                 }
                 Instr::IfNull(target) => {
-                    let reference = pop_ref(&mut thread.frames[frame_index], &qualified, code)?;
+                    let reference = pop_ref(&mut thread.frames[frame_index], qualified, code)?;
                     if reference.is_null() {
                         thread.frames[frame_index].pc = target as usize;
                     }
                 }
                 Instr::IfNonNull(target) => {
-                    let reference = pop_ref(&mut thread.frames[frame_index], &qualified, code)?;
+                    let reference = pop_ref(&mut thread.frames[frame_index], qualified, code)?;
                     if !reference.is_null() {
                         thread.frames[frame_index].pc = target as usize;
                     }
@@ -446,7 +446,7 @@ fn run_frame(
                 Instr::Goto(target) => thread.frames[frame_index].pc = target as usize,
 
                 Instr::TableSwitch(table) => {
-                    let key = pop_int(&mut thread.frames[frame_index], &qualified, code)?;
+                    let key = pop_int(&mut thread.frames[frame_index], qualified, code)?;
                     let table = &code.switches[usize::from(table)];
                     let target = table
                         .cases
@@ -457,7 +457,7 @@ fn run_frame(
                     thread.frames[frame_index].pc = target as usize;
                 }
                 Instr::LookupSwitch(table) => {
-                    let key = pop_int(&mut thread.frames[frame_index], &qualified, code)?;
+                    let key = pop_int(&mut thread.frames[frame_index], qualified, code)?;
                     let table = &code.switches[usize::from(table)];
                     let target = table
                         .cases
@@ -468,7 +468,7 @@ fn run_frame(
                 }
 
                 Instr::ArrayLength => {
-                    let reference = pop_ref(&mut thread.frames[frame_index], &qualified, code)?;
+                    let reference = pop_ref(&mut thread.frames[frame_index], qualified, code)?;
                     null_check(shared, thread, path, reference)?;
                     let length = shared.array(reference)?.elements.len();
                     thread.frames[frame_index]
@@ -476,8 +476,8 @@ fn run_frame(
                         .push(Value::Int(length as i32));
                 }
                 Instr::ArrayLoad(kind) => {
-                    let index = pop_int(&mut thread.frames[frame_index], &qualified, code)?;
-                    let reference = pop_ref(&mut thread.frames[frame_index], &qualified, code)?;
+                    let index = pop_int(&mut thread.frames[frame_index], qualified, code)?;
+                    let reference = pop_ref(&mut thread.frames[frame_index], qualified, code)?;
                     let array = shared.array(reference)?;
                     if !array.kind.accepts(kind) {
                         return Err(VmError::TypeMismatch {
@@ -496,9 +496,9 @@ fn run_frame(
                     thread.frames[frame_index].stack.push(element);
                 }
                 Instr::ArrayStore(kind) => {
-                    let value = pop(&mut thread.frames[frame_index], &qualified, code)?;
-                    let index = pop_int(&mut thread.frames[frame_index], &qualified, code)?;
-                    let reference = pop_ref(&mut thread.frames[frame_index], &qualified, code)?;
+                    let value = pop(&mut thread.frames[frame_index], qualified, code)?;
+                    let index = pop_int(&mut thread.frames[frame_index], qualified, code)?;
+                    let reference = pop_ref(&mut thread.frames[frame_index], qualified, code)?;
                     null_check(shared, thread, path, reference)?;
                     let length = {
                         let array = shared.array_mut(reference)?;
@@ -527,7 +527,7 @@ fn run_frame(
                     }
                 }
                 Instr::NewArray(atype) => {
-                    let length = pop_int(&mut thread.frames[frame_index], &qualified, code)?;
+                    let length = pop_int(&mut thread.frames[frame_index], qualified, code)?;
                     let kind = newarray_kind(atype)?;
                     let reference = allocate_array_checked(shared, thread, path, kind, length)?;
                     thread.frames[frame_index].stack.push(Value::Ref(reference));
@@ -535,7 +535,7 @@ fn run_frame(
                 Instr::ANewArray(_constant) => {
                     // The element class is not needed until `instanceof` and `checkcast` exist;
                     // the array itself only has to be a reference array of the right length.
-                    let length = pop_int(&mut thread.frames[frame_index], &qualified, code)?;
+                    let length = pop_int(&mut thread.frames[frame_index], qualified, code)?;
                     let reference =
                         allocate_array_checked(shared, thread, path, ArrayKind::Reference, length)?;
                     thread.frames[frame_index].stack.push(Value::Ref(reference));
@@ -546,7 +546,7 @@ fn run_frame(
                 } => {
                     let mut dims = Vec::with_capacity(usize::from(dimensions));
                     for _ in 0..dimensions {
-                        dims.push(pop_int(&mut thread.frames[frame_index], &qualified, code)?);
+                        dims.push(pop_int(&mut thread.frames[frame_index], qualified, code)?);
                     }
                     dims.reverse();
                     // Any negative dimension is the same exception, raised before anything is
@@ -584,7 +584,7 @@ fn run_frame(
                     let field = resolve::field_ref(shared.class(class), constant)?;
                     let owner = shared.load_class(path, &field.class_name)?;
                     ensure_initialized(shared, thread, path, owner)?;
-                    let value = pop(&mut thread.frames[frame_index], &qualified, code)?;
+                    let value = pop(&mut thread.frames[frame_index], qualified, code)?;
                     shared.classes[owner.index()]
                         .statics
                         .insert(field.name, value);
@@ -600,13 +600,13 @@ fn run_frame(
                             class: field.class_name.clone(),
                             name: field.name.clone(),
                         })?;
-                    let receiver = pop_ref(&mut thread.frames[frame_index], &qualified, code)?;
+                    let receiver = pop_ref(&mut thread.frames[frame_index], qualified, code)?;
                     null_check(shared, thread, path, receiver)?;
                     let value = shared.instance_field(receiver, slot)?;
                     thread.frames[frame_index].stack.push(value);
                 }
                 Instr::PutField(constant) => {
-                    let value = pop(&mut thread.frames[frame_index], &qualified, code)?;
+                    let value = pop(&mut thread.frames[frame_index], qualified, code)?;
                     let field = resolve::field_ref(shared.class(class), constant)?;
                     let declaring = shared.load_class(path, &field.class_name)?;
                     let slot = shared
@@ -616,7 +616,7 @@ fn run_frame(
                             class: field.class_name.clone(),
                             name: field.name.clone(),
                         })?;
-                    let receiver = pop_ref(&mut thread.frames[frame_index], &qualified, code)?;
+                    let receiver = pop_ref(&mut thread.frames[frame_index], qualified, code)?;
                     null_check(shared, thread, path, receiver)?;
                     shared.set_instance_field(receiver, slot, value)?;
                 }
@@ -652,7 +652,7 @@ fn run_frame(
                         let args = drain(
                             &mut thread.frames[frame_index],
                             call.params,
-                            &qualified,
+                            qualified,
                             code,
                         )?;
                         let result = invoke(shared, thread, path, call.class, call.method, args)?;
@@ -682,7 +682,7 @@ fn run_frame(
                             .and_then(|receiver_class| site.targets.get(&receiver_class).copied());
                         if let Some((target_class, target_method)) = target {
                             let args =
-                                drain(&mut thread.frames[frame_index], params, &qualified, code)?;
+                                drain(&mut thread.frames[frame_index], params, qualified, code)?;
                             let result =
                                 invoke(shared, thread, path, target_class, target_method, args)?;
                             if returns_value {
@@ -701,7 +701,7 @@ fn run_frame(
                     if !is_static {
                         count += 1; // the receiver
                     }
-                    let args = drain(&mut thread.frames[frame_index], count, &qualified, code)?;
+                    let args = drain(&mut thread.frames[frame_index], count, qualified, code)?;
                     if !is_static && let Some(Value::Ref(receiver)) = args.first().copied() {
                         null_check(shared, thread, path, receiver)?;
                     }
@@ -799,7 +799,7 @@ fn run_frame(
                 }
 
                 Instr::MonitorEnter => {
-                    let reference = pop_ref(&mut thread.frames[frame_index], &qualified, code)?;
+                    let reference = pop_ref(&mut thread.frames[frame_index], qualified, code)?;
                     if reference.is_null() {
                         return Err(new_exception(
                             shared,
@@ -812,13 +812,13 @@ fn run_frame(
                     shared.monitor_enter(reference, thread.id)?;
                 }
                 Instr::MonitorExit => {
-                    let reference = pop_ref(&mut thread.frames[frame_index], &qualified, code)?;
+                    let reference = pop_ref(&mut thread.frames[frame_index], qualified, code)?;
                     shared.monitor_exit(reference, thread.id);
                 }
                 Instr::InstanceOf(constant) => {
                     let target = resolve::class_constant(shared.class(class), constant)?;
                     let target_id = shared.load_class(path, &target)?;
-                    let result = match pop(&mut thread.frames[frame_index], &qualified, code)? {
+                    let result = match pop(&mut thread.frames[frame_index], qualified, code)? {
                         Value::Ref(reference) if !reference.is_null() => {
                             match shared.class_of(reference) {
                                 Some(actual) => is_instance_of(shared, actual, target_id),
@@ -835,7 +835,7 @@ fn run_frame(
                 Instr::CheckCast(constant) => {
                     let target = resolve::class_constant(shared.class(class), constant)?;
                     let target_id = shared.load_class(path, &target)?;
-                    let value = pop(&mut thread.frames[frame_index], &qualified, code)?;
+                    let value = pop(&mut thread.frames[frame_index], qualified, code)?;
                     let allowed = match value {
                         Value::Ref(reference) if !reference.is_null() => {
                             match shared.class_of(reference) {
@@ -864,7 +864,7 @@ fn run_frame(
                             let count = resolve::parameter_count(&call_site.descriptor);
                             let mut args = Vec::with_capacity(count);
                             for _ in 0..count {
-                                args.push(pop(&mut thread.frames[frame_index], &qualified, code)?);
+                                args.push(pop(&mut thread.frames[frame_index], qualified, code)?);
                             }
                             args.reverse();
                             let text = render_concat(shared, &recipe, &args)?;
@@ -880,7 +880,7 @@ fn run_frame(
                             for _ in 0..count {
                                 captured.push(pop(
                                     &mut thread.frames[frame_index],
-                                    &qualified,
+                                    qualified,
                                     code,
                                 )?);
                             }
@@ -900,7 +900,7 @@ fn run_frame(
                             let value = execute_record_method(
                                 shared,
                                 &mut thread.frames[frame_index],
-                                &qualified,
+                                qualified,
                                 code,
                                 kind,
                                 &class_name,
@@ -910,8 +910,8 @@ fn run_frame(
                         }
                         rava_vm::CallSite::TypeSwitch { cases } => {
                             // Stack order is `value, start` (JVMS `typeSwitch`'s method type).
-                            let start = pop(&mut thread.frames[frame_index], &qualified, code)?;
-                            let selector = pop(&mut thread.frames[frame_index], &qualified, code)?;
+                            let start = pop(&mut thread.frames[frame_index], qualified, code)?;
+                            let selector = pop(&mut thread.frames[frame_index], qualified, code)?;
                             let start = match start {
                                 Value::Int(value) => value.max(0) as usize,
                                 other => {
@@ -962,16 +962,14 @@ fn run_frame(
                     }
                 }
                 Instr::Ireturn => {
-                    return pop(&mut thread.frames[frame_index], &qualified, code)
-                        .map(Step::Return);
+                    return pop(&mut thread.frames[frame_index], qualified, code).map(Step::Return);
                 }
                 Instr::Lreturn | Instr::Freturn | Instr::Dreturn | Instr::Areturn => {
-                    return pop(&mut thread.frames[frame_index], &qualified, code)
-                        .map(Step::Return);
+                    return pop(&mut thread.frames[frame_index], qualified, code).map(Step::Return);
                 }
                 Instr::Return => return Ok(Step::Return(Value::NULL)),
                 Instr::Athrow => {
-                    let object = pop_ref(&mut thread.frames[frame_index], &qualified, code)?;
+                    let object = pop_ref(&mut thread.frames[frame_index], qualified, code)?;
                     if object.is_null() {
                         return Err(new_exception(
                             shared,

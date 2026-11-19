@@ -291,7 +291,7 @@ pub fn resolve(
             let target_class = shared.load_class(path, &owner)?;
             let (target_class, target_method) = shared
                 .resolve_method(target_class, &name, &descriptor)
-                .ok_or_else(|| VmError::MethodNotFound {
+                .ok_or(VmError::MethodNotFound {
                     class: owner,
                     name,
                     descriptor,

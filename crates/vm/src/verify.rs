@@ -218,9 +218,9 @@ pub fn verify(code: &Code, class: &crate::Class, qualified: &str) -> Result<(), 
     // Seeding it is what makes a handler body that assumes an empty stack fail, which is the one
     // type rule a depth checker can afford (ADR-0014).
     for handler in &code.handlers {
-        let start = handler.start as usize;
-        let end = handler.end as usize;
-        let target = handler.handler as usize;
+        let start = handler.start;
+        let end = handler.end;
+        let target = handler.handler;
         if start >= end || end > count || target >= count {
             return Err(VmError::BadConstantPool(format!(
                 "{qualified}: handler [{start}..{end}) -> {target} does not name real instructions"
