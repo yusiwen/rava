@@ -8,6 +8,11 @@
 //!
 //! `str::from_utf8` rejects both forms, which is why this decoder exists instead of a
 //! convenience call.
+//!
+//! One more difference is forced by Rust rather than by the format: a class file may store a
+//! *lone* surrogate (JVMS §4.4.7 allows any U+0800..U+FFFF in three bytes, and
+//! `sun.nio.cs.GB18030` does), while a `String` cannot hold one. Such a character decodes to
+//! U+FFFD — lossy, but names are never surrogates and only string constants are affected.
 
 use crate::error::Error;
 
@@ -50,29 +55,37 @@ pub fn decode(bytes: &[u8], index: u16) -> Result<String, Error> {
                 | u32::from(b2 & 0x3F);
 
             if (0xD800..=0xDBFF).contains(&cp) {
-                // High surrogate: a low surrogate must follow, and the pair encodes
-                // one supplementary code point.
-                let b3 = *bytes.get(i + 3).ok_or_else(|| bad(i))?;
-                let b4 = *bytes.get(i + 4).ok_or_else(|| bad(i))?;
-                let b5 = *bytes.get(i + 5).ok_or_else(|| bad(i))?;
-                if b3 & 0xF0 != 0xE0 || b4 & 0xC0 != 0x80 || b5 & 0xC0 != 0x80 {
-                    return Err(bad(i));
+                // High surrogate: if a low surrogate follows, the pair is one supplementary
+                // code point. A lone surrogate is legal in a class file (JVMS §4.4.7 allows
+                // any U+0800..U+FFFF in three bytes) but not representable in a Rust `String`,
+                // so it becomes U+FFFD. Names never contain one; only string constants do.
+                let low = bytes
+                    .get(i + 3..i + 6)
+                    .filter(|rest| rest[0] & 0xF0 == 0xE0)
+                    .map(|rest| {
+                        ((u32::from(rest[0] & 0x0F)) << 12)
+                            | ((u32::from(rest[1] & 0x3F)) << 6)
+                            | u32::from(rest[2] & 0x3F)
+                    });
+                match low {
+                    Some(low) if (0xDC00..=0xDFFF).contains(&low) => {
+                        let combined = 0x1_0000 + ((cp - 0xD800) << 10) + (low - 0xDC00);
+                        out.push(char::from_u32(combined).ok_or_else(|| bad(i))?);
+                        i += 6;
+                    }
+                    _ => {
+                        out.push(char::REPLACEMENT_CHARACTER);
+                        i += 3;
+                    }
                 }
-                let low = ((u32::from(b3 & 0x0F)) << 12)
-                    | ((u32::from(b4 & 0x3F)) << 6)
-                    | u32::from(b5 & 0x3F);
-                if !(0xDC00..=0xDFFF).contains(&low) {
-                    return Err(bad(i));
-                }
-                let combined = 0x1_0000 + ((cp - 0xD800) << 10) + (low - 0xDC00);
-                out.push(char::from_u32(combined).ok_or_else(|| bad(i))?);
-                i += 6;
                 continue;
             }
 
             if (0xDC00..=0xDFFF).contains(&cp) {
-                // A low surrogate with no preceding high surrogate.
-                return Err(bad(i));
+                // A lone low surrogate: legal in the class file, not in a Rust `String`.
+                out.push(char::REPLACEMENT_CHARACTER);
+                i += 3;
+                continue;
             }
 
             out.push(char::from_u32(cp).ok_or_else(|| bad(i))?);
@@ -109,9 +122,17 @@ mod tests {
     }
 
     #[test]
-    fn rejects_a_lone_surrogate() {
-        let bytes = [0xED, 0xA0, 0xBD];
-        assert!(decode(&bytes, 4).is_err());
+    fn decodes_a_lone_surrogate_lossily() {
+        // `sun.nio.cs.GB18030` carries mapping strings with unpaired surrogates. JVMS §4.4.7
+        // allows them; a Rust `String` cannot hold one, so it becomes U+FFFD rather than
+        // failing the whole class file.
+        let high = [0xED, 0xA0, 0xBD];
+        assert_eq!(decode(&high, 4).unwrap(), "\u{FFFD}");
+        let low = [0xED, 0xBA, 0x9A];
+        assert_eq!(decode(&low, 5).unwrap(), "\u{FFFD}");
+        // A high surrogate followed by something that is not a low surrogate is lossy too.
+        let broken = [0xED, 0xA0, 0xBD, 0x41];
+        assert_eq!(decode(&broken, 6).unwrap(), "\u{FFFD}A");
     }
 
     #[test]
