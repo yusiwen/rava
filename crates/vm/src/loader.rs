@@ -144,6 +144,36 @@ impl Shared {
     }
 }
 
+/// Converts a `ConstantValue` entry to the value a static field of `descriptor` starts with.
+///
+/// JVMS §4.7.2 allows `Integer`, `Float`, `Long`, `Double` and `String` entries, and requires
+/// the entry's type to match the field's descriptor: `byte`, `char`, `short` and `boolean`
+/// fields take an `Integer`.
+fn constant_value(
+    shared: &mut Shared,
+    file: &ClassFile,
+    constant: &rava_classfile::Constant,
+    descriptor: &str,
+) -> Result<Value, VmError> {
+    use rava_classfile::Constant;
+    let mismatch = || {
+        VmError::BadConstantPool(format!(
+            "field of type {descriptor} cannot take a {constant:?} ConstantValue"
+        ))
+    };
+    match (descriptor, constant) {
+        ("I" | "S" | "B" | "C" | "Z", Constant::Integer(value)) => Ok(Value::Int(*value)),
+        ("J", Constant::Long(value)) => Ok(Value::Long(*value)),
+        ("F", Constant::Float(value)) => Ok(Value::Float(*value)),
+        ("D", Constant::Double(value)) => Ok(Value::Double(*value)),
+        ("Ljava/lang/String;", Constant::String { string_index }) => {
+            let text = file.constant_pool.utf8(*string_index)?.to_owned();
+            Ok(Value::Ref(shared.intern(&text)))
+        }
+        _ => Err(mismatch()),
+    }
+}
+
 /// The primitive descriptor a wrapper class's `TYPE` field names, if it is one of them.
 fn primitive_type_of(class_name: &str) -> Option<&'static str> {
     Some(match class_name {
@@ -218,8 +248,13 @@ fn build_class(shared: &mut Shared, path: &ClassPath, name: &str) -> Result<Clas
         let field_name = file.field_name(field)?.to_owned();
         let descriptor = file.field_descriptor(field)?.to_owned();
         if field.access_flags & crate::class::ACC_STATIC != 0 {
-            // JVMS §2.4: a static field starts at its type's default value, not absent.
-            statics.insert(field_name.clone(), Value::default_for(&descriptor));
+            // JVMS §2.4: a static field starts at its type's default value; §5.4.2 preparation
+            // then replaces it with the field's `ConstantValue` when the class file carries one.
+            let value = match file.constant_value(field)? {
+                Some(constant) => constant_value(shared, &file, constant, &descriptor)?,
+                None => Value::default_for(&descriptor),
+            };
+            statics.insert(field_name.clone(), value);
         }
         fields.push(FieldInfo {
             name: field_name,
@@ -261,4 +296,45 @@ fn build_class(shared: &mut Shared, path: &ClassPath, name: &str) -> Result<Clas
         condy: HashMap::new(),
         state: ClassState::Uninitialized,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::heap::HeapObject;
+    use rava_classfile::{ClassBuilder, Constant};
+
+    fn empty_class() -> ClassFile {
+        let mut builder = ClassBuilder::new("Const", "java/lang/Object", 65);
+        ClassFile::parse(&builder.build()).expect("fixture parses")
+    }
+
+    #[test]
+    fn a_string_constant_value_is_interned() {
+        let mut builder = ClassBuilder::new("Const", "java/lang/Object", 65);
+        let index = builder.string("hi");
+        let bytes = builder.build();
+        let file = ClassFile::parse(&bytes).expect("fixture parses");
+        let constant = file.constant_pool.get(index).expect("string constant");
+
+        let mut shared = Shared::new();
+        let value =
+            constant_value(&mut shared, &file, constant, "Ljava/lang/String;").expect("converts");
+        let Value::Ref(reference) = value else {
+            panic!("expected a reference, got {value:?}");
+        };
+        assert!(
+            matches!(&shared.heap[reference.index()], HeapObject::Str(text) if text == "hi"),
+            "the constant is the interned string"
+        );
+    }
+
+    #[test]
+    fn a_constant_of_the_wrong_type_is_rejected() {
+        let file = empty_class();
+        let mut shared = Shared::new();
+        let error = constant_value(&mut shared, &file, &Constant::Integer(1), "J")
+            .expect_err("an int constant cannot initialise a long field");
+        assert!(matches!(error, VmError::BadConstantPool(_)), "{error:?}");
+    }
 }

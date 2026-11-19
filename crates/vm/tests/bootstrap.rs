@@ -8,7 +8,7 @@
 
 use std::path::PathBuf;
 
-use rava_vm::{Class, ClassId, ClassPath, Shared};
+use rava_vm::{Class, ClassId, ClassPath, Shared, Value};
 
 const CORE: [&str; 5] = [
     "java/lang/Object",
@@ -155,6 +155,33 @@ fn the_closure_is_all_host_classes() {
             .iter()
             .any(|method| method.name == "hashCode" && method.is_native && method.code.is_none()),
         "Object.hashCode is a native with no body"
+    );
+}
+
+#[test]
+fn static_finals_start_at_their_constant_value() {
+    let (mut shared, path) = setup();
+
+    // `String.LATIN1`/`UTF16` are the case that matters: without the attribute they read 0,
+    // so the two coders would be indistinguishable.
+    let string = shared
+        .load_class(&path, "java/lang/String")
+        .expect("String");
+    let string = class_of(&shared, string);
+    assert_eq!(string.statics.get("LATIN1"), Some(&Value::Int(0)));
+    assert_eq!(string.statics.get("UTF16"), Some(&Value::Int(1)));
+
+    let integer = shared
+        .load_class(&path, "java/lang/Integer")
+        .expect("Integer");
+    assert_eq!(
+        class_of(&shared, integer).statics.get("MAX_VALUE"),
+        Some(&Value::Int(i32::MAX))
+    );
+    let long = shared.load_class(&path, "java/lang/Long").expect("Long");
+    assert_eq!(
+        class_of(&shared, long).statics.get("MAX_VALUE"),
+        Some(&Value::Long(i64::MAX))
     );
 }
 

@@ -34,7 +34,7 @@ and milestones M0–M5 are planned but not built. `scripts/workflow-check.sh` ru
 | :--- | :--- | :--- | :--- | :--- |
 | — | **Migration baseline**: the VM core from the previous iteration, without its own class library or synthetic `Object` | S1–S3 | done | notes S1–S3 |
 | M0 | Boot: read the host image, complete the instruction set the library uses, bootstrap `Object`/`String`/`Class`/`System`, first JCL natives, `println` | S4–S8 | todo | — |
-| M1 | The core library: strings, arrays, exceptions, `Class` basics | — | todo | #1 (`ConstantValue`) |
+| M1 | The core library: strings, arrays, exceptions, `Class` basics | — | todo | #1 landed in M0 (static fields) |
 | M2 | Loaders and modules: `(loader, name)` identity, resources | — | todo | — |
 | M3 | Real threads and monitors | — | todo | ADR-0010 |
 | M4 | `MethodHandle`, `VarHandle`, `Unsafe` | — | todo | ADR-0012 |
@@ -152,3 +152,5 @@ A slice is done only when all of the following hold:
    that list is what S7 needs, not after.
 7. Known blockers: **S7 is blocked on a plan decision (#9)** — `println` reaches
    `HeapByteBuffer.<clinit>` and therefore `Unsafe`, which the milestone order puts after M0.
+8. **#1 landed early (M0, not M1)**: the loader applies `ConstantValue` at preparation, so
+   `String.UTF16` reads 1 and `Integer.MAX_VALUE` is no longer 0.

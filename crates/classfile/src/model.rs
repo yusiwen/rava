@@ -1,6 +1,6 @@
 //! The parsed shape of a class file (JVMS §4.1).
 
-use crate::constant_pool::ConstantPool;
+use crate::constant_pool::{Constant, ConstantPool};
 use crate::error::Error;
 use crate::reader::Reader;
 
@@ -223,6 +223,21 @@ impl ClassFile {
     }
 
     /// The `SourceFile` attribute's value, used by stack traces.
+    /// The `ConstantValue` a static field declares (JVMS §4.7.2), if any.
+    ///
+    /// The parser does not evaluate it — assigning it to the field is the loader's job — but a
+    /// tool that wants to know what a `static final` starts as needs the entry, not the bytes.
+    pub fn constant_value(&self, field: &Field) -> Result<Option<&Constant>, Error> {
+        for attribute in &field.attributes {
+            if self.attribute_name(attribute)? == "ConstantValue" {
+                let mut reader = Reader::new(&attribute.data);
+                let index = reader.u2()?;
+                return Ok(Some(self.constant_pool.get(index)?));
+            }
+        }
+        Ok(None)
+    }
+
     pub fn source_file(&self) -> Result<Option<String>, Error> {
         for attribute in &self.attributes {
             if self.attribute_name(attribute)? == "SourceFile" {
