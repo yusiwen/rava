@@ -30,7 +30,19 @@ fn ci() -> u8 {
     // announced rather than silently dropped, so a lint regression cannot hide behind a
     // missing tool.
     if tool_works("cargo", &["clippy", "--version"]) {
-        steps.push(("cargo", vec!["clippy", "--workspace", "--all-targets"]));
+        // The baseline is clean and the devShell pins the clippy version, so a warning is a
+        // regression rather than a moving target: deny it here, where CI runs the same command.
+        steps.push((
+            "cargo",
+            vec![
+                "clippy",
+                "--workspace",
+                "--all-targets",
+                "--",
+                "-D",
+                "warnings",
+            ],
+        ));
     } else {
         println!("warn: clippy is not installed; skipping lints (rustup component add clippy)");
     }

@@ -43,7 +43,7 @@ first natives do not exist (S7). The boot milestone **M0** ends with
 
 ```bash
 nix develop          # or: direnv allow
-cargo xtask ci       # fmt, clippy, tests, architecture invariants
+cargo xtask ci       # fmt, clippy (warnings denied), tests, architecture invariants
 bash scripts/workflow-check.sh .
 ```
 
