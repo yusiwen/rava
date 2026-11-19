@@ -143,22 +143,6 @@ pub fn parameter_count(descriptor: &str) -> usize {
     count
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn counts_parameters() {
-        assert_eq!(parameter_count("()V"), 0);
-        assert_eq!(parameter_count("(I)V"), 1);
-        assert_eq!(parameter_count("(Ljava/lang/String;)V"), 1);
-        assert_eq!(parameter_count("(IJ)Ljava/lang/String;"), 2);
-        assert_eq!(parameter_count("([Ljava/lang/String;)V"), 1);
-        assert_eq!(parameter_count("([[I[Ljava/lang/Object;)V"), 2);
-        assert_eq!(parameter_count("(ILjava/lang/String;JZ)V"), 4);
-    }
-}
-
 /// The binary name of a `CONSTANT_Class` entry, used by `new`, `checkcast` and friends.
 /// The descriptor of a `CONSTANT_InvokeDynamic` entry's name-and-type.
 pub fn indy_descriptor(class: &Class, index: u16) -> Result<String, VmError> {
@@ -185,5 +169,21 @@ pub fn class_constant(class: &Class, index: u16) -> Result<String, VmError> {
         other => Err(VmError::BadConstantPool(format!(
             "entry {index} is {other:?}, expected a Class constant"
         ))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn counts_parameters() {
+        assert_eq!(parameter_count("()V"), 0);
+        assert_eq!(parameter_count("(I)V"), 1);
+        assert_eq!(parameter_count("(Ljava/lang/String;)V"), 1);
+        assert_eq!(parameter_count("(IJ)Ljava/lang/String;"), 2);
+        assert_eq!(parameter_count("([Ljava/lang/String;)V"), 1);
+        assert_eq!(parameter_count("([[I[Ljava/lang/Object;)V"), 2);
+        assert_eq!(parameter_count("(ILjava/lang/String;JZ)V"), 4);
     }
 }

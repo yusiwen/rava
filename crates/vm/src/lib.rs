@@ -995,6 +995,30 @@ impl Shared {
     }
 }
 
+/// Whether a `CONSTANT_Class` name is a primitive or array descriptor rather than a binary name.
+pub fn is_type_descriptor(name: &str) -> bool {
+    if name.starts_with('[') {
+        return true;
+    }
+    matches!(name, "I" | "J" | "F" | "D" | "Z" | "B" | "C" | "S" | "V")
+}
+
+/// `Class.getName` for a type descriptor: `int`, `[Ljava.lang.String;`, `[[I`.
+pub fn type_name(descriptor: &str) -> String {
+    match descriptor {
+        "I" => "int".to_owned(),
+        "J" => "long".to_owned(),
+        "F" => "float".to_owned(),
+        "D" => "double".to_owned(),
+        "Z" => "boolean".to_owned(),
+        "B" => "byte".to_owned(),
+        "C" => "char".to_owned(),
+        "S" => "short".to_owned(),
+        "V" => "void".to_owned(),
+        array => array.replace('/', "."),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1047,29 +1071,5 @@ mod tests {
             "the array is a root and the string is reachable from it"
         );
         assert!(matches!(shared.heap[inner.index()], HeapObject::Str(_)));
-    }
-}
-
-/// Whether a `CONSTANT_Class` name is a primitive or array descriptor rather than a binary name.
-pub fn is_type_descriptor(name: &str) -> bool {
-    if name.starts_with('[') {
-        return true;
-    }
-    matches!(name, "I" | "J" | "F" | "D" | "Z" | "B" | "C" | "S" | "V")
-}
-
-/// `Class.getName` for a type descriptor: `int`, `[Ljava.lang.String;`, `[[I`.
-pub fn type_name(descriptor: &str) -> String {
-    match descriptor {
-        "I" => "int".to_owned(),
-        "J" => "long".to_owned(),
-        "F" => "float".to_owned(),
-        "D" => "double".to_owned(),
-        "Z" => "boolean".to_owned(),
-        "B" => "byte".to_owned(),
-        "C" => "char".to_owned(),
-        "S" => "short".to_owned(),
-        "V" => "void".to_owned(),
-        array => array.replace('/', "."),
     }
 }
