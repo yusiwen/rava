@@ -54,6 +54,15 @@ impl ClassPath {
         Ok(Self::new(home, app).with_image(Arc::new(image)))
     }
 
+    /// The bytes of a class file, without loading or verifying it.
+    ///
+    /// Tooling needs to look at classes the VM has not loaded — the natives report walks
+    /// constant pools — and going through [`Shared::load_class`] would run the verifier and
+    /// decode every method for no reason.
+    pub fn class_bytes(&self, binary_name: &str) -> Result<Option<Vec<u8>>, VmError> {
+        self.read(binary_name)
+    }
+
     fn read(&self, binary_name: &str) -> Result<Option<Vec<u8>>, VmError> {
         let relative = format!("{binary_name}.class");
         if let Ok(bytes) = std::fs::read(self.bootstrap.join(&relative)) {

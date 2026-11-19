@@ -160,6 +160,17 @@ impl ConstantPool {
         self.slots.len() <= 1
     }
 
+    /// Every constant in index order, skipping the unused slot of a `long`/`double` entry.
+    ///
+    /// Tooling that needs to inspect references (the natives report, issue #2) walks the pool
+    /// this way; the parser itself only looks entries up by index.
+    pub fn entries(&self) -> impl Iterator<Item = (u16, &Constant)> + '_ {
+        self.slots
+            .iter()
+            .enumerate()
+            .filter_map(|(index, slot)| slot.as_ref().map(|entry| (index as u16, entry)))
+    }
+
     pub fn get(&self, index: u16) -> Result<&Constant, Error> {
         self.slots
             .get(usize::from(index))

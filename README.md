@@ -54,6 +54,7 @@ cargo run -p rava-cli -- --dump path/to/Foo.class          # the parser's view
 cargo run -p rava-cli -- disasm Foo --home <jdk> --cp out  # decoded instructions
 cargo run -p rava-cli -- verify Foo --home <jdk> --cp out  # checks, without running
 cargo run -p rava-cli -- run Foo --home <jdk> --cp out     # execute main
+cargo run -p rava-cli -- natives Foo --home <jdk> --cp out # which natives will it need?
 ```
 
 `--home` is the JDK that supplies the class library; `--cp` is the application's class path.

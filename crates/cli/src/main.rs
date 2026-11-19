@@ -26,6 +26,7 @@ fn main() -> ExitCode {
         [command, rest @ ..] if command == "verify" => verify(rest),
         [command, rest @ ..] if command == "module" => module_descriptor(rest),
         [command, rest @ ..] if command == "disasm" => disassemble(rest),
+        [command, rest @ ..] if command == "natives" => natives(rest),
         [path] if !path.starts_with('-') => dump(path),
         _ => {
             usage();
@@ -42,6 +43,7 @@ fn usage() {
     eprintln!("  rava verify <Class> [--home <jdk-home>] [--cp <dir>]");
     eprintln!("  rava module <path/to/module-info.class>");
     eprintln!("  rava disasm <Class> [--home <jdk-home>] [--cp <dir>]");
+    eprintln!("  rava natives <Class> [--home <jdk-home>] [--cp <dir>] [--max-classes <n>]");
 }
 
 fn run(args: &[String]) -> ExitCode {
@@ -103,6 +105,113 @@ fn run(args: &[String]) -> ExitCode {
             eprintln!("error: {error}");
             ExitCode::FAILURE
         }
+    }
+}
+
+/// Reports the natives a program needs and which of them the VM registers.
+///
+/// Exit 0 means every declared native is registered and no registration is dangling; 1 means
+/// the program would stop at a native, which is what the tool exists to predict.
+fn natives(args: &[String]) -> ExitCode {
+    let mut class = None;
+    let mut home = PathBuf::from(".");
+    let mut classpath = PathBuf::from(".");
+    let mut max_classes = rava_cli::natives::DEFAULT_MAX_CLASSES;
+    let mut rest = args.iter();
+    while let Some(argument) = rest.next() {
+        match argument.as_str() {
+            "--home" => match rest.next() {
+                Some(value) => home = PathBuf::from(value),
+                None => {
+                    eprintln!("error: --home needs a JDK home or image directory");
+                    return ExitCode::from(2);
+                }
+            },
+            "--cp" => match rest.next() {
+                Some(value) => classpath = PathBuf::from(value),
+                None => {
+                    eprintln!("error: --cp needs a directory");
+                    return ExitCode::from(2);
+                }
+            },
+            "--max-classes" => match rest.next().and_then(|value| value.parse::<usize>().ok()) {
+                Some(value) => max_classes = value,
+                None => {
+                    eprintln!("error: --max-classes needs a positive integer");
+                    return ExitCode::from(2);
+                }
+            },
+            other => class = Some(other.to_owned()),
+        }
+    }
+    let Some(class) = class else {
+        eprintln!("error: natives needs a class name");
+        return ExitCode::from(2);
+    };
+    // Binary names are internal (`java/lang/System`); accept the dotted spelling like the
+    // other subcommands do.
+    let class = class.replace('.', "/");
+
+    let path = match rava_cli::class_path(&home, &classpath) {
+        Ok(path) => path,
+        Err(error) => {
+            eprintln!("error: {error}");
+            return ExitCode::from(2);
+        }
+    };
+    let mut shared = rava_vm::Shared::new();
+    rava_native::register_jcl_natives(&mut shared);
+
+    let report = match rava_cli::natives::collect(&path, &class, &shared.natives, max_classes) {
+        Ok(report) => report,
+        Err(error) => {
+            eprintln!("error: {error}");
+            return ExitCode::from(2);
+        }
+    };
+
+    let missing: std::collections::BTreeSet<String> =
+        report.missing.iter().map(|method| method.key()).collect();
+    let mut owner = "";
+    for method in &report.declared {
+        if method.owner != owner {
+            println!("{}", method.owner);
+            owner = &method.owner;
+        }
+        let status = if missing.contains(&method.key()) {
+            "missing"
+        } else {
+            "registered"
+        };
+        println!("  {}{}  {status}", method.name, method.descriptor);
+    }
+    for key in &report.dangling {
+        println!("registered, but nothing declares it: {key}");
+    }
+    println!();
+    println!(
+        "{} declared, {} registered, {} missing, {} dangling; {} classes visited",
+        report.declared.len(),
+        report.declared.len() - report.missing.len(),
+        report.missing.len(),
+        report.dangling.len(),
+        report.visited,
+    );
+    if report.truncated {
+        eprintln!(
+            "note: the class cap ({max_classes}) stopped the walk; raise --max-classes to see more"
+        );
+    }
+    if report.unresolved > 0 {
+        eprintln!(
+            "note: {} referenced classes were not found on the class path; the list may be short",
+            report.unresolved
+        );
+    }
+    if report.ok() {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(1)
     }
 }
 
