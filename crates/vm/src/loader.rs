@@ -10,6 +10,7 @@ use crate::Shared;
 use crate::class::{Class, ClassId, ClassState, FieldInfo, MethodInfo};
 use crate::code;
 use crate::error::VmError;
+use crate::image::Image;
 use crate::value::Value;
 
 /// Where class files are read from.
@@ -17,9 +18,14 @@ use crate::value::Value;
 /// Bootstrap first: ADR-0005 makes the replacement class library win over anything on the
 /// application path, so `java/lang/System` resolves to our file and the JDK is never
 /// opened at run time.
+///
+/// The bootstrap side has two sources: a directory (an extracted image, the debugging
+/// fallback) and the JDK's `lib/modules`, which is what a real installation has (S4). A
+/// directory hit wins, so an extracted class shadows the image without chipping at the file.
 pub struct ClassPath {
     pub bootstrap: PathBuf,
     pub app: PathBuf,
+    image: Option<Arc<Image>>,
 }
 
 impl ClassPath {
@@ -27,17 +33,41 @@ impl ClassPath {
         Self {
             bootstrap: bootstrap.into(),
             app: app.into(),
+            image: None,
         }
     }
 
-    fn read(&self, binary_name: &str) -> Option<Vec<u8>> {
+    /// Adds the module image as a bootstrap source, after the bootstrap directory.
+    pub fn with_image(mut self, image: Arc<Image>) -> Self {
+        self.image = Some(image);
+        self
+    }
+
+    /// Opens `home/lib/modules` as the bootstrap source, keeping `home` as the directory
+    /// fallback.
+    pub fn from_jdk_home(
+        home: impl Into<PathBuf>,
+        app: impl Into<PathBuf>,
+    ) -> Result<Self, crate::image::ImageError> {
+        let home = home.into();
+        let image = Image::open_jdk(&home)?;
+        Ok(Self::new(home, app).with_image(Arc::new(image)))
+    }
+
+    fn read(&self, binary_name: &str) -> Result<Option<Vec<u8>>, VmError> {
         let relative = format!("{binary_name}.class");
-        for root in [&self.bootstrap, &self.app] {
-            if let Ok(bytes) = std::fs::read(root.join(&relative)) {
-                return Some(bytes);
-            }
+        if let Ok(bytes) = std::fs::read(self.bootstrap.join(&relative)) {
+            return Ok(Some(bytes));
         }
-        None
+        if let Some(image) = &self.image
+            && let Some(bytes) = image.class(binary_name)?
+        {
+            return Ok(Some(bytes.to_vec()));
+        }
+        if let Ok(bytes) = std::fs::read(self.app.join(&relative)) {
+            return Ok(Some(bytes));
+        }
+        Ok(None)
     }
 }
 
@@ -123,7 +153,7 @@ fn primitive_type_of(class_name: &str) -> Option<&'static str> {
 
 fn build_class(shared: &mut Shared, path: &ClassPath, name: &str) -> Result<Class, VmError> {
     let bytes = path
-        .read(name)
+        .read(name)?
         .ok_or_else(|| VmError::ClassNotFound(name.to_owned()))?;
     let file = ClassFile::parse(&bytes)?;
 

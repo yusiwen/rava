@@ -31,10 +31,11 @@ not by which members someone remembered to stub.
 
 ## Status
 
-The workspace is a **migration baseline**: the parser, heap, class model, resolution,
-monitors and interpreter are in place and tested; the class path still reads directories. The
-hosting work starts at milestone **M0 (boot)**: read the module image, bootstrap `Object` /
-`String` / `Class` / `System`, implement the first JCL natives, and run
+The workspace is a **migration baseline plus the image reader**: the parser, heap, class
+model, resolution, monitors and interpreter are in place and tested, and the class path now
+reads classes out of the JDK's `lib/modules` (S4). Nothing runs yet: the instruction set the
+host library uses is not complete (S5), the bootstrap classes are not initialised (S6) and the
+first natives do not exist (S7). The boot milestone **M0** ends with
 `System.out.println("hi")` on the reference library. The ledger is
 [`PROJECT.md`](PROJECT.md).
 

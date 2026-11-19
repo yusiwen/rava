@@ -35,7 +35,9 @@
         nativeBuildInputs = [rust jdk21];
 
         shellHook = ''
-          export JAVA21_HOME="${jdk21}"
+          # `jdk21.home` is the runtime image root (`lib/modules` lives under it), not the
+          # package root that also carries the wrappers.
+          export JAVA21_HOME="${jdk21.home}"
           export JAVA_HOME="$JAVA21_HOME"
           export PATH="$JAVA21_HOME/bin:$PATH"
           export RUST_BACKTRACE=1

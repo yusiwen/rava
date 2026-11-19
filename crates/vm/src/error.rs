@@ -76,6 +76,9 @@ pub enum VmError {
     /// `ArithmeticException`; until then they abort the run with a message).
     Arithmetic(String),
     ClassFile(rava_classfile::Error),
+    /// The host image could not be read (S4). Separate from `ClassNotFound`: an image whose
+    /// index is unreadable is a broken installation, not a missing class.
+    Image(crate::image::ImageError),
 }
 
 impl fmt::Display for VmError {
@@ -122,6 +125,7 @@ impl fmt::Display for VmError {
             }
             Self::Arithmetic(detail) => write!(f, "arithmetic: {detail}"),
             Self::ClassFile(error) => write!(f, "class file: {error}"),
+            Self::Image(error) => write!(f, "image: {error}"),
         }
     }
 }
@@ -131,5 +135,11 @@ impl std::error::Error for VmError {}
 impl From<rava_classfile::Error> for VmError {
     fn from(error: rava_classfile::Error) -> Self {
         Self::ClassFile(error)
+    }
+}
+
+impl From<crate::image::ImageError> for VmError {
+    fn from(error: crate::image::ImageError) -> Self {
+        Self::Image(error)
     }
 }
