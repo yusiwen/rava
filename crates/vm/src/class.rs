@@ -111,8 +111,9 @@ pub struct Class {
     /// The parsed class file, kept because constant-pool resolution is lazy: a
     /// `Fieldref` is only turned into a name when the instruction executes.
     ///
-    /// `None` only for the synthesized `java/lang/Object`, which javac cannot compile
-    /// (its implicit superclass is itself) and which has no constant pool to resolve.
+    /// The loader fills this for every class it builds, including `java/lang/Object`, which
+    /// is the host's own (S2 removed the synthesized one). `None` is only reachable for a
+    /// class model constructed without a file.
     pub file: Option<ClassFile>,
     /// The `SourceFile` attribute, used by stack traces.
     pub source_file: Option<String>,
