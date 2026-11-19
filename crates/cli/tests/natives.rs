@@ -1,4 +1,5 @@
-//! Acceptance for issue #2: the declared-versus-registered native report.
+//! Acceptance for issue #2 (the declared-versus-registered native report) and for S7 (the
+//! first JCL natives: `System`'s setters, `FileDescriptor`, `FileOutputStream`).
 //!
 //! Fixtures are built with the class-file builder and written to a temporary directory, so the
 //! tests need no JDK. The real-image test is gated on `JAVA21_HOME`, like the VM's image tests:
@@ -8,7 +9,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use rava_classfile::ClassBuilder;
-use rava_vm::{NativeCtx, NativeFn, Value, VmError};
+use rava_vm::{HeapObject, NativeCtx, NativeFn, ThreadState, Value, VmError};
 
 fn noop(_ctx: &mut NativeCtx<'_>) -> Result<Value, VmError> {
     Ok(Value::NULL)
@@ -117,12 +118,26 @@ fn a_registered_native_is_reconciled() {
 fn a_registration_nothing_declares_is_dangling() {
     let dir = fixture_dir("dangling");
     plain(&dir);
+    // The owner class exists and declares no such native: a dangling registration.
+    let registered: HashMap<String, NativeFn> =
+        HashMap::from([("Plain.missing()V".to_owned(), noop as NativeFn)]);
+    let report =
+        rava_cli::natives::collect(&class_path(&dir), "Plain", &registered, 100).expect("collect");
+    assert_eq!(report.dangling, vec!["Plain.missing()V".to_owned()]);
+    assert!(!report.ok());
+}
+
+#[test]
+fn a_registration_for_an_absent_class_is_unverified_not_dangling() {
+    let dir = fixture_dir("unverified");
+    plain(&dir);
     let registered: HashMap<String, NativeFn> =
         HashMap::from([("Ghost.missing()V".to_owned(), noop as NativeFn)]);
     let report =
         rava_cli::natives::collect(&class_path(&dir), "Plain", &registered, 100).expect("collect");
-    assert_eq!(report.dangling, vec!["Ghost.missing()V".to_owned()]);
-    assert!(!report.ok());
+    assert_eq!(report.unverified, vec!["Ghost.missing()V".to_owned()]);
+    assert!(report.dangling.is_empty());
+    assert!(report.ok(), "an unchecked registration is not a defect");
 }
 
 #[test]
@@ -194,4 +209,223 @@ fn the_host_image_reports_hundreds_of_missing_natives() {
             .iter()
             .any(|method| method.key() == "java/lang/System.registerNatives()V")
     );
+}
+
+/// The class path of the devShell image; the io natives need the real class layouts.
+fn host_path() -> rava_vm::ClassPath {
+    let home = std::env::var_os("JAVA21_HOME").unwrap_or_else(|| {
+        panic!(
+            "JAVA21_HOME is not set: run the tests inside `nix develop` (the devShell exports it)"
+        )
+    });
+    rava_cli::class_path(Path::new(&home), Path::new("/nonexistent")).expect("class path")
+}
+
+#[test]
+fn the_output_natives_are_registered() {
+    let mut shared = rava_vm::Shared::new();
+    rava_native::register_jcl_natives(&mut shared);
+    for key in [
+        "java/lang/System.registerNatives()V",
+        "java/lang/System.setIn0(Ljava/io/InputStream;)V",
+        "java/lang/System.setOut0(Ljava/io/PrintStream;)V",
+        "java/lang/System.setErr0(Ljava/io/PrintStream;)V",
+        "java/io/FileDescriptor.initIDs()V",
+        "java/io/FileOutputStream.initIDs()V",
+        "java/io/FileOutputStream.write(IZ)V",
+        "java/io/FileOutputStream.writeBytes([BIIZ)V",
+    ] {
+        assert!(shared.natives.contains_key(key), "{key} is not registered");
+    }
+}
+
+#[test]
+fn file_output_stream_writes_to_file_descriptor_one() {
+    let path = host_path();
+    let mut shared = rava_vm::Shared::new();
+    rava_native::register_jcl_natives(&mut shared);
+
+    let stream_class = shared
+        .load_class(&path, "java/io/FileOutputStream")
+        .expect("FileOutputStream");
+    let descriptor_class = shared
+        .load_class(&path, "java/io/FileDescriptor")
+        .expect("FileDescriptor");
+
+    // `FileDescriptor.out` is `new FileDescriptor(1)`; the native reads the int field.
+    let descriptor = shared.allocate(rava_vm::HeapObject::Instance(rava_vm::Instance {
+        class: descriptor_class,
+        fields: vec![Value::Int(1)],
+    }));
+    let mut fields = vec![Value::NULL; shared.class(stream_class).layout.len()];
+    let slot = shared
+        .class(stream_class)
+        .field_slot("fd", "Ljava/io/FileDescriptor;")
+        .expect("FileOutputStream.fd");
+    fields[slot] = Value::Ref(descriptor);
+    let stream = shared.allocate(rava_vm::HeapObject::Instance(rava_vm::Instance {
+        class: stream_class,
+        fields,
+    }));
+
+    let data = shared.allocate(rava_vm::HeapObject::Array(rava_vm::Array {
+        kind: rava_vm::ArrayKind::Byte,
+        elements: vec![Value::Int(i32::from(b'h')), Value::Int(i32::from(b'i'))],
+    }));
+
+    let function = *shared
+        .natives
+        .get("java/io/FileOutputStream.writeBytes([BIIZ)V")
+        .expect("registered");
+    let mut thread = rava_vm::ThreadState::new();
+    let args = [
+        Value::Ref(stream),
+        Value::Ref(data),
+        Value::Int(0),
+        Value::Int(2),
+        Value::Int(0),
+    ];
+    let mut ctx = rava_vm::NativeCtx {
+        shared: &mut shared,
+        thread: &mut thread,
+        path: &path,
+        args: &args,
+    };
+    function(&mut ctx).expect("writeBytes");
+    assert_eq!(ctx.shared.out.as_slice(), b"hi");
+}
+
+#[test]
+fn set_out0_replaces_the_static_field() {
+    let path = host_path();
+    let mut shared = rava_vm::Shared::new();
+    rava_native::register_jcl_natives(&mut shared);
+    let system = shared
+        .load_class(&path, "java/lang/System")
+        .expect("System");
+    shared.classes[system.index()]
+        .statics
+        .insert("out".to_owned(), Value::Int(1));
+
+    let function = *shared
+        .natives
+        .get("java/lang/System.setOut0(Ljava/io/PrintStream;)V")
+        .expect("registered");
+    let mut thread = rava_vm::ThreadState::new();
+    let args = [Value::NULL];
+    let mut ctx = rava_vm::NativeCtx {
+        shared: &mut shared,
+        thread: &mut thread,
+        path: &path,
+        args: &args,
+    };
+    function(&mut ctx).expect("setOut0");
+    assert_eq!(
+        ctx.shared.classes[system.index()].statics.get("out"),
+        Some(&Value::NULL)
+    );
+}
+
+#[test]
+fn the_report_sees_the_registered_natives() {
+    let home = std::env::var_os("JAVA21_HOME").unwrap_or_else(|| {
+        panic!(
+            "JAVA21_HOME is not set: run the tests inside `nix develop` (the devShell exports it)"
+        )
+    });
+    let bin = env!("CARGO_BIN_EXE_rava");
+    let output = std::process::Command::new(bin)
+        .args(["natives", "java.lang.System", "--home"])
+        .arg(&home)
+        .args(["--max-classes", "200"])
+        .output()
+        .expect("run rava natives");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("registerNatives()V  registered"),
+        "report was:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("setOut0(Ljava/io/PrintStream;)V  registered"),
+        "report was:\n{stdout}"
+    );
+    // Many natives are still missing, so the run still fails.
+    assert_eq!(output.status.code(), Some(1));
+}
+
+/// Runs a built fixture through the interpreter, with the real image as the boot class path.
+fn run_fixture(dir: &Path, class: &str) -> rava_vm::Shared {
+    let home = std::env::var_os("JAVA21_HOME").unwrap_or_else(|| {
+        panic!(
+            "JAVA21_HOME is not set: run the tests inside `nix develop` (the devShell exports it)"
+        )
+    });
+    let path = rava_cli::class_path(Path::new(&home), dir).expect("class path");
+    let mut shared = rava_vm::Shared::new();
+    rava_native::register_jcl_natives(&mut shared);
+    let mut thread = ThreadState::new();
+    rava_interp::run_main(&mut shared, &mut thread, &path, class, &[])
+        .unwrap_or_else(|error| panic!("{class} failed: {error}"));
+    shared
+}
+
+fn build_get_descriptor(dir: &Path) {
+    let mut builder = ClassBuilder::new("GetDescriptor", "java/lang/Object", 65);
+    let out = builder.field_ref("java/io/FileDescriptor", "out", "Ljava/io/FileDescriptor;");
+    let code = vec![0xb2, (out >> 8) as u8, out as u8, 0x57, 0xb1];
+    builder.method(0x0009, "main", "([Ljava/lang/String;)V", Some((1, 1, code)));
+    write_class(dir, "GetDescriptor", builder.build());
+}
+
+fn build_set_out(dir: &Path) {
+    let mut builder = ClassBuilder::new("SetOut", "java/lang/Object", 65);
+    let out = builder.field_ref("java/io/FileDescriptor", "out", "Ljava/io/FileDescriptor;");
+    let set_out = builder.method_ref("java/lang/System", "setOut0", "(Ljava/io/PrintStream;)V");
+    let code = vec![
+        0xb2,
+        (out >> 8) as u8,
+        out as u8, // getstatic FileDescriptor.out
+        0xb8,
+        (set_out >> 8) as u8,
+        set_out as u8, // invokestatic System.setOut0
+        0xb1,
+    ];
+    builder.method(0x0009, "main", "([Ljava/lang/String;)V", Some((1, 1, code)));
+    write_class(dir, "SetOut", builder.build());
+}
+
+#[test]
+fn file_descriptor_initializes_from_java() {
+    // `FileDescriptor.<clinit>` calls `initIDs` and its constructor calls `getHandle`/`getAppend`;
+    // reading `FileDescriptor.out` therefore exercises three natives and the class initializer.
+    let dir = fixture_dir("fd-init");
+    build_get_descriptor(&dir);
+    run_fixture(&dir, "GetDescriptor");
+}
+
+#[test]
+fn the_system_setter_runs_from_java() {
+    let dir = fixture_dir("set-out");
+    build_set_out(&dir);
+    let shared = run_fixture(&dir, "SetOut");
+    let system = shared
+        .class_ids
+        .get("java/lang/System")
+        .expect("System is loaded");
+    let out = shared.classes[system.index()]
+        .statics
+        .get("out")
+        .expect("System.out exists");
+    let Value::Ref(reference) = out else {
+        panic!("System.out is {out:?}, not a reference");
+    };
+    match &shared.heap[reference.index()] {
+        HeapObject::Instance(instance) => {
+            assert_eq!(
+                shared.classes[instance.class.index()].name,
+                "java/io/FileDescriptor"
+            );
+        }
+        other => panic!("System.out is {other:?}, not an object"),
+    }
 }

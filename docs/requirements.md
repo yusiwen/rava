@@ -54,8 +54,7 @@ reimplement the library's API (ADR-0005).
   reaches is implemented in `rava-native`, keyed by `(owner, name, descriptor)`, and admitted
   by the slice that needs it. No JNI, no `dlopen`, no C ABI.
 - **Acceptance:** `cargo test -p rava-cli` exercises the natives on the boot path;
-  `scripts/check-invariants.sh` fails if a native is registered for a class the library does
-  not declare.
+  `rava natives` reports a registration that no class declares as dangling.
 - **Milestone:** M0 onward.
 
 ### R6 — Handle exceptions

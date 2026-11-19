@@ -44,8 +44,10 @@ pub struct Report {
     pub declared: Vec<NativeMethod>,
     /// The declared natives the registry does not cover.
     pub missing: Vec<NativeMethod>,
-    /// Registered keys no visited-or-readable class declares as native.
+    /// Registered keys whose owner class exists and does not declare the native.
     pub dangling: Vec<String>,
+    /// Registered keys whose owner class is not on the class path, so the check cannot judge.
+    pub unverified: Vec<String>,
 }
 
 impl Report {
@@ -105,12 +107,16 @@ pub fn collect(
         .collect();
 
     let mut dangling = Vec::new();
+    let mut unverified = Vec::new();
     for key in registered.keys() {
-        if !declares(path, key)? {
-            dangling.push(key.clone());
+        match declares(path, key)? {
+            Some(false) => dangling.push(key.clone()),
+            None => unverified.push(key.clone()),
+            Some(true) => {}
         }
     }
     dangling.sort();
+    unverified.sort();
 
     Ok(Report {
         visited: visited.len(),
@@ -119,6 +125,7 @@ pub fn collect(
         declared,
         missing,
         dangling,
+        unverified,
     })
 }
 
@@ -138,25 +145,29 @@ fn class_references(file: &ClassFile) -> Result<BTreeSet<String>, VmError> {
     Ok(names)
 }
 
-/// Whether some class declares `key` as a native. The registry key is
-/// `owner.name(descriptor)`, and binary names cannot contain `.`, so the first dot ends the owner.
-fn declares(path: &ClassPath, key: &str) -> Result<bool, VmError> {
+/// Whether the owner class declares `key` as a native.
+///
+/// `Ok(None)` means the owner class is not on the class path: the registration cannot be
+/// judged, which is different from a registration that names something the class does not
+/// declare. The registry key is `owner.name(descriptor)`, and binary names cannot contain `.`,
+/// so the first dot ends the owner.
+fn declares(path: &ClassPath, key: &str) -> Result<Option<bool>, VmError> {
     let Some((owner, rest)) = key.split_once('.') else {
-        return Ok(false);
+        return Ok(Some(false));
     };
     let Some((name, tail)) = rest.split_once('(') else {
-        return Ok(false);
+        return Ok(Some(false));
     };
     let descriptor = format!("({tail}");
     let Some(bytes) = path.class_bytes(owner)? else {
-        return Ok(false);
+        return Ok(None);
     };
     let file = ClassFile::parse(&bytes)?;
-    Ok(file.methods.iter().any(|method| {
+    Ok(Some(file.methods.iter().any(|method| {
         method.is_native()
             && file.method_name(method).is_ok_and(|found| found == name)
             && file
                 .method_descriptor(method)
                 .is_ok_and(|found| found == descriptor)
-    }))
+    })))
 }

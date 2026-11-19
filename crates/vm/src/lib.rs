@@ -143,6 +143,9 @@ pub struct Shared {
     /// Everything the program wrote to stdout. Buffered because the only consumer is the
     /// end of the run; streaming output is a later concern.
     pub out: Vec<u8>,
+    /// Everything the program wrote to stderr, kept separate so the CLI can flush it to the
+    /// right stream at the end of the run.
+    pub err: Vec<u8>,
     /// How the replacement class library gives its instances storage the VM does not
     /// model: a `StringBuilder` is a Rust `String`, an ordinary object is a field vector.
     /// `new` asks this first, so the VM stays free of library-specific knowledge.
@@ -176,6 +179,7 @@ impl Shared {
             suppressed: HashMap::new(),
             steps: 0,
             out: Vec::new(),
+            err: Vec::new(),
             object_factory: None,
         }
     }

@@ -86,13 +86,22 @@ fn run(args: &[String]) -> ExitCode {
     let mut shared = rava_vm::Shared::new();
     let mut thread = rava_vm::ThreadState::new();
     rava_native::register_jcl_natives(&mut shared);
-    let path = ClassPath::new(&home, &classpath);
+    let path = match rava_cli::class_path(&home, &classpath) {
+        Ok(path) => path,
+        Err(error) => {
+            eprintln!("error: {error}");
+            return ExitCode::from(2);
+        }
+    };
 
     match rava_interp::run_main(&mut shared, &mut thread, &path, &class, &program_args) {
         Ok(()) => {
             let mut stdout = std::io::stdout();
             let _ = stdout.write_all(&shared.out);
             let _ = stdout.flush();
+            let mut stderr = std::io::stderr();
+            let _ = stderr.write_all(&shared.err);
+            let _ = stderr.flush();
             ExitCode::SUCCESS
         }
         // An uncaught throwable is a program failure, not a VM failure: report it the way Java
@@ -188,13 +197,17 @@ fn natives(args: &[String]) -> ExitCode {
     for key in &report.dangling {
         println!("registered, but nothing declares it: {key}");
     }
+    for key in &report.unverified {
+        println!("registered, but its class is not on this class path: {key}");
+    }
     println!();
     println!(
-        "{} declared, {} registered, {} missing, {} dangling; {} classes visited",
+        "{} declared, {} registered, {} missing, {} dangling, {} unverified; {} classes visited",
         report.declared.len(),
         report.declared.len() - report.missing.len(),
         report.missing.len(),
         report.dangling.len(),
+        report.unverified.len(),
         report.visited,
     );
     if report.truncated {

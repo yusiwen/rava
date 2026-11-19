@@ -82,7 +82,7 @@ A slice is done only when all of the following hold:
 | S4 | Read the host image: enumerate `java.base`, load `java/lang/Object` from `lib/modules` or an extracted image | R3 | `cargo test -p rava-vm --test image` exits 0 | done |
 | S5 | Complete the instruction set the library uses: `dup2`, `dup_x1`, `dup_x2`, `dup2_x1`, `dup2_x2`, `swap`, and `wide`/`goto_w` if the host needs them | R2 | `cargo test -p rava-vm --test instr` exits 0 | done |
 | S6 | Bootstrap the core classes from the host; the synthetic `Object` path is already gone | R4 | `cargo test -p rava-vm --test bootstrap` exits 0 | done |
-| S7 | First JCL natives: `System.out`, `PrintStream`, `FileOutputStream`, `FileDescriptor` | R5 | `cargo test -p rava-cli --test natives` exits 0 | todo |
+| S7 | First JCL natives: `System.out`, `PrintStream`, `FileOutputStream`, `FileDescriptor` | R5 | `cargo test -p rava-cli --test natives` exits 0 | done |
 | S8 | M0 acceptance: a program that prints, compared with the host launcher | R1 | `cargo test -p rava-cli --test boot` exits 0 | todo |
 
 ## Slice log
@@ -98,6 +98,7 @@ A slice is done only when all of the following hold:
 | S4 | `cargo test -p rava-vm --test image` | 0 | 2026-11-19 | [S4 note](docs/notes/S4-image-reader.md) |
 | S5 | `cargo test -p rava-vm --test instr` | 0 | 2026-11-20 | [S5 note](docs/notes/S5-instr-complete.md) |
 | S6 | `cargo test -p rava-vm --test bootstrap` | 0 | 2026-11-20 | [S6 note](docs/notes/S6-bootstrap.md) |
+| S7 | `cargo test -p rava-cli --test natives` | 0 | 2026-11-20 | [S7 note](docs/notes/S7-first-natives.md) |
 
 ## Decision log
 
@@ -135,12 +136,10 @@ A slice is done only when all of the following hold:
    monitors and interpreter were carried over from the previous iteration; its class library,
    corpus and synthetic `Object` were not. `cargo test` passes on the migrated unit tests, and
    `cargo xtask ci` is green.
-3. **The image is read (S4), the instruction set is complete (S5) and the core classes load
-   (S6)**: the five boot classes pull a closure of 16 host classes — 543 methods, 455 decoded
-   bodies, 71 natives — and every body passes the slot-exact verifier. **Next is S7**: the first
-   natives, starting with the `System.out` path (`initPhase1`, `PrintStream`,
-   `FileOutputStream`, `FileDescriptor`). Initialization is deliberately not part of S6:
-   `System.<clinit>` is exactly what needs those natives.
+3. **S4–S7 landed**: the image is read, the instruction set is complete, the core classes load,
+   and the first eleven JCL natives are registered and exercised from Java. **Next is S8**, which
+   is blocked on #9: `println` needs `Class` objects that behave like the host's (assertions read
+   `Class.classLoader`) and `Unsafe` for the charset path. Both walls were measured, not guessed.
 4. **The previous project is archived** at `/home/yusiwen/git/jvm` and is read-only history.
    The GitHub repository is deleted and recreated by the human; the local origin in
    `## Environments` is the intended remote, not a live one.
