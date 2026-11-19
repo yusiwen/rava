@@ -143,6 +143,62 @@ pub fn parameter_count(descriptor: &str) -> usize {
     count
 }
 
+/// The operand-stack slots a value of this type descriptor occupies (JVMS §2.6.2):
+/// `long` and `double` take two, `void` takes none, everything else one.
+pub fn type_slots(descriptor: &str) -> usize {
+    match descriptor {
+        "J" | "D" => 2,
+        "V" => 0,
+        _ => 1,
+    }
+}
+
+/// The operand-stack slots the parameters of `descriptor` occupy.
+///
+/// This is [`parameter_count`] counted in slots, which is what `max_stack` is measured in.
+pub fn parameter_slots(descriptor: &str) -> usize {
+    let bytes = descriptor.as_bytes();
+    let mut index = 1; // skip '('
+    let mut slots = 0;
+    while index < bytes.len() && bytes[index] != b')' {
+        if bytes[index] == b'[' {
+            while index < bytes.len() && bytes[index] == b'[' {
+                index += 1;
+            }
+            // An array is a reference: one slot, whatever its element type.
+            if index < bytes.len() && bytes[index] == b'L' {
+                while index < bytes.len() && bytes[index] != b';' {
+                    index += 1;
+                }
+            }
+            index += 1;
+            slots += 1;
+        } else if bytes[index] == b'L' {
+            while index < bytes.len() && bytes[index] != b';' {
+                index += 1;
+            }
+            index += 1;
+            slots += 1;
+        } else {
+            slots += if matches!(bytes[index], b'J' | b'D') {
+                2
+            } else {
+                1
+            };
+            index += 1;
+        }
+    }
+    slots
+}
+
+/// The return value's slots: zero for `void`, two for `long`/`double`.
+pub fn return_slots(descriptor: &str) -> usize {
+    match descriptor.split_once(')') {
+        Some((_, returns)) => type_slots(returns),
+        None => 0,
+    }
+}
+
 /// The binary name of a `CONSTANT_Class` entry, used by `new`, `checkcast` and friends.
 /// The descriptor of a `CONSTANT_InvokeDynamic` entry's name-and-type.
 pub fn indy_descriptor(class: &Class, index: u16) -> Result<String, VmError> {
@@ -175,6 +231,27 @@ pub fn class_constant(class: &Class, index: u16) -> Result<String, VmError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn counts_parameter_slots() {
+        assert_eq!(parameter_slots("()V"), 0);
+        assert_eq!(parameter_slots("(I)V"), 1);
+        assert_eq!(parameter_slots("(IJ)V"), 3);
+        assert_eq!(parameter_slots("(JD)V"), 4);
+        assert_eq!(parameter_slots("(Ljava/lang/String;)V"), 1);
+        assert_eq!(
+            parameter_slots("([J)V"),
+            1,
+            "an array of longs is a reference"
+        );
+        assert_eq!(parameter_slots("([[I[Ljava/lang/Object;JZ)V"), 5);
+        assert_eq!(type_slots("J"), 2);
+        assert_eq!(type_slots("V"), 0);
+        assert_eq!(type_slots("[D"), 1);
+        assert_eq!(return_slots("(I)J"), 2);
+        assert_eq!(return_slots("(I)V"), 0);
+        assert_eq!(return_slots("(I)Ljava/lang/String;"), 1);
+    }
 
     #[test]
     fn counts_parameters() {

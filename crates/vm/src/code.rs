@@ -99,27 +99,39 @@ pub enum Instr {
     Ldc2(u16),
     Bipush(i8),
     Sipush(i16),
-    Iload(u8),
-    Lload(u8),
-    Fload(u8),
-    Dload(u8),
-    Aload(u8),
-    Istore(u8),
-    Lstore(u8),
-    Fstore(u8),
-    Dstore(u8),
-    Astore(u8),
+    Iload(u16),
+    Lload(u16),
+    Fload(u16),
+    Dload(u16),
+    Aload(u16),
+    Istore(u16),
+    Lstore(u16),
+    Fstore(u16),
+    Dstore(u16),
+    Astore(u16),
     Pop,
     /// Pops two slots, which is two values unless the top one is a `long`/`double`.
     Pop2,
     Dup,
+    /// `dup_x1`: duplicate the top value and insert it two slots down.
+    DupX1,
+    /// `dup_x2`: duplicate the top value and insert it below one or two values.
+    DupX2,
+    /// `dup2`: duplicate the top two slots (two values, or one `long`/`double`).
+    Dup2,
+    /// `dup2_x1`: duplicate two slots and insert them below one value.
+    Dup2X1,
+    /// `dup2_x2`: duplicate two slots and insert them below two or three slots.
+    Dup2X2,
+    /// `swap`: exchange the top two category-1 values.
+    Swap,
     BinOp(BinOp),
     UnOp(UnOp),
     Convert(Convert),
     Compare(Compare),
     Iinc {
-        slot: u8,
-        increment: i8,
+        slot: u16,
+        increment: i16,
     },
     IfEq(u32),
     IfNe(u32),
@@ -347,37 +359,43 @@ fn decode_one(
         0x12 => Instr::Ldc(u16::from(reader.u1()?)),
         0x13 => Instr::Ldc(reader.u2()?),
         0x14 => Instr::Ldc2(reader.u2()?),
-        0x15 => Instr::Iload(reader.u1()?),
-        0x16 => Instr::Lload(reader.u1()?),
-        0x17 => Instr::Fload(reader.u1()?),
-        0x18 => Instr::Dload(reader.u1()?),
-        0x19 => Instr::Aload(reader.u1()?),
-        0x1a..=0x1d => Instr::Iload(opcode - 0x1a),
-        0x1e..=0x21 => Instr::Lload(opcode - 0x1e),
-        0x22..=0x25 => Instr::Fload(opcode - 0x22),
-        0x26..=0x29 => Instr::Dload(opcode - 0x26),
-        0x2a..=0x2d => Instr::Aload(opcode - 0x2a),
-        0x36 => Instr::Istore(reader.u1()?),
-        0x37 => Instr::Lstore(reader.u1()?),
-        0x38 => Instr::Fstore(reader.u1()?),
-        0x39 => Instr::Dstore(reader.u1()?),
-        0x3a => Instr::Astore(reader.u1()?),
-        0x3b..=0x3e => Instr::Istore(opcode - 0x3b),
-        0x3f..=0x42 => Instr::Lstore(opcode - 0x3f),
-        0x43..=0x46 => Instr::Fstore(opcode - 0x43),
-        0x47..=0x4a => Instr::Dstore(opcode - 0x47),
-        0x4b..=0x4e => Instr::Astore(opcode - 0x4b),
+        0x15 => Instr::Iload(u16::from(reader.u1()?)),
+        0x16 => Instr::Lload(u16::from(reader.u1()?)),
+        0x17 => Instr::Fload(u16::from(reader.u1()?)),
+        0x18 => Instr::Dload(u16::from(reader.u1()?)),
+        0x19 => Instr::Aload(u16::from(reader.u1()?)),
+        0x1a..=0x1d => Instr::Iload(u16::from(opcode - 0x1a)),
+        0x1e..=0x21 => Instr::Lload(u16::from(opcode - 0x1e)),
+        0x22..=0x25 => Instr::Fload(u16::from(opcode - 0x22)),
+        0x26..=0x29 => Instr::Dload(u16::from(opcode - 0x26)),
+        0x2a..=0x2d => Instr::Aload(u16::from(opcode - 0x2a)),
+        0x36 => Instr::Istore(u16::from(reader.u1()?)),
+        0x37 => Instr::Lstore(u16::from(reader.u1()?)),
+        0x38 => Instr::Fstore(u16::from(reader.u1()?)),
+        0x39 => Instr::Dstore(u16::from(reader.u1()?)),
+        0x3a => Instr::Astore(u16::from(reader.u1()?)),
+        0x3b..=0x3e => Instr::Istore(u16::from(opcode - 0x3b)),
+        0x3f..=0x42 => Instr::Lstore(u16::from(opcode - 0x3f)),
+        0x43..=0x46 => Instr::Fstore(u16::from(opcode - 0x43)),
+        0x47..=0x4a => Instr::Dstore(u16::from(opcode - 0x47)),
+        0x4b..=0x4e => Instr::Astore(u16::from(opcode - 0x4b)),
         0x2e..=0x35 => Instr::ArrayLoad(array_kind(opcode).expect("covered by the range")),
         0x4f..=0x56 => Instr::ArrayStore(array_kind(opcode).expect("covered by the range")),
         0x57 => Instr::Pop,
         0x58 => Instr::Pop2,
         0x59 => Instr::Dup,
+        0x5a => Instr::DupX1,
+        0x5b => Instr::DupX2,
+        0x5c => Instr::Dup2,
+        0x5d => Instr::Dup2X1,
+        0x5e => Instr::Dup2X2,
+        0x5f => Instr::Swap,
         // 0x74..=0x77 are the negation instructions and are not binary.
         0x60..=0x73 | 0x78..=0x83 => Instr::BinOp(binop(opcode).expect("covered by the range")),
         0x74..=0x77 => Instr::UnOp(unop(opcode).expect("covered by the range")),
         0x84 => Instr::Iinc {
-            slot: reader.u1()?,
-            increment: reader.u1()? as i8,
+            slot: u16::from(reader.u1()?),
+            increment: i16::from(reader.u1()? as i8),
         },
         0x85..=0x93 => Instr::Convert(convert(opcode).expect("covered by the range")),
         0x94..=0x98 => Instr::Compare(compare(opcode).expect("covered by the range")),
@@ -396,6 +414,7 @@ fn decode_one(
         0xa5 => Instr::IfACmpEq(absolute(reader, pc)?),
         0xa6 => Instr::IfACmpNe(absolute(reader, pc)?),
         0xa7 => Instr::Goto(absolute(reader, pc)?),
+        0xc8 => Instr::Goto(absolute_wide(reader, pc)?),
         0xaa => {
             let table = decode_table_switch(reader, pc)?;
             switches.push(table);
@@ -446,6 +465,7 @@ fn decode_one(
             let _zero = reader.u2()?;
             Instr::InvokeDynamic(constant)
         }
+        0xc4 => decode_wide(reader, pc, method)?,
         other => {
             return Err(VmError::UnsupportedInstruction {
                 opcode: other,
@@ -461,6 +481,41 @@ fn decode_one(
 fn absolute(reader: &mut Reader<'_>, pc: usize) -> Result<u32, VmError> {
     let offset = reader.u2()? as i16;
     Ok((pc as i32 + i32::from(offset)) as u32)
+}
+
+/// Reads a signed 32-bit relative branch offset (`goto_w`) and returns the absolute byte offset.
+fn absolute_wide(reader: &mut Reader<'_>, pc: usize) -> Result<u32, VmError> {
+    let offset = reader.u4()? as i32;
+    Ok((pc as i32 + offset) as u32)
+}
+
+/// Decodes the instruction after a `wide` prefix. The prefix only widens a local variable index
+/// (u1 -> u2) and, for `iinc`, the increment (i8 -> i16); the instruction set itself is unchanged.
+fn decode_wide(reader: &mut Reader<'_>, pc: usize, method: &str) -> Result<Instr, VmError> {
+    let widened = reader.u1()?;
+    Ok(match widened {
+        0x15 => Instr::Iload(reader.u2()?),
+        0x16 => Instr::Lload(reader.u2()?),
+        0x17 => Instr::Fload(reader.u2()?),
+        0x18 => Instr::Dload(reader.u2()?),
+        0x19 => Instr::Aload(reader.u2()?),
+        0x36 => Instr::Istore(reader.u2()?),
+        0x37 => Instr::Lstore(reader.u2()?),
+        0x38 => Instr::Fstore(reader.u2()?),
+        0x39 => Instr::Dstore(reader.u2()?),
+        0x3a => Instr::Astore(reader.u2()?),
+        0x84 => Instr::Iinc {
+            slot: reader.u2()?,
+            increment: reader.u2()? as i16,
+        },
+        other => {
+            return Err(VmError::UnsupportedInstruction {
+                opcode: other,
+                pc,
+                method: method.to_owned(),
+            });
+        }
+    })
 }
 
 fn align_switch(reader: &mut Reader<'_>) -> Result<(), VmError> {

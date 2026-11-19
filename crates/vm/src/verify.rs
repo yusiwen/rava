@@ -10,14 +10,18 @@
 //!
 //! What this is **not**: JVMS §4.10.1's type-checking verifier. That one tracks a type per stack
 //! slot and merges types at join points, which needs the decoded form to carry operand types — and
-//! [`Instr`] deliberately does not (ADR-0003). The depth check below therefore counts *values*
-//! rather than slots: a `long` occupies one entry here and two in the class file's accounting, so
-//! the check is conservative in one direction and blind in the other. ADR-0014 records the trade.
+//! [`Instr`] deliberately does not (ADR-0003).
+//!
+//! Depth is counted in *slots*, the unit `max_stack` is written in: a `long` or `double` takes
+//! two, and every instruction's slot effect is fixed by its opcode, so no type information is
+//! needed to get the depth right. What the check cannot see is whether the *types* fit — that is
+//! the trade ADR-0014 records.
 
-use crate::code::{Code, Instr};
+use crate::code::{BinOp, Code, Compare, Convert, Instr, UnOp};
 use crate::error::VmError;
+use crate::heap::ArrayKind;
 
-/// One instruction's effect on the value stack, in values (not slots).
+/// One instruction's effect on the operand stack, in slots.
 struct Effect {
     pop: usize,
     push: usize,
@@ -25,36 +29,60 @@ struct Effect {
 
 fn effect(instr: &Instr, code: &Code, class: &crate::Class) -> Result<Effect, VmError> {
     let pair = |pop: usize, push: usize| Effect { pop, push };
+    let slots = crate::resolve::type_slots;
     Ok(match instr {
-        Instr::Nop => pair(0, 0),
+        Instr::Nop | Instr::Return | Instr::CheckCast(_) | Instr::Iinc { .. } => pair(0, 0),
         Instr::AconstNull
         | Instr::Iconst(_)
-        | Instr::Lconst(_)
         | Instr::Fconst(_)
-        | Instr::Dconst(_)
-        | Instr::Ldc(_)
-        | Instr::Ldc2(_)
         | Instr::Bipush(_)
-        | Instr::Sipush(_) => pair(0, 1),
-        Instr::Iload(_) | Instr::Lload(_) | Instr::Fload(_) | Instr::Dload(_) | Instr::Aload(_) => {
-            pair(0, 1)
-        }
-        Instr::Istore(_)
-        | Instr::Lstore(_)
-        | Instr::Fstore(_)
-        | Instr::Dstore(_)
-        | Instr::Astore(_) => pair(1, 0),
+        | Instr::Sipush(_)
+        | Instr::Ldc(_) => pair(0, 1),
+        Instr::Lconst(_) | Instr::Dconst(_) | Instr::Ldc2(_) => pair(0, 2),
+        Instr::Iload(_) | Instr::Fload(_) | Instr::Aload(_) => pair(0, 1),
+        Instr::Lload(_) | Instr::Dload(_) => pair(0, 2),
+        Instr::Istore(_) | Instr::Fstore(_) | Instr::Astore(_) => pair(1, 0),
+        Instr::Lstore(_) | Instr::Dstore(_) => pair(2, 0),
         Instr::Pop => pair(1, 0),
-        // `pop2` removes two slots, or one value when that value is a long/double. The decoded
-        // form cannot tell, so the conservative reading is two values.
         Instr::Pop2 => pair(2, 0),
         Instr::Dup => pair(1, 2),
-        // Shifts pop a value and a shift distance; the rest pop two values. Both are two.
-        Instr::BinOp(_) => pair(2, 1),
-        Instr::UnOp(_) => pair(1, 1),
-        Instr::Convert(_) => pair(1, 1),
-        Instr::Compare(_) => pair(2, 1),
-        Instr::Iinc { .. } => pair(0, 0),
+        Instr::DupX1 => pair(2, 3),
+        Instr::DupX2 => pair(3, 4),
+        Instr::Dup2 => pair(2, 4),
+        Instr::Dup2X1 => pair(3, 5),
+        Instr::Dup2X2 => pair(4, 6),
+        Instr::Swap => pair(2, 2),
+        Instr::BinOp(op) => match op {
+            BinOp::LAdd
+            | BinOp::LSub
+            | BinOp::LMul
+            | BinOp::LDiv
+            | BinOp::LRem
+            | BinOp::LAnd
+            | BinOp::LOr
+            | BinOp::LXor
+            | BinOp::DAdd
+            | BinOp::DSub
+            | BinOp::DMul
+            | BinOp::DDiv
+            | BinOp::DRem => pair(4, 2),
+            BinOp::LShl | BinOp::LShr | BinOp::LUShr => pair(3, 2),
+            _ => pair(2, 1),
+        },
+        Instr::UnOp(op) => match op {
+            UnOp::LNeg | UnOp::DNeg => pair(2, 2),
+            UnOp::INeg | UnOp::FNeg => pair(1, 1),
+        },
+        Instr::Convert(op) => match op {
+            Convert::I2L | Convert::I2D | Convert::F2L | Convert::F2D => pair(1, 2),
+            Convert::L2I | Convert::L2F | Convert::D2I | Convert::D2F => pair(2, 1),
+            Convert::L2D | Convert::D2L => pair(2, 2),
+            Convert::I2F | Convert::F2I | Convert::I2B | Convert::I2C | Convert::I2S => pair(1, 1),
+        },
+        Instr::Compare(op) => match op {
+            Compare::LCmp | Compare::DCmpL | Compare::DCmpG => pair(4, 1),
+            Compare::FCmpL | Compare::FCmpG => pair(2, 1),
+        },
         Instr::IfEq(_)
         | Instr::IfNe(_)
         | Instr::IfLt(_)
@@ -77,55 +105,47 @@ fn effect(instr: &Instr, code: &Code, class: &crate::Class) -> Result<Effect, Vm
             pair(1, 0)
         }
         Instr::ArrayLength => pair(1, 1),
-        Instr::ArrayLoad(_) => pair(2, 1),
-        Instr::ArrayStore(_) => pair(3, 0),
+        Instr::ArrayLoad(kind) => match kind {
+            ArrayKind::Long | ArrayKind::Double => pair(2, 2),
+            _ => pair(2, 1),
+        },
+        Instr::ArrayStore(kind) => match kind {
+            ArrayKind::Long | ArrayKind::Double => pair(4, 0),
+            _ => pair(3, 0),
+        },
         Instr::NewArray(_) | Instr::ANewArray(_) => pair(1, 1),
         Instr::MultiANewArray { dimensions, .. } => pair(usize::from(*dimensions), 1),
-        Instr::GetStatic(index) => {
-            field_of(class, *index)?;
-            pair(0, 1)
-        }
-        Instr::PutStatic(index) => {
-            field_of(class, *index)?;
-            pair(1, 0)
-        }
-        Instr::GetField(index) => {
-            field_of(class, *index)?;
-            pair(1, 1)
-        }
-        Instr::PutField(index) => {
-            field_of(class, *index)?;
-            pair(2, 0)
-        }
+        Instr::GetStatic(index) => pair(0, slots(&field_of(class, *index)?)),
+        Instr::PutStatic(index) => pair(slots(&field_of(class, *index)?), 0),
+        Instr::GetField(index) => pair(1, slots(&field_of(class, *index)?)),
+        Instr::PutField(index) => pair(1 + slots(&field_of(class, *index)?), 0),
         Instr::New(_) => pair(0, 1),
         Instr::InvokeVirtual(index) | Instr::InvokeSpecial(index) | Instr::InvokeStatic(index) => {
             let descriptor = method_descriptor(class, *index)?;
-            let pops = crate::resolve::parameter_count(&descriptor)
-                + usize::from(!matches!(instr, Instr::InvokeStatic(_)));
-            pair(pops, usize::from(!descriptor.ends_with('V')))
+            pair(
+                crate::resolve::parameter_slots(&descriptor)
+                    + usize::from(!matches!(instr, Instr::InvokeStatic(_))),
+                crate::resolve::return_slots(&descriptor),
+            )
         }
         Instr::InvokeInterface(index) => {
             let descriptor = method_descriptor(class, *index)?;
             pair(
-                crate::resolve::parameter_count(&descriptor) + 1,
-                usize::from(!descriptor.ends_with('V')),
+                crate::resolve::parameter_slots(&descriptor) + 1,
+                crate::resolve::return_slots(&descriptor),
             )
         }
         Instr::InvokeDynamic(index) => {
             let descriptor = indy_descriptor(class, *index)?;
             pair(
-                crate::resolve::parameter_count(&descriptor),
-                usize::from(!descriptor.ends_with('V')),
+                crate::resolve::parameter_slots(&descriptor),
+                crate::resolve::return_slots(&descriptor),
             )
         }
-        Instr::Athrow => pair(1, 0),
-        Instr::MonitorEnter | Instr::MonitorExit => pair(1, 0),
+        Instr::Athrow | Instr::MonitorEnter | Instr::MonitorExit => pair(1, 0),
         Instr::InstanceOf(_) => pair(1, 1),
-        Instr::CheckCast(_) => pair(0, 0),
-        Instr::Ireturn | Instr::Lreturn | Instr::Freturn | Instr::Dreturn | Instr::Areturn => {
-            pair(1, 0)
-        }
-        Instr::Return => pair(0, 0),
+        Instr::Ireturn | Instr::Freturn | Instr::Areturn => pair(1, 0),
+        Instr::Lreturn | Instr::Dreturn => pair(2, 0),
     })
 }
 

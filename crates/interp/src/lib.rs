@@ -283,15 +283,20 @@ fn run_frame(
                         pop(&mut thread.frames[frame_index], qualified, code)?;
                     }
                 }
-                Instr::Dup => {
-                    let value = *thread.frames[frame_index].stack.last().ok_or_else(|| {
-                        VmError::StackUnderflow {
+                instruction @ (Instr::Dup
+                | Instr::DupX1
+                | Instr::DupX2
+                | Instr::Dup2
+                | Instr::Dup2X1
+                | Instr::Dup2X2
+                | Instr::Swap) => {
+                    stack_op(&instruction, &mut thread.frames[frame_index].stack).map_err(
+                        |needed| VmError::StackUnderflow {
                             method: qualified.to_owned(),
                             pc: code.pc(index),
-                            needed: 1,
-                        }
-                    })?;
-                    thread.frames[frame_index].stack.push(value);
+                            needed,
+                        },
+                    )?;
                 }
 
                 Instr::BinOp(op) => {
@@ -1016,6 +1021,112 @@ fn run_frame(
             shared.collect(thread);
         }
     }
+}
+
+/// Applies one of the stack-shuffling instructions.
+///
+/// The stack holds one entry per Java *value*, while these instructions are specified in
+/// *slots*: a `long` or a `double` is two slots. So each form is chosen by the category of
+/// the values involved, not by counting entries — `dup2` on a `long` duplicates one entry,
+/// on two `int`s it duplicates two.
+///
+/// `Err(needed)` reports the number of entries the instruction wanted, for the caller's
+/// underflow message.
+fn stack_op(instr: &Instr, stack: &mut Vec<Value>) -> Result<(), usize> {
+    // Takes the top `n` entries, bottom-first, or reports how many were missing.
+    fn take(stack: &mut Vec<Value>, n: usize) -> Result<Vec<Value>, usize> {
+        if stack.len() < n {
+            return Err(n);
+        }
+        let at = stack.len() - n;
+        Ok(stack.split_off(at))
+    }
+
+    // `dup_x2` and `dup2_x2` choose their form from the value *below* the top one.
+    let category2 = |value: &Value| matches!(value, Value::Long(_) | Value::Double(_));
+    let below_is_wide = {
+        let len = stack.len();
+        len >= 2 && category2(&stack[len - 2])
+    };
+
+    match instr {
+        Instr::Dup => {
+            let value = *stack.last().ok_or(1usize)?;
+            stack.push(value);
+        }
+        Instr::DupX1 => {
+            let top = take(stack, 2)?;
+            stack.extend([top[1], top[0], top[1]]);
+        }
+        Instr::DupX2 => {
+            if below_is_wide {
+                // form 2: ..., value2(cat2), value1 -> ..., value1, value2, value1
+                let top = take(stack, 2)?;
+                stack.extend([top[1], top[0], top[1]]);
+            } else {
+                // form 1: ..., value3, value2, value1 -> ..., value1, value3, value2, value1
+                let top = take(stack, 3)?;
+                stack.extend([top[2], top[0], top[1], top[2]]);
+            }
+        }
+        Instr::Dup2 => {
+            if category2(stack.last().ok_or(1usize)?) {
+                // form 2: one category-2 value is duplicated.
+                let top = take(stack, 1)?;
+                stack.extend([top[0], top[0]]);
+            } else {
+                // form 1: two category-1 values are duplicated as a pair.
+                let top = take(stack, 2)?;
+                stack.extend([top[0], top[1], top[0], top[1]]);
+            }
+        }
+        Instr::Dup2X1 => {
+            if category2(stack.last().ok_or(1usize)?) {
+                // form 2: ..., value2, value1(cat2) -> ..., value1, value2, value1
+                let top = take(stack, 2)?;
+                stack.extend([top[1], top[0], top[1]]);
+            } else {
+                // form 1: ..., value3, value2, value1 -> ..., value2, value1, value3, value2, value1
+                let top = take(stack, 3)?;
+                stack.extend([top[1], top[2], top[0], top[1], top[2]]);
+            }
+        }
+        Instr::Dup2X2 => {
+            // Four forms, chosen by the category of the top value and, when it is a
+            // category-1 value, of the one *two* values down (JVMS §6.5 dup2_x2).
+            let len = stack.len();
+            let top_is_wide = category2(stack.last().ok_or(1usize)?);
+            if top_is_wide {
+                let second_is_wide = len >= 2 && category2(&stack[len - 2]);
+                if second_is_wide {
+                    // form 4: ..., value2(cat2), value1(cat2) -> ..., value1, value2, value1
+                    let top = take(stack, 2)?;
+                    stack.extend([top[1], top[0], top[1]]);
+                } else {
+                    // form 2: ..., value3, value2, value1(cat2) -> ..., value1, value3, value2, value1
+                    let top = take(stack, 3)?;
+                    stack.extend([top[2], top[0], top[1], top[2]]);
+                }
+            } else {
+                let third_is_wide = len >= 3 && category2(&stack[len - 3]);
+                if third_is_wide {
+                    // form 3: ..., value3(cat2), value2, value1 -> ..., value2, value1, value3, value2, value1
+                    let top = take(stack, 3)?;
+                    stack.extend([top[1], top[2], top[0], top[1], top[2]]);
+                } else {
+                    // form 1: four category-1 values -> ..., value2, value1, value4, value3, value2, value1
+                    let top = take(stack, 4)?;
+                    stack.extend([top[2], top[3], top[0], top[1], top[2], top[3]]);
+                }
+            }
+        }
+        Instr::Swap => {
+            let top = take(stack, 2)?;
+            stack.extend([top[1], top[0]]);
+        }
+        _ => unreachable!("stack_op is only called for stack-shuffling instructions"),
+    }
+    Ok(())
 }
 
 fn pop(frame: &mut Frame, method: &str, code: &rava_vm::Code) -> Result<Value, VmError> {
@@ -1810,5 +1921,155 @@ fn record_value_hash(shared: &Shared, value: Value) -> i32 {
                 _ => reference.0 as i32,
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn run(op: Instr, initial: &[Value]) -> Result<Vec<Value>, usize> {
+        let mut stack = initial.to_vec();
+        stack_op(&op, &mut stack)?;
+        Ok(stack)
+    }
+
+    #[test]
+    fn duplicates_one_value() {
+        assert_eq!(
+            run(Instr::Dup, &[Value::Int(1)]).unwrap(),
+            vec![Value::Int(1), Value::Int(1)]
+        );
+    }
+
+    #[test]
+    fn dup_x1_moves_the_top_value_two_slots_down() {
+        // ..., value2, value1 -> ..., value1, value2, value1
+        assert_eq!(
+            run(Instr::DupX1, &[Value::Int(1), Value::Int(2)]).unwrap(),
+            vec![Value::Int(2), Value::Int(1), Value::Int(2)]
+        );
+    }
+
+    #[test]
+    fn dup_x2_has_a_form_for_a_wide_value_below() {
+        // form 1: ..., value3, value2, value1 -> ..., value1, value3, value2, value1
+        assert_eq!(
+            run(Instr::DupX2, &[Value::Int(1), Value::Int(2), Value::Int(3)]).unwrap(),
+            vec![Value::Int(3), Value::Int(1), Value::Int(2), Value::Int(3)]
+        );
+        // form 2: ..., value2 (long), value1 -> ..., value1, value2, value1
+        assert_eq!(
+            run(Instr::DupX2, &[Value::Long(7), Value::Int(1)]).unwrap(),
+            vec![Value::Int(1), Value::Long(7), Value::Int(1)]
+        );
+    }
+
+    #[test]
+    fn dup2_duplicates_two_slots() {
+        // Two category-1 values: both are duplicated as a pair.
+        assert_eq!(
+            run(Instr::Dup2, &[Value::Int(1), Value::Int(2)]).unwrap(),
+            vec![Value::Int(1), Value::Int(2), Value::Int(1), Value::Int(2)]
+        );
+        // One category-2 value occupies both slots, so it is duplicated once.
+        assert_eq!(
+            run(Instr::Dup2, &[Value::Long(7)]).unwrap(),
+            vec![Value::Long(7), Value::Long(7)]
+        );
+    }
+
+    #[test]
+    fn dup2_x1_has_both_forms() {
+        // form 1: ..., value3, value2, value1 -> ..., value2, value1, value3, value2, value1
+        assert_eq!(
+            run(
+                Instr::Dup2X1,
+                &[Value::Int(1), Value::Int(2), Value::Int(3)]
+            )
+            .unwrap(),
+            vec![
+                Value::Int(2),
+                Value::Int(3),
+                Value::Int(1),
+                Value::Int(2),
+                Value::Int(3)
+            ]
+        );
+        // form 2: ..., value2, value1 (long) -> ..., value1, value2, value1
+        assert_eq!(
+            run(Instr::Dup2X1, &[Value::Int(1), Value::Long(7)]).unwrap(),
+            vec![Value::Long(7), Value::Int(1), Value::Long(7)]
+        );
+    }
+
+    #[test]
+    fn dup2_x2_has_four_forms() {
+        // form 1: four category-1 values.
+        assert_eq!(
+            run(
+                Instr::Dup2X2,
+                &[Value::Int(1), Value::Int(2), Value::Int(3), Value::Int(4)]
+            )
+            .unwrap(),
+            vec![
+                Value::Int(3),
+                Value::Int(4),
+                Value::Int(1),
+                Value::Int(2),
+                Value::Int(3),
+                Value::Int(4)
+            ]
+        );
+        // form 2: one wide value on top, two category-1 values below.
+        assert_eq!(
+            run(
+                Instr::Dup2X2,
+                &[Value::Int(1), Value::Int(2), Value::Long(7)]
+            )
+            .unwrap(),
+            vec![Value::Long(7), Value::Int(1), Value::Int(2), Value::Long(7)]
+        );
+        // form 3: two category-1 values on top, one wide value below.
+        assert_eq!(
+            run(
+                Instr::Dup2X2,
+                &[Value::Long(7), Value::Int(1), Value::Int(2)]
+            )
+            .unwrap(),
+            vec![
+                Value::Int(1),
+                Value::Int(2),
+                Value::Long(7),
+                Value::Int(1),
+                Value::Int(2)
+            ]
+        );
+        // form 4: two wide values.
+        assert_eq!(
+            run(Instr::Dup2X2, &[Value::Long(7), Value::Long(8)]).unwrap(),
+            vec![Value::Long(8), Value::Long(7), Value::Long(8)]
+        );
+    }
+
+    #[test]
+    fn swap_exchanges_the_top_two_values() {
+        assert_eq!(
+            run(Instr::Swap, &[Value::Int(1), Value::Int(2)]).unwrap(),
+            vec![Value::Int(2), Value::Int(1)]
+        );
+    }
+
+    #[test]
+    fn reports_how_many_values_were_missing() {
+        assert_eq!(run(Instr::DupX1, &[Value::Int(1)]), Err(2));
+        assert_eq!(run(Instr::Dup2, &[]), Err(1));
+        assert_eq!(
+            run(
+                Instr::Dup2X2,
+                &[Value::Int(1), Value::Int(2), Value::Int(3)]
+            ),
+            Err(4)
+        );
     }
 }
