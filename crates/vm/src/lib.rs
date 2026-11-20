@@ -124,6 +124,9 @@ pub struct Shared {
     pub monitors: HashMap<ObjRef, Monitor>,
     /// Installed by the interpreter at start-up; natives use it to call Java code.
     pub invoker: Option<Invoker>,
+    /// The `java.lang.Thread` object `Thread.currentThread` answers. This VM has one thread for
+    /// now (M3 adds real ones), so the object is created on first use and kept.
+    pub main_thread: Option<ObjRef>,
     /// One `java.lang.Class` object per class, so class objects compare by identity.
     pub class_objects: HashMap<ClassId, ObjRef>,
     /// What a class object names: a loaded class or a primitive/array descriptor. This is the
@@ -188,6 +191,7 @@ impl Shared {
             interned: HashMap::new(),
             monitors: HashMap::new(),
             invoker: None,
+            main_thread: None,
             class_objects: HashMap::new(),
             class_targets: HashMap::new(),
             type_classes: HashMap::new(),
@@ -603,6 +607,33 @@ impl Shared {
         let actual = self.load_class(path, actual_name)?;
         let target = self.load_class(path, target_name)?;
         Ok(self.is_assignable(actual, target))
+    }
+
+    /// The class that declares a static field, resolving through superinterfaces and the
+    /// superclass (JVMS §5.4.3.2). `java.nio.ByteBuffer.UNSAFE` is declared by `Buffer`, and a
+    /// constant-pool reference names the subclass that uses it.
+    pub fn static_field_owner(
+        &self,
+        class: ClassId,
+        name: &str,
+        descriptor: &str,
+    ) -> Option<ClassId> {
+        let current = self.class(class);
+        let declared = current
+            .fields
+            .iter()
+            .any(|field| field.name == name && field.descriptor == descriptor);
+        if declared && current.statics.contains_key(name) {
+            return Some(class);
+        }
+        for interface in &current.interfaces {
+            if let Some(owner) = self.static_field_owner(*interface, name, descriptor) {
+                return Some(owner);
+            }
+        }
+        current
+            .super_class
+            .and_then(|parent| self.static_field_owner(parent, name, descriptor))
     }
 
     /// The descriptor a heap reference names, if it is a primitive or array class object.

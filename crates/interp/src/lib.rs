@@ -39,6 +39,7 @@ pub fn run_main(
 
     let class = shared.load_class(path, class_name)?;
     ensure_initialized(shared, thread, path, class)?;
+    initialize_system(shared, thread, path)?;
 
     let missing = || VmError::MethodNotFound {
         class: class_name.to_owned(),
@@ -56,6 +57,229 @@ pub fn run_main(
     Ok(())
 }
 
+/// Installs `System.out`/`System.err` with the host's own stream classes and sets
+/// `System.lineSeparator`.
+///
+/// The JDK's `System.initPhase1` also builds the property map, which needs a platform property
+/// source this VM does not have yet (S21's note); the streams themselves do not read it when the
+/// charset is given explicitly. The bootstrap runs the host constructors through the interpreter:
+/// `FileOutputStream(FileDescriptor.out)` → `BufferedOutputStream` → `PrintStream(out, true,
+/// UTF-8)`.
+pub fn initialize_system(
+    shared: &mut Shared,
+    thread: &mut ThreadState,
+    path: &ClassPath,
+) -> Result<(), VmError> {
+    let system = shared.load_class(path, "java/lang/System")?;
+    ensure_initialized(shared, thread, path, system)?;
+    if shared
+        .class(system)
+        .statics
+        .get("out")
+        .is_some_and(|value| value.as_ref().is_some_and(|reference| !reference.is_null()))
+    {
+        return Ok(());
+    }
+    let descriptors = shared.load_class(path, "java/io/FileDescriptor")?;
+    ensure_initialized(shared, thread, path, descriptors)?;
+    let fd_out = static_field(shared, descriptors, "out")?;
+    let fd_err = static_field(shared, descriptors, "err")?;
+
+    // `System.getProperty` reads the private `props` field; the host classes read it while
+    // initializing (`jdk.internal.misc.InternalLock` asks for `jdk.io.useMonitors`, the
+    // charset classes for `file.encoding`), so it is installed before the streams. The JDK
+    // builds it from `SystemProps.initProperties`, a native this VM does not have (S21 note); a
+    // minimal `Properties` keeps every reader non-null and answers the keys the streams and
+    // charset use.
+    let props = construct(shared, thread, path, "java/util/Properties", "()V", &[])?;
+    let user_dir = std::env::current_dir()
+        .map(|dir| dir.display().to_string())
+        .unwrap_or_else(|_| ".".to_owned());
+    let java_home = path.bootstrap.display().to_string();
+    for (key, value) in [
+        ("line.separator", "\n".to_owned()),
+        ("file.encoding", "UTF-8".to_owned()),
+        ("sun.jnu.encoding", "UTF-8".to_owned()),
+        ("java.version", "21.0.9".to_owned()),
+        ("java.home", java_home),
+        ("os.name", "Linux".to_owned()),
+        ("user.dir", user_dir),
+    ] {
+        let key = shared.intern(path, key)?;
+        let value = shared.new_string(path, value)?;
+        invoke_instance(
+            shared,
+            thread,
+            path,
+            props,
+            "java/util/Properties",
+            "setProperty",
+            "(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/Object;",
+            &[Value::Ref(key), Value::Ref(value)],
+        )?;
+    }
+    let newline = shared.new_string(path, "\n".to_owned())?;
+    {
+        let statics = &mut shared.classes[system.index()].statics;
+        statics.insert("lineSeparator".to_owned(), Value::Ref(newline));
+        statics.insert("props".to_owned(), Value::Ref(props));
+    }
+
+    // The charset encoders reach the JDK's own `JavaLangAccess` fast paths
+    // (`sun.nio.cs.UTF_8.JLA.encodeASCII`); `System.setJavaLangAccess` installs it, and the
+    // JDK calls it from `initPhase1`, which this bootstrap replaces.
+    static_call(
+        shared,
+        thread,
+        path,
+        "java/lang/System",
+        "setJavaLangAccess",
+        "()V",
+        &[],
+    )?;
+
+    let utf8 = shared.intern(path, "UTF-8")?;
+    let charset = static_call(
+        shared,
+        thread,
+        path,
+        "java/nio/charset/Charset",
+        "forName",
+        "(Ljava/lang/String;)Ljava/nio/charset/Charset;",
+        &[Value::Ref(utf8)],
+    )?;
+
+    let out = stream(shared, thread, path, fd_out, charset)?;
+    let err = stream(shared, thread, path, fd_err, charset)?;
+    let statics = &mut shared.classes[system.index()].statics;
+    statics.insert("out".to_owned(), Value::Ref(out));
+    statics.insert("err".to_owned(), Value::Ref(err));
+    Ok(())
+}
+
+/// Invokes an instance method on `receiver` through the interpreter.
+// The bootstrap names the class, method and descriptor explicitly; a params struct would only
+// move the list one level down.
+#[allow(clippy::too_many_arguments)]
+fn invoke_instance(
+    shared: &mut Shared,
+    thread: &mut ThreadState,
+    path: &ClassPath,
+    receiver: ObjRef,
+    class_name: &str,
+    name: &str,
+    descriptor: &str,
+    args: &[Value],
+) -> Result<Value, VmError> {
+    let class = shared.load_class(path, class_name)?;
+    ensure_initialized(shared, thread, path, class)?;
+    let (owner, index) = shared
+        .resolve_method(class, name, descriptor)
+        .ok_or_else(|| VmError::MethodNotFound {
+            class: class_name.to_owned(),
+            name: name.to_owned(),
+            descriptor: descriptor.to_owned(),
+        })?;
+    let mut call_args = Vec::with_capacity(args.len() + 1);
+    call_args.push(Value::Ref(receiver));
+    call_args.extend_from_slice(args);
+    invoke(shared, thread, path, owner, index, call_args)
+}
+
+/// One `PrintStream` over a standard descriptor.
+fn stream(
+    shared: &mut Shared,
+    thread: &mut ThreadState,
+    path: &ClassPath,
+    descriptor: Value,
+    charset: Value,
+) -> Result<ObjRef, VmError> {
+    let file = construct(
+        shared,
+        thread,
+        path,
+        "java/io/FileOutputStream",
+        "(Ljava/io/FileDescriptor;)V",
+        &[descriptor],
+    )?;
+    let buffer = construct(
+        shared,
+        thread,
+        path,
+        "java/io/BufferedOutputStream",
+        "(Ljava/io/OutputStream;)V",
+        &[Value::Ref(file)],
+    )?;
+    construct(
+        shared,
+        thread,
+        path,
+        "java/io/PrintStream",
+        "(Ljava/io/OutputStream;ZLjava/nio/charset/Charset;)V",
+        &[Value::Ref(buffer), Value::Int(1), charset],
+    )
+}
+
+/// Allocates an instance and runs its constructor through the interpreter.
+fn construct(
+    shared: &mut Shared,
+    thread: &mut ThreadState,
+    path: &ClassPath,
+    class_name: &str,
+    descriptor: &str,
+    args: &[Value],
+) -> Result<ObjRef, VmError> {
+    let class = shared.load_class(path, class_name)?;
+    ensure_initialized(shared, thread, path, class)?;
+    let (owner, index) = shared
+        .resolve_method(class, "<init>", descriptor)
+        .ok_or_else(|| VmError::MethodNotFound {
+            class: class_name.to_owned(),
+            name: "<init>".to_owned(),
+            descriptor: descriptor.to_owned(),
+        })?;
+    let receiver = shared.new_instance(class);
+    let mut call_args = Vec::with_capacity(args.len() + 1);
+    call_args.push(Value::Ref(receiver));
+    call_args.extend_from_slice(args);
+    invoke(shared, thread, path, owner, index, call_args)?;
+    Ok(receiver)
+}
+
+/// Invokes a static method through the interpreter.
+fn static_call(
+    shared: &mut Shared,
+    thread: &mut ThreadState,
+    path: &ClassPath,
+    class_name: &str,
+    name: &str,
+    descriptor: &str,
+    args: &[Value],
+) -> Result<Value, VmError> {
+    let class = shared.load_class(path, class_name)?;
+    ensure_initialized(shared, thread, path, class)?;
+    let (owner, index) = shared
+        .resolve_method(class, name, descriptor)
+        .ok_or_else(|| VmError::MethodNotFound {
+            class: class_name.to_owned(),
+            name: name.to_owned(),
+            descriptor: descriptor.to_owned(),
+        })?;
+    invoke(shared, thread, path, owner, index, args.to_vec())
+}
+
+fn static_field(shared: &Shared, class: ClassId, name: &str) -> Result<Value, VmError> {
+    shared
+        .class(class)
+        .statics
+        .get(name)
+        .copied()
+        .ok_or_else(|| VmError::FieldNotFound {
+            class: shared.class(class).name.clone(),
+            name: name.to_owned(),
+        })
+}
+
 /// Runs `<clinit>` once, on first active use (JVMS §5.5, single-threaded form).
 fn ensure_initialized(
     shared: &mut Shared,
@@ -63,6 +287,12 @@ fn ensure_initialized(
     path: &ClassPath,
     class: ClassId,
 ) -> Result<(), VmError> {
+    // JVMS §5.5 step 7: a class is initialized only after its superclass. The library relies
+    // on it for inherited statics (`java.nio.HeapByteBuffer` reads `Buffer.UNSAFE`, which
+    // `Buffer.<clinit>` sets).
+    if let Some(parent) = shared.class(class).super_class {
+        ensure_initialized(shared, thread, path, parent)?;
+    }
     match shared.begin_initialization(class) {
         // `Initializing` means a `<clinit>` is already running on this thread: skip it.
         Initialization::AlreadyDone => Ok(()),
@@ -629,8 +859,14 @@ fn run_frame(
                     let field = resolve::field_ref(shared.class(class), constant)?;
                     let owner = shared.load_class(path, &field.class_name)?;
                     ensure_initialized(shared, thread, path, owner)?;
+                    let declaring = shared
+                        .static_field_owner(owner, &field.name, &field.descriptor)
+                        .ok_or_else(|| VmError::FieldNotFound {
+                            class: field.class_name.clone(),
+                            name: field.name.clone(),
+                        })?;
                     let value = *shared
-                        .class(owner)
+                        .class(declaring)
                         .statics
                         .get(&field.name)
                         .ok_or_else(|| VmError::FieldNotFound {
@@ -643,8 +879,14 @@ fn run_frame(
                     let field = resolve::field_ref(shared.class(class), constant)?;
                     let owner = shared.load_class(path, &field.class_name)?;
                     ensure_initialized(shared, thread, path, owner)?;
+                    let declaring = shared
+                        .static_field_owner(owner, &field.name, &field.descriptor)
+                        .ok_or_else(|| VmError::FieldNotFound {
+                            class: field.class_name.clone(),
+                            name: field.name.clone(),
+                        })?;
                     let value = pop(&mut thread.frames[frame_index], qualified, code)?;
-                    shared.classes[owner.index()]
+                    shared.classes[declaring.index()]
                         .statics
                         .insert(field.name, value);
                 }
@@ -1664,6 +1906,7 @@ fn allocate_exception(
 ) -> Result<ObjRef, VmError> {
     let class = shared.load_class(path, class_name)?;
     ensure_initialized(shared, thread, path, class)?;
+    initialize_system(shared, thread, path)?;
     let object = shared.new_instance(class);
 
     let descriptor = if message.is_some() {

@@ -26,6 +26,9 @@ pub fn register(shared: &mut Shared) {
         "(I)Z",
         descriptor_append,
     );
+    // `FileDescriptor.<clinit>` calls `initIDs`; HotSpot caches field IDs there, this VM has
+    // nothing to cache.
+    shared.register_native("java/io/FileDescriptor", "initIDs", "()V", crate::no_op);
     shared.register_native("java/io/FileOutputStream", "write", "(IZ)V", write_byte);
     shared.register_native(
         "java/io/FileOutputStream",
