@@ -115,9 +115,37 @@ fn capture_once(
         });
     }
     trace.extend(ctx.shared.capture_trace(ctx.thread));
-    fill_java_view(ctx, reference, &trace)?;
-    ctx.shared.traces.insert(reference, trace);
+    let visible = visible_frames(ctx, &trace);
+    fill_java_view(ctx, reference, &visible)?;
+    ctx.shared.traces.insert(reference, visible);
     Ok(())
+}
+
+/// The frames HotSpot reports: it hides `Throwable.fillInStackTrace` and the constructor chain
+/// of the throwable being built (measured: `java` prints only the throwing method for
+/// `new IllegalStateException("boom")`). Keeping the hidden frames would make
+/// `printStackTrace` differ from the reference launcher, which S26 checks byte for byte.
+fn visible_frames(ctx: &NativeCtx<'_>, trace: &[TraceFrame]) -> Vec<TraceFrame> {
+    let throwable = ctx.shared.class_ids.get("java/lang/Throwable").copied();
+    let mut start = 0;
+    while start < trace.len() {
+        let frame = &trace[start];
+        let fill_in = frame.class == "java/lang/Throwable" && frame.method == "fillInStackTrace";
+        let constructor = frame.method == "<init>"
+            && throwable.is_some_and(|throwable| {
+                ctx.shared
+                    .class_ids
+                    .get(&frame.class)
+                    .copied()
+                    .is_some_and(|class| ctx.shared.is_assignable(class, throwable))
+            });
+        if fill_in || constructor {
+            start += 1;
+        } else {
+            break;
+        }
+    }
+    trace[start..].to_vec()
 }
 
 /// The source line the host's `fillInStackTrace()` body is on when it calls its private native.

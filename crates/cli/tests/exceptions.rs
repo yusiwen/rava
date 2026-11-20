@@ -182,18 +182,17 @@ fn making_an_exception_captures_a_trace() {
         !trace.is_empty(),
         "the trace has at least the constructor's frames"
     );
+    // HotSpot hides `fillInStackTrace` and the throwable's constructor chain, so the VM's trace
+    // (like the one `java` prints) starts at the throwing site (S26).
     assert_eq!(
-        (trace[0].class.as_str(), trace[0].method.as_str()),
-        ("java/lang/Throwable", "fillInStackTrace"),
-        "the innermost frame is the method that called the native"
+        trace.len(),
+        1,
+        "the constructor's internal frames are hidden"
     );
     assert_eq!(
-        (
-            trace.last().unwrap().class.as_str(),
-            trace.last().unwrap().method.as_str()
-        ),
+        (trace[0].class.as_str(), trace[0].method.as_str()),
         ("MakeException", "main"),
-        "the outermost frame is main, so the trace spans the constructor"
+        "the visible frame is the constructor's caller"
     );
 }
 

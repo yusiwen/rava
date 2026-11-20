@@ -408,21 +408,18 @@ fn get_stack_trace_reads_the_frames_the_native_captured() {
     let path = host_path(&dir);
     let (shared, _thread) = run(&path, "StackTrace");
 
-    assert_eq!(int(&shared, "StackTrace", "LEN"), 6, "frame count");
+    // HotSpot hides `fillInStackTrace` and the throwable's constructor chain, so the trace the
+    // host prints starts at the throwing method (S26 measured it against `java`).
+    assert_eq!(int(&shared, "StackTrace", "LEN"), 1, "frame count");
     assert_eq!(
         text(&shared, "StackTrace", "CLASS0"),
-        "java.lang.Throwable",
-        "innermost frame class"
+        "StackTrace",
+        "innermost visible frame class"
     );
     assert_eq!(
         text(&shared, "StackTrace", "METHOD0"),
-        "fillInStackTrace",
-        "innermost frame method"
-    );
-    assert_eq!(
-        text(&shared, "StackTrace", "FILL"),
-        "java.lang.Throwable",
-        "the class of the frame whose method is fillInStackTrace"
+        "main",
+        "innermost visible frame method"
     );
     assert_eq!(
         text(&shared, "StackTrace", "LAST"),
@@ -450,7 +447,7 @@ fn two_get_stack_trace_calls_see_the_same_trace() {
     let (shared, _thread) = run(&path, "StackTraceTwice");
 
     let len1 = int(&shared, "StackTraceTwice", "LEN1");
-    assert_eq!(len1, 6, "first frame count");
+    assert_eq!(len1, 1, "first frame count");
     assert_eq!(
         int(&shared, "StackTraceTwice", "LEN2"),
         len1,

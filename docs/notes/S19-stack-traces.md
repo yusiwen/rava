@@ -94,6 +94,13 @@ above), which is the measurement that forced the intrinsic.
 The `backtrace` field is never written; `Shared::traces` still holds the VM-side trace, and the
 two now agree because both come from the same capture.
 
+## Correction (S26)
+
+The acceptance above says the array's first element is `fillInStackTrace`, which was the VM's
+first implementation, not the host's behaviour. HotSpot hides the leading `fillInStackTrace` and
+throwable-constructor frames; S26 measured it against `java` and changed the filter, so the trace
+now starts at the throwing method (see the S26 note).
+
 ## Open threads
 
 - **`printStackTrace()` still cannot run.** It reaches `System.out`/`PrintStream`, which is G2

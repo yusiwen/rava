@@ -17,8 +17,8 @@ fn jdk_home() -> PathBuf {
     PathBuf::from(home)
 }
 
-fn fixture_dir() -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("rava-g2-{}", std::process::id()));
+fn fixture_dir(name: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("rava-g2-{}-{}", std::process::id(), name));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("fixture directory");
     dir
@@ -87,7 +87,7 @@ fn run_rava(dir: &Path) -> std::process::Output {
 
 #[test]
 fn printing_matches_the_reference_launcher_byte_for_byte() {
-    let dir = fixture_dir();
+    let dir = fixture_dir("print");
     compile(&dir);
     let reference = run_java(&dir);
     let ours = run_rava(&dir);
@@ -116,5 +116,69 @@ fn printing_matches_the_reference_launcher_byte_for_byte() {
         reference.stderr,
         "stderr differs: {}",
         String::from_utf8_lossy(&ours.stderr)
+    );
+}
+
+/// `printStackTrace` writes to `System.err`; its frames, file names and line numbers come from
+/// the VM's `StackTraceElement` synthesis (S19). This is where that synthesis is pinned against
+/// the reference launcher.
+const TRACE_SOURCE: &str = r#"
+public class TraceSample {
+    public static void main(String[] args) {
+        try {
+            throw new IllegalStateException("boom");
+        } catch (RuntimeException e) {
+            e.printStackTrace();
+        }
+    }
+}
+"#;
+
+#[test]
+fn stack_trace_output_matches_the_reference_launcher() {
+    let dir = fixture_dir("trace");
+    let source = dir.join("TraceSample.java");
+    std::fs::write(&source, TRACE_SOURCE).expect("source file");
+    let compiled = Command::new(jdk_home().join("bin/javac"))
+        .arg("-d")
+        .arg(&dir)
+        .arg(&source)
+        .output()
+        .expect("run javac");
+    assert!(
+        compiled.status.success(),
+        "javac failed: {}",
+        String::from_utf8_lossy(&compiled.stderr)
+    );
+
+    let run = |command: &mut Command| -> std::process::Output { command.output().expect("run") };
+    let reference = run(Command::new(jdk_home().join("bin/java"))
+        .arg("-cp")
+        .arg(&dir)
+        .arg("TraceSample"));
+    let ours = run(Command::new(env!("CARGO_BIN_EXE_rava"))
+        .arg("run")
+        .arg("TraceSample")
+        .arg("--home")
+        .arg(jdk_home())
+        .arg("--cp")
+        .arg(&dir));
+    assert_eq!(
+        ours.status.code(),
+        reference.status.code(),
+        "exit code: rava {:?}, java {:?}",
+        ours.status.code(),
+        reference.status.code()
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&ours.stderr),
+        String::from_utf8_lossy(&reference.stderr),
+        "stderr differs\nrava: {}\njava: {}",
+        String::from_utf8_lossy(&ours.stderr),
+        String::from_utf8_lossy(&reference.stderr)
+    );
+    assert!(
+        !reference.stderr.is_empty(),
+        "the reference stderr is empty, so the comparison proves nothing"
     );
 }
