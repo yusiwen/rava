@@ -429,3 +429,300 @@ fn the_system_setter_runs_from_java() {
         other => panic!("System.out is {other:?}, not an object"),
     }
 }
+
+// --- natives the class-object probe reached on the io path -----------------------------------
+
+fn call_native(name: &str, args: &[Value]) -> (Value, rava_vm::Shared) {
+    let path = host_path();
+    let mut shared = rava_vm::Shared::new();
+    rava_native::register_jcl_natives(&mut shared);
+    let function = *shared.natives.get(name).unwrap_or_else(|| panic!("{name}"));
+    let mut thread = ThreadState::new();
+    let value = {
+        let mut ctx = NativeCtx {
+            shared: &mut shared,
+            thread: &mut thread,
+            path: &path,
+            args,
+        };
+        function(&mut ctx).unwrap_or_else(|error| panic!("{name}: {error}"))
+    };
+    (value, shared)
+}
+
+#[test]
+fn cds_answers_no() {
+    for key in [
+        "jdk/internal/misc/CDS.isDumpingClassList0()Z",
+        "jdk/internal/misc/CDS.isDumpingArchive0()Z",
+        "jdk/internal/misc/CDS.isSharingEnabled0()Z",
+    ] {
+        assert_eq!(call_native(key, &[]).0, Value::Int(0), "{key}");
+    }
+}
+
+#[test]
+fn the_clock_moves_forward() {
+    let (first, _) = call_native("java/lang/System.nanoTime()J", &[]);
+    let (second, _) = call_native("java/lang/System.nanoTime()J", &[]);
+    let Value::Long(first) = first else {
+        panic!("nanoTime is not a long");
+    };
+    let Value::Long(second) = second else {
+        panic!("nanoTime is not a long");
+    };
+    assert!(
+        second >= first,
+        "nanoTime went backwards: {first} then {second}"
+    );
+
+    let (millis, _) = call_native("java/lang/System.currentTimeMillis()J", &[]);
+    let Value::Long(millis) = millis else {
+        panic!("currentTimeMillis is not a long");
+    };
+    // After 2020 and before 2100: a wrong unit or epoch would fall outside.
+    assert!(
+        (1_577_836_800_000..4_102_444_800_000).contains(&millis),
+        "currentTimeMillis is {millis}"
+    );
+}
+
+#[test]
+fn identity_hashes_are_stable_and_distinct() {
+    let path = host_path();
+    let mut shared = rava_vm::Shared::new();
+    rava_native::register_jcl_natives(&mut shared);
+    let object = shared
+        .load_class(&path, "java/lang/Object")
+        .expect("Object");
+    let first = shared.allocate(HeapObject::Instance(rava_vm::Instance {
+        class: object,
+        fields: Vec::new(),
+    }));
+    let second = shared.allocate(HeapObject::Instance(rava_vm::Instance {
+        class: object,
+        fields: Vec::new(),
+    }));
+    let a = shared.identity_hash(first);
+    assert_eq!(a, shared.identity_hash(first), "the hash must be stable");
+    assert_ne!(a, shared.identity_hash(second), "two objects share a hash");
+}
+
+#[test]
+fn float_and_double_bits_round_trip() {
+    let (bits, _) = call_native(
+        "java/lang/Float.floatToRawIntBits(F)I",
+        &[Value::Float(1.5)],
+    );
+    assert_eq!(bits, Value::Int(0x3FC0_0000));
+    let (value, _) = call_native("java/lang/Float.intBitsToFloat(I)F", &[bits]);
+    assert_eq!(value, Value::Float(1.5));
+
+    let (bits, _) = call_native(
+        "java/lang/Double.doubleToRawLongBits(D)J",
+        &[Value::Double(1.5)],
+    );
+    assert_eq!(bits, Value::Long(0x3FF8_0000_0000_0000));
+    let (value, _) = call_native("java/lang/Double.longBitsToDouble(J)D", &[bits]);
+    assert_eq!(value, Value::Double(1.5));
+}
+
+#[test]
+fn primitive_class_objects_come_from_names() {
+    let path = host_path();
+    let mut shared = rava_vm::Shared::new();
+    rava_native::register_jcl_natives(&mut shared);
+    let name = shared.intern("int");
+    let function = *shared
+        .natives
+        .get("java/lang/Class.getPrimitiveClass(Ljava/lang/String;)Ljava/lang/Class;")
+        .expect("registered");
+    let mut thread = ThreadState::new();
+    let args = [Value::Ref(name)];
+    let mut ctx = NativeCtx {
+        shared: &mut shared,
+        thread: &mut thread,
+        path: &path,
+        args: &args,
+    };
+    let Value::Ref(int_class) = function(&mut ctx).expect("getPrimitiveClass") else {
+        panic!("getPrimitiveClass did not return a class");
+    };
+    assert_eq!(ctx.shared.type_class_ref(int_class), Some("I"));
+}
+
+#[test]
+fn available_processors_is_at_least_one() {
+    let (value, _) = call_native("java/lang/Runtime.availableProcessors()I", &[]);
+    let Value::Int(count) = value else {
+        panic!("availableProcessors is not an int");
+    };
+    assert!(count >= 1, "availableProcessors is {count}");
+}
+
+#[test]
+fn the_caller_class_is_the_frame_below_the_immediate_caller() {
+    let path = host_path();
+    let mut shared = rava_vm::Shared::new();
+    rava_native::register_jcl_natives(&mut shared);
+    let object = shared
+        .load_class(&path, "java/lang/Object")
+        .expect("Object");
+    let string = shared
+        .load_class(&path, "java/lang/String")
+        .expect("String");
+    let mut thread = ThreadState::new();
+    thread.frames.push(rava_vm::Frame {
+        class: object,
+        method: 0,
+        pc: 0,
+        locals: Vec::new(),
+        stack: Vec::new(),
+    });
+    thread.frames.push(rava_vm::Frame {
+        class: string,
+        method: 0,
+        pc: 0,
+        locals: Vec::new(),
+        stack: Vec::new(),
+    });
+    let function = *shared
+        .natives
+        .get("jdk/internal/reflect/Reflection.getCallerClass()Ljava/lang/Class;")
+        .expect("registered");
+    let args: [Value; 0] = [];
+    let mut ctx = NativeCtx {
+        shared: &mut shared,
+        thread: &mut thread,
+        path: &path,
+        args: &args,
+    };
+    let Value::Ref(caller) = function(&mut ctx).expect("getCallerClass") else {
+        panic!("getCallerClass did not return a class");
+    };
+    assert_eq!(
+        ctx.shared.class_ref(caller),
+        Some(object),
+        "the caller is String's caller"
+    );
+}
+
+#[test]
+fn class_queries_answer_from_the_target() {
+    let path = host_path();
+    let mut shared = rava_vm::Shared::new();
+    rava_native::register_jcl_natives(&mut shared);
+    let mut thread = ThreadState::new();
+
+    let string = shared
+        .load_class(&path, "java/lang/String")
+        .expect("String");
+    let comparable = shared
+        .load_class(&path, "java/lang/Comparable")
+        .expect("Comparable");
+    let string_class = shared.class_object(&path, string).expect("String.class");
+    let comparable_class = shared
+        .class_object(&path, comparable)
+        .expect("Comparable.class");
+    let int_class = shared.type_class(&path, "I").expect("int.class");
+    let array_class = shared.type_class(&path, "[I").expect("[I.class");
+
+    let call = |shared: &mut rava_vm::Shared,
+                thread: &mut ThreadState,
+                name: &str,
+                args: &[Value]|
+     -> Value {
+        let function = *shared.natives.get(name).expect(name);
+        let mut ctx = NativeCtx {
+            shared,
+            thread,
+            path: &path,
+            args,
+        };
+        function(&mut ctx).unwrap_or_else(|error| panic!("{name}: {error}"))
+    };
+
+    assert_eq!(
+        call(
+            &mut shared,
+            &mut thread,
+            "java/lang/Class.isPrimitive()Z",
+            &[Value::Ref(int_class)]
+        ),
+        Value::Int(1)
+    );
+    assert_eq!(
+        call(
+            &mut shared,
+            &mut thread,
+            "java/lang/Class.isPrimitive()Z",
+            &[Value::Ref(string_class)]
+        ),
+        Value::Int(0)
+    );
+    assert_eq!(
+        call(
+            &mut shared,
+            &mut thread,
+            "java/lang/Class.isArray()Z",
+            &[Value::Ref(array_class)]
+        ),
+        Value::Int(1)
+    );
+    assert_eq!(
+        call(
+            &mut shared,
+            &mut thread,
+            "java/lang/Class.isInterface()Z",
+            &[Value::Ref(comparable_class)]
+        ),
+        Value::Int(1)
+    );
+    assert_eq!(
+        call(
+            &mut shared,
+            &mut thread,
+            "java/lang/Class.isInterface()Z",
+            &[Value::Ref(string_class)]
+        ),
+        Value::Int(0)
+    );
+
+    let name = call(
+        &mut shared,
+        &mut thread,
+        "java/lang/Class.initClassName()Ljava/lang/String;",
+        &[Value::Ref(string_class)],
+    );
+    let Value::Ref(name) = name else {
+        panic!("initClassName is not a string");
+    };
+    assert!(
+        matches!(&shared.heap[name.index()], HeapObject::Str(text) if text == "java.lang.String")
+    );
+    // The native caches the name in the object, so a second call reads the field like the host's
+    // `getName` does; both answers must agree.
+    let class_class = shared.class_of(string_class).expect("java.lang.Class");
+    let slot = shared
+        .class(class_class)
+        .field_slot("name", "Ljava/lang/String;")
+        .expect("Class.name");
+    assert!(matches!(
+        shared.instance_field(string_class, slot).unwrap(),
+        Value::Ref(cached) if cached == name
+    ));
+
+    let primitive_name = call(
+        &mut shared,
+        &mut thread,
+        "java/lang/Class.initClassName()Ljava/lang/String;",
+        &[Value::Ref(int_class)],
+    );
+    let Value::Ref(primitive_name) = primitive_name else {
+        panic!("initClassName is not a string");
+    };
+    assert!(matches!(
+        &shared.heap[primitive_name.index()],
+        HeapObject::Str(text) if text == "int"
+    ));
+}

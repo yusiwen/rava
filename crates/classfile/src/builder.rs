@@ -11,6 +11,13 @@
 
 use std::collections::HashMap;
 
+/// One field the caller wants in the class.
+struct FieldEntry {
+    access: u16,
+    name: u16,
+    descriptor: u16,
+}
+
 /// One method the caller wants in the class.
 struct MethodEntry {
     access: u16,
@@ -28,6 +35,7 @@ pub struct ClassBuilder {
     this_class: u16,
     super_class: u16,
     major: u16,
+    fields: Vec<FieldEntry>,
     methods: Vec<MethodEntry>,
 }
 
@@ -40,6 +48,7 @@ impl ClassBuilder {
             this_class: 0,
             super_class: 0,
             major,
+            fields: Vec::new(),
             methods: Vec::new(),
         };
         builder.this_class = builder.class(this);
@@ -125,6 +134,17 @@ impl ClassBuilder {
         self.push(key, entry)
     }
 
+    /// Adds a field. `access` is the raw access-flags word (`0x0009` is `public static`).
+    pub fn field(&mut self, access: u16, name: &str, descriptor: &str) {
+        let name = self.utf8(name);
+        let descriptor = self.utf8(descriptor);
+        self.fields.push(FieldEntry {
+            access,
+            name,
+            descriptor,
+        });
+    }
+
     /// Adds a method. `code` is `(max_stack, max_locals, bytes)`; `None` means `native`/`abstract`.
     pub fn method(
         &mut self,
@@ -174,7 +194,13 @@ impl ClassBuilder {
         out.extend_from_slice(&self.this_class.to_be_bytes());
         out.extend_from_slice(&self.super_class.to_be_bytes());
         out.extend_from_slice(&0u16.to_be_bytes()); // interfaces
-        out.extend_from_slice(&0u16.to_be_bytes()); // fields
+        out.extend_from_slice(&(self.fields.len() as u16).to_be_bytes());
+        for field in &self.fields {
+            out.extend_from_slice(&field.access.to_be_bytes());
+            out.extend_from_slice(&field.name.to_be_bytes());
+            out.extend_from_slice(&field.descriptor.to_be_bytes());
+            out.extend_from_slice(&0u16.to_be_bytes()); // no field attributes
+        }
         out.extend_from_slice(&(self.methods.len() as u16).to_be_bytes());
 
         for method in &self.methods {

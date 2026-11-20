@@ -61,6 +61,14 @@ pub struct CollectionStats {
     pub freed: usize,
 }
 
+/// What a `java.lang.Class` object names: a loaded class or a primitive/array type.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ClassTarget {
+    Loaded(ClassId),
+    /// A primitive or array type by descriptor (`I`, `[Ljava/lang/String;`).
+    Type(String),
+}
+
 /// What a call to [`Shared::begin_initialization`] should do next.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Initialization {
@@ -112,8 +120,18 @@ pub struct Shared {
     pub invoker: Option<Invoker>,
     /// One `java.lang.Class` object per class, so class objects compare by identity.
     pub class_objects: HashMap<ClassId, ObjRef>,
+    /// What a class object names: a loaded class or a primitive/array descriptor. This is the
+    /// reverse of `class_objects`/`type_classes`; it exists because the host's
+    /// `java.lang.Class` has no spare field to hold the identity (OpenJ9 puts a `vmRef` long
+    /// there, but its class library is its own).
+    pub class_targets: HashMap<ObjRef, ClassTarget>,
     /// Class objects for primitive and array types, keyed by descriptor.
     pub type_classes: HashMap<String, ObjRef>,
+    /// Identity hash codes, assigned on first use. `Object.hashCode` must be stable for the
+    /// life of the object, and a counter is enough until the object header can hold it.
+    pub identity_hashes: HashMap<ObjRef, i32>,
+    /// The next identity hash to hand out.
+    pub next_identity_hash: i32,
     /// One `Field`/`Method` object per declared member, for the same reason.
     pub field_objects: HashMap<(ClassId, usize), ObjRef>,
     pub method_objects: HashMap<(ClassId, usize), ObjRef>,
@@ -134,7 +152,7 @@ pub struct Shared {
     /// array field would need `System.arraycopy` to grow.
     pub suppressed: HashMap<ObjRef, Vec<ObjRef>>,
     /// Whether a class is verified when it loads. `true` by default; tests that build malformed
-    /// class files on purpose turn it off (ADR-0014's follow-up).
+    /// class files on purpose turn it off (ADR-0011's follow-up).
     pub verify_on_load: bool,
     /// Instructions dispatched since the VM was created. A `u64` add in the loop costs
     /// nothing measurable and makes "how much work was this run" a number instead of an
@@ -168,10 +186,13 @@ impl Shared {
             monitors: HashMap::new(),
             invoker: None,
             class_objects: HashMap::new(),
+            class_targets: HashMap::new(),
             type_classes: HashMap::new(),
             field_objects: HashMap::new(),
             method_objects: HashMap::new(),
             constructor_objects: HashMap::new(),
+            identity_hashes: HashMap::new(),
+            next_identity_hash: 1,
             int_cache: HashMap::new(),
             long_cache: HashMap::new(),
             double_cache: HashMap::new(),
@@ -271,11 +292,9 @@ impl Shared {
                 | HeapObject::Free
                 | HeapObject::Str(_)
                 | HeapObject::Builder(_)
-                | HeapObject::ClassRef(_)
                 | HeapObject::FieldRef(_, _)
                 | HeapObject::MethodRef(_, _)
-                | HeapObject::ConstructorRef(_, _)
-                | HeapObject::TypeClassRef(_) => {}
+                | HeapObject::ConstructorRef(_, _) => {}
             }
         }
 
@@ -370,13 +389,20 @@ impl Shared {
     }
 
     /// The `java.lang.Class` object for a class, allocated once and cached.
-    pub fn class_object(&mut self, class: ClassId) -> ObjRef {
+    ///
+    /// It is a real instance of the host's `java.lang.Class` (which is why `assert` and
+    /// `getName` work on it), created on first use. The class object for `java.lang.Class`
+    /// itself is created the same way, so no bootstrap ordering is special-cased.
+    pub fn class_object(&mut self, path: &ClassPath, class: ClassId) -> Result<ObjRef, VmError> {
         if let Some(reference) = self.class_objects.get(&class) {
-            return *reference;
+            return Ok(*reference);
         }
-        let reference = self.allocate(HeapObject::ClassRef(class));
+        let class_class = self.load_class(path, "java/lang/Class")?;
+        let reference = self.new_instance(class_class);
+        self.class_targets
+            .insert(reference, ClassTarget::Loaded(class));
         self.class_objects.insert(class, reference);
-        reference
+        Ok(reference)
     }
 
     /// The `Field` object for a declared field, allocated once and cached.
@@ -432,27 +458,30 @@ impl Shared {
     }
 
     /// The class object for a primitive or array type, allocated once per descriptor.
-    pub fn type_class(&mut self, descriptor: &str) -> ObjRef {
+    pub fn type_class(&mut self, path: &ClassPath, descriptor: &str) -> Result<ObjRef, VmError> {
         if let Some(reference) = self.type_classes.get(descriptor) {
-            return *reference;
+            return Ok(*reference);
         }
-        let reference = self.allocate(HeapObject::TypeClassRef(descriptor.to_owned()));
+        let class_class = self.load_class(path, "java/lang/Class")?;
+        let reference = self.new_instance(class_class);
+        self.class_targets
+            .insert(reference, ClassTarget::Type(descriptor.to_owned()));
         self.type_classes.insert(descriptor.to_owned(), reference);
-        reference
+        Ok(reference)
     }
 
     /// The descriptor a heap reference names, if it is a primitive or array class object.
     pub fn type_class_ref(&self, reference: ObjRef) -> Option<&str> {
-        match self.heap.get(reference.index()) {
-            Some(HeapObject::TypeClassRef(descriptor)) => Some(descriptor),
+        match self.class_targets.get(&reference) {
+            Some(ClassTarget::Type(descriptor)) => Some(descriptor),
             _ => None,
         }
     }
 
     /// The class id a heap reference names, if it is a class object.
     pub fn class_ref(&self, reference: ObjRef) -> Option<ClassId> {
-        match self.heap.get(reference.index()) {
-            Some(HeapObject::ClassRef(class)) => Some(*class),
+        match self.class_targets.get(&reference) {
+            Some(ClassTarget::Loaded(class)) => Some(*class),
             _ => None,
         }
     }
@@ -628,10 +657,10 @@ impl Shared {
                 // A primitive or array type has no class file, so it becomes a type class object.
                 let name = crate::resolve::class_constant(self.class(class), index)?;
                 if is_type_descriptor(&name) {
-                    Value::Ref(self.type_class(&name))
+                    Value::Ref(self.type_class(path, &name)?)
                 } else {
                     let target = self.load_class(path, &name)?;
-                    Value::Ref(self.class_object(target))
+                    Value::Ref(self.class_object(path, target)?)
                 }
             }
             _ => {
@@ -898,11 +927,9 @@ impl Shared {
             HeapObject::Builder(_) => self.class_ids.get("java/lang/StringBuilder").copied(),
             HeapObject::Array(_)
             | HeapObject::Lambda(_)
-            | HeapObject::ClassRef(_)
             | HeapObject::FieldRef(_, _)
             | HeapObject::MethodRef(_, _)
             | HeapObject::ConstructorRef(_, _)
-            | HeapObject::TypeClassRef(_)
             | HeapObject::Null
             | HeapObject::Free => None,
         }
@@ -916,6 +943,17 @@ impl Shared {
             .map(|slot| Value::default_for(&slot.descriptor))
             .collect();
         self.allocate(HeapObject::Instance(Instance { class, fields }))
+    }
+
+    /// The object's identity hash, assigned on first use and stable afterwards.
+    pub fn identity_hash(&mut self, reference: ObjRef) -> i32 {
+        if let Some(hash) = self.identity_hashes.get(&reference) {
+            return *hash;
+        }
+        let hash = self.next_identity_hash;
+        self.next_identity_hash = self.next_identity_hash.wrapping_add(1);
+        self.identity_hashes.insert(reference, hash);
+        hash
     }
 
     pub fn instance_field(&self, reference: ObjRef, slot: usize) -> Result<Value, VmError> {

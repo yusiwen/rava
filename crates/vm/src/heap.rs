@@ -45,13 +45,6 @@ pub enum HeapObject {
     MethodRef(ClassId, usize),
     /// A `java.lang.reflect.Constructor`: the class and the index of the declared method.
     ConstructorRef(ClassId, usize),
-    /// A `java.lang.Class` object: the class it names. One per class, cached in
-    /// `Shared.class_objects`, so `Foo.class == Foo.class` holds.
-    ClassRef(ClassId),
-    /// A `java.lang.Class` object for a primitive or array type, named by its descriptor (`I`,
-    /// `[Ljava/lang/String;`). Such a type has no loaded class, which is why it needs its own
-    /// variant (issue #41).
-    TypeClassRef(String),
 }
 
 /// What an array holds. `Byte` doubles for `boolean`, as JVMS §2.2 does for the storage

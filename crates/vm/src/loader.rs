@@ -273,7 +273,10 @@ fn build_class(shared: &mut Shared, path: &ClassPath, name: &str) -> Result<Clas
     // `int.class` compiles to `getstatic java/lang/Integer.TYPE`, so the loader supplies that
     // value: a primitive class cannot be created in Java (issue #41).
     if let Some(descriptor) = primitive_type_of(name) {
-        statics.insert("TYPE".to_owned(), Value::Ref(shared.type_class(descriptor)));
+        statics.insert(
+            "TYPE".to_owned(),
+            Value::Ref(shared.type_class(path, descriptor)?),
+        );
     }
 
     let source_file = file.source_file()?;
