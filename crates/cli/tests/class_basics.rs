@@ -61,7 +61,8 @@ fn build_queries(dir: &Path) {
     let string_class = builder.class("java/lang/String");
     let runnable_class = builder.class("java/lang/Runnable");
     let thread_class = builder.class("java/lang/Thread");
-    let int_class = builder.class("I");
+    // `int.class` is `getstatic java/lang/Integer.TYPE`, not a class named "I".
+    let int_class = builder.field_ref("java/lang/Integer", "TYPE", "Ljava/lang/Class;");
     let object_init = builder.method_ref("java/lang/Object", "<init>", "()V");
     let is_instance = builder.method_ref("java/lang/Class", "isInstance", "(Ljava/lang/Object;)Z");
     let is_assignable_from = builder.method_ref(
@@ -131,28 +132,28 @@ fn build_queries(dir: &Path) {
     invoke(0xb6, get_modifiers, &mut code);
     putstatic(string_modifiers, &mut code);
     // INT_INSTANCE = int.class.isInstance(new Object());
-    ldc_w(int_class, &mut code);
+    invoke(0xb2, int_class, &mut code);
     code.extend_from_slice(&[0xbb, (object_class >> 8) as u8, object_class as u8]);
     code.push(0x59);
     invoke(0xb7, object_init, &mut code);
     invoke(0xb6, is_instance, &mut code);
     putstatic(int_instance, &mut code);
     // INT_SELF = int.class.isAssignableFrom(int.class);
-    ldc_w(int_class, &mut code);
-    ldc_w(int_class, &mut code);
+    invoke(0xb2, int_class, &mut code);
+    invoke(0xb2, int_class, &mut code);
     invoke(0xb6, is_assignable_from, &mut code);
     putstatic(int_self, &mut code);
     // OBJECT_INT = Object.class.isAssignableFrom(int.class);
     ldc_w(object_class, &mut code);
-    ldc_w(int_class, &mut code);
+    invoke(0xb2, int_class, &mut code);
     invoke(0xb6, is_assignable_from, &mut code);
     putstatic(object_int, &mut code);
     // INT_MODIFIERS = int.class.getModifiers();
-    ldc_w(int_class, &mut code);
+    invoke(0xb2, int_class, &mut code);
     invoke(0xb6, get_modifiers, &mut code);
     putstatic(int_modifiers, &mut code);
     // INT_SUPER = int.class.getSuperclass();
-    ldc_w(int_class, &mut code);
+    invoke(0xb2, int_class, &mut code);
     invoke(0xb6, get_superclass, &mut code);
     putstatic(int_super, &mut code);
     code.push(0xb1); // return

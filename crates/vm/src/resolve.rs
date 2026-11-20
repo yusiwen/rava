@@ -156,6 +156,32 @@ pub fn type_slots(descriptor: &str) -> usize {
 /// The operand-stack slots the parameters of `descriptor` occupy.
 ///
 /// This is [`parameter_count`] counted in slots, which is what `max_stack` is measured in.
+/// One descriptor per parameter, in order (`(ILjava/lang/String;)[I` → `["I", "Ljava/lang/String;"]`).
+pub fn parameter_descriptors(descriptor: &str) -> Vec<String> {
+    let bytes = descriptor.as_bytes();
+    let mut index = 1;
+    let mut parameters = Vec::new();
+    while index < bytes.len() && bytes[index] != b')' {
+        let start = index;
+        while index < bytes.len() && bytes[index] == b'[' {
+            index += 1;
+        }
+        if index >= bytes.len() {
+            break;
+        }
+        if bytes[index] == b'L' {
+            while index < bytes.len() && bytes[index] != b';' {
+                index += 1;
+            }
+            index += 1;
+        } else {
+            index += 1;
+        }
+        parameters.push(descriptor[start..index].to_owned());
+    }
+    parameters
+}
+
 pub fn parameter_slots(descriptor: &str) -> usize {
     let bytes = descriptor.as_bytes();
     let mut index = 1; // skip '('

@@ -106,6 +106,8 @@ pub fn initialize_system(
     // entries are the default (root) locale.
     for (key, value) in [
         ("line.separator", "\n".to_owned()),
+        ("file.separator", "/".to_owned()),
+        ("path.separator", ":".to_owned()),
         ("file.encoding", "UTF-8".to_owned()),
         ("sun.jnu.encoding", "UTF-8".to_owned()),
         ("native.encoding", "UTF-8".to_owned()),
@@ -186,6 +188,12 @@ pub fn initialize_system(
         "()V",
         &[],
     )?;
+
+    // The JDK initializes `AccessibleObject` during boot; its `<clinit>` registers the
+    // `JavaLangReflectAccess` that `ReflectionFactory` caches in its instance. Without it the
+    // first reflective call NPEs on a null accessor (S27).
+    let accessible = shared.load_class(path, "java/lang/reflect/AccessibleObject")?;
+    ensure_initialized(shared, thread, path, accessible)?;
 
     let utf8 = shared.intern(path, "UTF-8")?;
     let charset = static_call(
@@ -433,16 +441,7 @@ fn invoke(
             native(&mut ctx)
         };
         return match outcome {
-            Err(VmError::MissingNative(key)) => {
-                let frames: Vec<String> = thread
-                    .frames
-                    .iter()
-                    .map(|frame| shared.class(frame.class).name.clone())
-                    .collect();
-                Err(VmError::MissingNative(format!(
-                    "{key} DEBUG frames={frames:?}"
-                )))
-            }
+            Err(VmError::MissingNative(key)) => Err(VmError::MissingNative(key)),
             Err(VmError::JavaException { class, message }) => Err(new_exception(
                 shared,
                 thread,

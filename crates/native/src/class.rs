@@ -2,9 +2,9 @@
 //!
 //! `Object.getClass` hands out the mirror; the `Class` methods answer from the VM's `class_targets` map, and `initClassName` caches its answer in the object's `name` field.
 
-use rava_vm::ClassId;
 use rava_vm::native::expect_args;
 use rava_vm::{Array, ClassTarget, HeapObject, NativeCtx, Shared, Value, VmError};
+use rava_vm::{ClassId, ObjRef};
 
 use crate::no_op;
 
@@ -50,6 +50,13 @@ pub fn register(shared: &mut Shared) {
         "(Ljava/lang/String;)Ljava/lang/Class;",
         get_primitive_class,
     );
+    // Access checks in the reflection stack ask for the class's access flags.
+    shared.register_native(
+        "jdk/internal/reflect/Reflection",
+        "getClassAccessFlags",
+        "(Ljava/lang/Class;)I",
+        class_access_flags,
+    );
     shared.register_native(
         "jdk/internal/reflect/Reflection",
         "getCallerClass",
@@ -59,6 +66,29 @@ pub fn register(shared: &mut Shared) {
     // `StringUTF16` stores a 16-bit char in two bytes and asks which comes first; this host is
     // little-endian (aarch64), so the low byte leads.
     shared.register_native("java/lang/StringUTF16", "isBigEndian", "()Z", is_big_endian);
+    // The class loader asks every class for enclosing-method info while defining it. The VM does
+    // not parse the `EnclosingMethod` attribute yet, so the honest answer is "none": `null`
+    // (the class loader treats it as absent, which is true for everything but local/anonymous
+    // classes).
+    shared.register_native(
+        "java/lang/Class",
+        "getEnclosingMethod0",
+        "()[Ljava/lang/Object;",
+        no_enclosing_method,
+    );
+    // No `InnerClasses` parsing yet: every class reports itself as top-level.
+    shared.register_native(
+        "java/lang/Class",
+        "getDeclaringClass0",
+        "()Ljava/lang/Class;",
+        no_declaring_class,
+    );
+    shared.register_native(
+        "java/lang/Class",
+        "getSimpleBinaryName0",
+        "()Ljava/lang/String;",
+        no_simple_binary_name,
+    );
     // `String.intern()` is the Java face of the VM's intern table; the same table `ldc` uses,
     // so an interned literal and `"literal".intern()` are one object.
     shared.register_native(
@@ -70,6 +100,25 @@ pub fn register(shared: &mut Shared) {
     // `Class.forName` is how the library loads optional providers (`Locale`'s, for one); the
     // bootstrap loader is the only loader this VM has, and `initialize` runs `<clinit>` through
     // the interpreter's call seam.
+    // Reflection constructors: the objects `Class.getDeclaredConstructors()` returns. The
+    // `Constructor` class's own Java methods read `clazz`/`parameterTypes`/`modifiers` from its
+    // fields, so the native builds real instances rather than a VM-private placeholder.
+    shared.register_native(
+        "java/lang/Class",
+        "getDeclaredConstructors0",
+        "(Z)[Ljava/lang/reflect/Constructor;",
+        declared_constructors,
+    );
+    // `Constructor.newInstance` normally goes through the JDK's generated accessor
+    // (`ConstructorAccessor`, a MethodHandle-shaped path this VM does not have). The intrinsic
+    // keeps the public entry point and does the two things a constructor call needs: allocate
+    // and invoke `<init>`.
+    shared.register_intrinsic(
+        "java/lang/reflect/Constructor",
+        "newInstance",
+        "([Ljava/lang/Object;)Ljava/lang/Object;",
+        constructor_new_instance,
+    );
     shared.register_native(
         "java/lang/Class",
         "forName0",
@@ -78,9 +127,273 @@ pub fn register(shared: &mut Shared) {
     );
 }
 
+/// `Reflection.getClassAccessFlags(Class)`: the class file's access flags; a primitive or array
+/// class reports `public final` (there is no class file behind it).
+fn class_access_flags(ctx: &mut NativeCtx<'_>) -> Result<Value, VmError> {
+    let [class] = expect_args::<1>(ctx)?;
+    let class = class.as_ref().ok_or(VmError::TypeMismatch {
+        expected: "a class object",
+        found: *class,
+    })?;
+    let flags = match ctx.shared.class_targets.get(&class) {
+        Some(rava_vm::ClassTarget::Loaded(class)) => ctx
+            .shared
+            .class(*class)
+            .file
+            .as_ref()
+            .map(|file| file.access_flags)
+            .unwrap_or(0x0011),
+        // `public final` is what HotSpot reports for a primitive; arrays add `abstract`.
+        Some(rava_vm::ClassTarget::Type(descriptor)) => {
+            if descriptor.starts_with('[') {
+                0x0411
+            } else {
+                0x0011
+            }
+        }
+        None => 0,
+    };
+    Ok(Value::Int(i32::from(flags)))
+}
+
 /// `StringUTF16.isBigEndian()`: false on this little-endian host.
 fn is_big_endian(_ctx: &mut NativeCtx<'_>) -> Result<Value, VmError> {
     Ok(Value::Int(0))
+}
+
+/// `Class.getDeclaredConstructors0(boolean)`: real `Constructor` objects for the class's
+/// declared `<init>` methods, in declaration order. `publicOnly` is applied by the Java side
+/// (`privateGetDeclaredConstructors`), which also caches the array.
+fn declared_constructors(ctx: &mut NativeCtx<'_>) -> Result<Value, VmError> {
+    let [this, _public_only] = expect_args::<2>(ctx)?;
+    let class_object = this.as_ref().ok_or(VmError::TypeMismatch {
+        expected: "a class object",
+        found: *this,
+    })?;
+    let target = match ctx.shared.class_targets.get(&class_object) {
+        Some(rava_vm::ClassTarget::Loaded(class)) => *class,
+        _ => {
+            let array = ctx
+                .shared
+                .allocate(rava_vm::HeapObject::Array(rava_vm::Array {
+                    kind: rava_vm::ArrayKind::Reference,
+                    elements: Vec::new(),
+                    class_name: Some("[Ljava/lang/reflect/Constructor;".to_owned()),
+                }));
+            return Ok(Value::Ref(array));
+        }
+    };
+    let constructor_class = ctx
+        .shared
+        .load_class(ctx.path, "java/lang/reflect/Constructor")?;
+    // `AccessibleObject.<clinit>` registers the JDK's `JavaLangReflectAccess`; the JDK gets
+    // there during boot, this VM reaches it through the superclass chain. Without it,
+    // `ReflectionFactory.copyConstructor` NPEs on a null accessor.
+    initialize_class(ctx, constructor_class)?;
+    let indices: Vec<usize> = (0..ctx.shared.class(target).methods.len())
+        .filter(|index| ctx.shared.class(target).methods[*index].name == "<init>")
+        .collect();
+    let mut elements = Vec::with_capacity(indices.len());
+    for index in indices {
+        let descriptor = ctx.shared.class(target).methods[index].descriptor.clone();
+        let constructor = ctx.shared.new_instance(constructor_class);
+        // The graph is assembled outside the heap's reach (no frame or static holds it yet):
+        // pin each piece so a collection during the next allocation cannot free it.
+        ctx.shared.pin(constructor);
+        let parameter_types = class_array(ctx, &descriptor)?;
+        if let Value::Ref(array) = parameter_types {
+            ctx.shared.pin(array);
+        }
+        let class_object = ctx.shared.class_object(ctx.path, target)?;
+        let modifiers = i32::from(ctx.shared.class(target).methods[index].access_flags);
+        let empty_classes = empty_class_array(ctx);
+        if let Value::Ref(array) = empty_classes {
+            ctx.shared.pin(array);
+        }
+        let empty_bytes = ctx
+            .shared
+            .allocate(rava_vm::HeapObject::Array(rava_vm::Array {
+                kind: rava_vm::ArrayKind::Byte,
+                elements: Vec::new(),
+                class_name: Some("[B".to_owned()),
+            }));
+        ctx.shared.pin(empty_bytes);
+        for (name, description, value) in [
+            ("clazz", "Ljava/lang/Class;", Value::Ref(class_object)),
+            ("slot", "I", Value::Int(index as i32)),
+            ("parameterTypes", "[Ljava/lang/Class;", parameter_types),
+            ("exceptionTypes", "[Ljava/lang/Class;", empty_classes),
+            ("modifiers", "I", Value::Int(modifiers)),
+            ("signature", "Ljava/lang/String;", Value::NULL),
+            ("annotations", "[B", Value::Ref(empty_bytes)),
+            ("parameterAnnotations", "[B", Value::Ref(empty_bytes)),
+        ] {
+            let found = ctx
+                .shared
+                .class(constructor_class)
+                .field_slot(name, description);
+            if let Some(slot) = found {
+                ctx.shared.set_instance_field(constructor, slot, value)?;
+            }
+        }
+        elements.push(Value::Ref(constructor));
+    }
+    let array = ctx
+        .shared
+        .allocate(rava_vm::HeapObject::Array(rava_vm::Array {
+            kind: rava_vm::ArrayKind::Reference,
+            elements,
+            class_name: Some("[Ljava/lang/reflect/Constructor;".to_owned()),
+        }));
+    // The array (returned on the operand stack) now roots everything it holds.
+    ctx.shared.unpin_all();
+    Ok(Value::Ref(array))
+}
+
+/// A `Class[]` of the parameter types of `descriptor`, in order.
+fn class_array(ctx: &mut NativeCtx<'_>, descriptor: &str) -> Result<Value, VmError> {
+    let parameters = rava_vm::resolve::parameter_descriptors(descriptor);
+    let mut elements = Vec::with_capacity(parameters.len());
+    for parameter in parameters {
+        elements.push(Value::Ref(class_for_descriptor(ctx, &parameter)?));
+    }
+    let array = ctx
+        .shared
+        .allocate(rava_vm::HeapObject::Array(rava_vm::Array {
+            kind: rava_vm::ArrayKind::Reference,
+            elements,
+            class_name: Some("[Ljava/lang/Class;".to_owned()),
+        }));
+    Ok(Value::Ref(array))
+}
+
+fn empty_class_array(ctx: &mut NativeCtx<'_>) -> Value {
+    let array = ctx
+        .shared
+        .allocate(rava_vm::HeapObject::Array(rava_vm::Array {
+            kind: rava_vm::ArrayKind::Reference,
+            elements: Vec::new(),
+            class_name: Some("[Ljava/lang/Class;".to_owned()),
+        }));
+    Value::Ref(array)
+}
+
+fn class_for_descriptor(ctx: &mut NativeCtx<'_>, descriptor: &str) -> Result<ObjRef, VmError> {
+    match descriptor {
+        "I" | "J" | "F" | "D" | "Z" | "B" | "C" | "S" | "V" => {
+            ctx.shared.type_class(ctx.path, descriptor)
+        }
+        array if array.starts_with('[') => ctx.shared.type_class(ctx.path, array),
+        reference => {
+            let name = reference
+                .strip_prefix('L')
+                .and_then(|name| name.strip_suffix(';'))
+                .unwrap_or(reference);
+            let class = ctx.shared.load_class(ctx.path, name)?;
+            ctx.shared.class_object(ctx.path, class)
+        }
+    }
+}
+
+/// `Constructor.newInstance(Object...)`: allocate the declaring class and run `<init>` with the
+/// (unboxed) arguments. Access checks are the JDK's job and are not modelled; the constructors
+/// the library reflects on are public.
+fn constructor_new_instance(ctx: &mut NativeCtx<'_>) -> Result<Value, VmError> {
+    let [this, arguments] = expect_args::<2>(ctx)?;
+    let constructor = this.as_ref().ok_or(VmError::TypeMismatch {
+        expected: "a Constructor",
+        found: *this,
+    })?;
+    let class = ctx.shared.class_of(constructor).ok_or(VmError::Native(
+        "Constructor.newInstance on an object that is not a Constructor".to_owned(),
+    ))?;
+    let clazz_slot = ctx
+        .shared
+        .class(class)
+        .field_slot("clazz", "Ljava/lang/Class;")
+        .ok_or_else(|| VmError::Native("Constructor has no clazz field".to_owned()))?;
+    let declaring = ctx
+        .shared
+        .instance_field(constructor, clazz_slot)?
+        .as_ref()
+        .ok_or(VmError::Native("Constructor.clazz is null".to_owned()))?;
+    let target = match ctx.shared.class_targets.get(&declaring) {
+        Some(rava_vm::ClassTarget::Loaded(target)) => *target,
+        _ => {
+            return Err(VmError::Native(
+                "Constructor.newInstance needs a loaded class".to_owned(),
+            ));
+        }
+    };
+    let slot_slot = ctx
+        .shared
+        .class(class)
+        .field_slot("slot", "I")
+        .ok_or_else(|| VmError::Native("Constructor has no slot field".to_owned()))?;
+    let index = ctx
+        .shared
+        .instance_field(constructor, slot_slot)?
+        .as_int()
+        .ok_or_else(|| VmError::Native("Constructor.slot is not an int".to_owned()))?
+        as usize;
+    let descriptor = ctx.shared.class(target).methods[index].descriptor.clone();
+    let parameters = rava_vm::resolve::parameter_descriptors(&descriptor);
+    let values = match arguments.as_ref() {
+        Some(array) if !array.is_null() => ctx.shared.array(array)?.elements.clone(),
+        _ if parameters.is_empty() => Vec::new(),
+        _ => {
+            return Err(VmError::Native(
+                "Constructor.newInstance arguments are null".to_owned(),
+            ));
+        }
+    };
+    let receiver = ctx.shared.new_instance(target);
+    let mut call_args = Vec::with_capacity(values.len() + 1);
+    call_args.push(Value::Ref(receiver));
+    for (parameter, value) in parameters.iter().zip(values.iter()) {
+        call_args.push(unbox(ctx, parameter, *value)?);
+    }
+    let invoker = ctx.shared.invoker.ok_or_else(|| {
+        VmError::Native("Constructor.newInstance needs the interpreter's call seam".to_owned())
+    })?;
+    invoker(ctx.shared, ctx.thread, ctx.path, target, index, call_args)?;
+    Ok(Value::Ref(receiver))
+}
+
+/// Converts a boxed argument to the constructor's parameter type. References pass through.
+fn unbox(ctx: &mut NativeCtx<'_>, parameter: &str, value: Value) -> Result<Value, VmError> {
+    let primitive = matches!(parameter, "Z" | "B" | "C" | "S" | "I");
+    if !primitive {
+        return Ok(value);
+    }
+    let reference = value.as_ref().ok_or(VmError::TypeMismatch {
+        expected: "a boxed primitive",
+        found: value,
+    })?;
+    let class = ctx.shared.class_of(reference).ok_or(VmError::Native(
+        "boxed argument has no runtime class".to_owned(),
+    ))?;
+    let slot = ctx
+        .shared
+        .class(class)
+        .field_slot("value", parameter)
+        .or_else(|| {
+            // `Character.value` is a char, `Boolean.value` a boolean: match by name and take
+            // whatever int-typed value the field holds.
+            ctx.shared
+                .class(class)
+                .fields
+                .iter()
+                .position(|field| field.name == "value")
+        })
+        .ok_or_else(|| {
+            VmError::Native(format!(
+                "cannot unbox a {} for a {parameter} parameter",
+                ctx.shared.class(class).name
+            ))
+        })?;
+    let stored = ctx.shared.instance_field(reference, slot)?;
+    Ok(Value::Int(stored.as_int().unwrap_or(0)))
 }
 
 /// `Class.forName0(String, boolean, ClassLoader, Class)`: load a class by binary name from the
@@ -108,7 +421,7 @@ fn for_name(ctx: &mut NativeCtx<'_>) -> Result<Value, VmError> {
 
 /// Runs `<clinit>` (superclass first, JVMS §5.5) through the interpreter's call seam, which is
 /// what `Class.forName(name, true, ...)` promises.
-fn initialize_class(ctx: &mut NativeCtx<'_>, class: ClassId) -> Result<(), VmError> {
+pub(crate) fn initialize_class(ctx: &mut NativeCtx<'_>, class: ClassId) -> Result<(), VmError> {
     if let Some(parent) = ctx.shared.class(class).super_class {
         initialize_class(ctx, parent)?;
     }
@@ -130,6 +443,21 @@ fn initialize_class(ctx: &mut NativeCtx<'_>, class: ClassId) -> Result<(), VmErr
             Ok(())
         }
     }
+}
+
+/// `Class.getEnclosingMethod0()`: absent until the VM parses the `EnclosingMethod` attribute.
+fn no_enclosing_method(_ctx: &mut NativeCtx<'_>) -> Result<Value, VmError> {
+    Ok(Value::NULL)
+}
+
+/// `Class.getDeclaringClass0()`: `null` until `InnerClasses` parsing exists.
+fn no_declaring_class(_ctx: &mut NativeCtx<'_>) -> Result<Value, VmError> {
+    Ok(Value::NULL)
+}
+
+/// `Class.getSimpleBinaryName0()`: `null` until `InnerClasses` parsing exists.
+fn no_simple_binary_name(_ctx: &mut NativeCtx<'_>) -> Result<Value, VmError> {
+    Ok(Value::NULL)
 }
 
 /// `String.intern()`: the canonical reference for the receiver's text.
@@ -346,31 +674,35 @@ fn clone_array(ctx: &mut NativeCtx<'_>) -> Result<Value, VmError> {
         expected: "an array reference",
         found: *this,
     })?;
-    let copy = match ctx.shared.heap.get(reference.index()) {
-        Some(HeapObject::Array(array)) => Array {
-            kind: array.kind,
-            elements: array.elements.clone(),
-            class_name: array.class_name.clone(),
-        },
-        Some(HeapObject::Null) => {
-            return Err(VmError::TypeMismatch {
-                expected: "an array reference",
-                found: Value::NULL,
-            });
+    match ctx.shared.heap.get(reference.index()) {
+        Some(HeapObject::Array(array)) => {
+            let copy = Array {
+                kind: array.kind,
+                elements: array.elements.clone(),
+                class_name: array.class_name.clone(),
+            };
+            Ok(Value::Ref(ctx.shared.allocate(HeapObject::Array(copy))))
         }
-        Some(_) => {
-            return Err(VmError::Unsupported {
-                feature: "Object.clone on an instance",
-                detail: "this slice implements array clone only; an instance clone needs a \
-                         shallow field copy"
-                    .to_owned(),
-            });
+        Some(HeapObject::Instance(instance)) => {
+            // `Object.clone` is a shallow copy: same class, same field values.
+            let class = instance.class;
+            let fields = instance.fields.clone();
+            let copy = ctx.shared.new_instance(class);
+            for (slot, value) in fields.into_iter().enumerate() {
+                ctx.shared.set_instance_field(copy, slot, value)?;
+            }
+            Ok(Value::Ref(copy))
         }
-        None => {
-            return Err(VmError::Native(format!(
-                "clone on dangling reference {reference:?}"
-            )));
-        }
-    };
-    Ok(Value::Ref(ctx.shared.allocate(HeapObject::Array(copy))))
+        Some(HeapObject::Null) => Err(VmError::TypeMismatch {
+            expected: "a reference",
+            found: Value::NULL,
+        }),
+        Some(other) => Err(VmError::Unsupported {
+            feature: "Object.clone",
+            detail: format!("cannot clone {other:?}"),
+        }),
+        None => Err(VmError::Native(format!(
+            "clone on dangling reference {reference:?}"
+        ))),
+    }
 }

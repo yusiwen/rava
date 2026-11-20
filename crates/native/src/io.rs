@@ -29,6 +29,24 @@ pub fn register(shared: &mut Shared) {
     // `FileDescriptor.<clinit>` calls `initIDs`; HotSpot caches field IDs there, this VM has
     // nothing to cache.
     shared.register_native("java/io/FileDescriptor", "initIDs", "()V", crate::no_op);
+    // `File`'s filesystem class caches IDs in a static initializer; the locale provider lookup
+    // touches `File` on its way through `ClassLoader`, so registration is needed even though
+    // this VM does not open files.
+    shared.register_native("java/io/UnixFileSystem", "initIDs", "()V", crate::no_op);
+    // The class loader canonicalizes its class-path entries and checks them; a lexical
+    // canonicalization and metadata are enough for that (S27).
+    shared.register_native(
+        "java/io/UnixFileSystem",
+        "canonicalize0",
+        "(Ljava/lang/String;)Ljava/lang/String;",
+        canonicalize,
+    );
+    shared.register_native(
+        "java/io/UnixFileSystem",
+        "getBooleanAttributes0",
+        "(Ljava/io/File;)I",
+        file_attributes,
+    );
     shared.register_native("java/io/FileOutputStream", "write", "(IZ)V", write_byte);
     shared.register_native(
         "java/io/FileOutputStream",
@@ -219,6 +237,73 @@ fn input_length(ctx: &mut NativeCtx<'_>) -> Result<Value, VmError> {
     Ok(Value::Long(
         ctx.shared.stdin.as_ref().expect("filled above").len() as i64,
     ))
+}
+
+/// `UnixFileSystem.canonicalize0(String)`: a lexical canonical path. The file need not exist (a
+/// class-path entry may not), so it resolves `.`/`..` and joins a relative path to the working
+/// directory.
+fn canonicalize(ctx: &mut NativeCtx<'_>) -> Result<Value, VmError> {
+    let [_this, path] = expect_args::<2>(ctx)?;
+    let path = path.as_ref().ok_or(VmError::TypeMismatch {
+        expected: "a path String",
+        found: *path,
+    })?;
+    let path = ctx.shared.string_text(path)?;
+    let joined = if path.starts_with('/') {
+        path
+    } else {
+        let base = std::env::current_dir()
+            .map(|dir| dir.display().to_string())
+            .unwrap_or_else(|_| "/".to_owned());
+        format!("{base}/{path}")
+    };
+    let mut parts: Vec<&str> = Vec::new();
+    for part in joined.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                parts.pop();
+            }
+            other => parts.push(other),
+        }
+    }
+    let canonical = format!("/{}", parts.join("/"));
+    let canonical = ctx.shared.new_string(ctx.path, canonical)?;
+    Ok(Value::Ref(canonical))
+}
+
+/// `UnixFileSystem.getBooleanAttributes0(File)`: exists / regular / directory / hidden bits.
+fn file_attributes(ctx: &mut NativeCtx<'_>) -> Result<Value, VmError> {
+    const EXISTS: i32 = 1;
+    const REGULAR: i32 = 2;
+    const DIRECTORY: i32 = 4;
+    let [_this, file] = expect_args::<2>(ctx)?;
+    let file = file.as_ref().ok_or(VmError::TypeMismatch {
+        expected: "a File",
+        found: *file,
+    })?;
+    let class = instance_class(ctx.shared, file)?;
+    let slot = ctx
+        .shared
+        .class(class)
+        .field_slot("path", "Ljava/lang/String;")
+        .ok_or_else(|| VmError::Native("File has no path field".to_owned()))?;
+    let path = ctx.shared.instance_field(file, slot)?;
+    let Some(path) = path.as_ref() else {
+        return Ok(Value::Int(0));
+    };
+    let path = ctx.shared.string_text(path)?;
+    let mut attributes = 0;
+    if let Ok(metadata) = std::fs::metadata(&path) {
+        attributes |= EXISTS;
+        if metadata.is_file() {
+            attributes |= REGULAR;
+        }
+        if metadata.is_dir() {
+            attributes |= DIRECTORY;
+        }
+    }
+    Ok(Value::Int(attributes))
 }
 
 /// The OS handle is the descriptor number itself in this VM: the standard streams are

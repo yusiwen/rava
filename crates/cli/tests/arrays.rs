@@ -162,7 +162,9 @@ fn build_fixture(dir: &Path) {
     }
 
     let int_array = builder.class("[I");
-    let int_type = builder.class("I");
+    // `int.class` in real class files is `getstatic java/lang/Integer.TYPE`; a `CONSTANT_Class`
+    // named "I" is a class named I (JVMS §4.4.1), which S27 now resolves as one.
+    let int_type = builder.field_ref("java/lang/Integer", "TYPE", "Ljava/lang/Class;");
     let int_matrix = builder.class("[[I");
     let byte_array = builder.class("[B");
     let string_array = builder.class("[Ljava/lang/String;");
@@ -310,7 +312,7 @@ fn build_fixture(dir: &Path) {
     // COMPONENT_INT = int[].class.getComponentType() == int.class
     ldc_w(int_array, &mut code);
     invoke(0xb6, get_component_type, &mut code);
-    ldc_w(int_type, &mut code);
+    op_u16(&mut code, 0xb2, int_type);
     store_boolean(component_int, &mut code);
     // COMPONENT_STRING = String[].class.getComponentType() == String.class
     ldc_w(string_array, &mut code);

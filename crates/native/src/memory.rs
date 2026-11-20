@@ -579,6 +579,19 @@ fn throw_exception(ctx: &mut NativeCtx<'_>) -> Result<Value, VmError> {
     Err(VmError::Thrown { object })
 }
 
+/// `Unsafe.ensureClassInitialized0(Class)`: run `<clinit>` if it has not run.
+fn ensure_class_initialized(ctx: &mut NativeCtx<'_>) -> Result<Value, VmError> {
+    let [_this, class] = expect_args::<2>(ctx)?;
+    let reference = class
+        .as_ref()
+        .ok_or_else(|| mismatch("a class object", *class))?;
+    if let Some(ClassTarget::Loaded(class)) = ctx.shared.class_targets.get(&reference) {
+        let class = *class;
+        crate::class::initialize_class(ctx, class)?;
+    }
+    Ok(Value::NULL)
+}
+
 /// The array geometry answers (kept from S10; `ArraysSupport` reads the scales in its `<clinit>`).
 fn array_base_offset(ctx: &mut NativeCtx<'_>) -> Result<Value, VmError> {
     let [_this, _array_class] = expect_args::<2>(ctx)?;
@@ -645,6 +658,12 @@ pub fn register(shared: &mut Shared) {
         "arrayIndexScale0",
         "(Ljava/lang/Class;)I",
         array_index_scale,
+    );
+    shared.register_native(
+        U,
+        "ensureClassInitialized0",
+        "(Ljava/lang/Class;)V",
+        ensure_class_initialized,
     );
     shared.register_native(
         U,

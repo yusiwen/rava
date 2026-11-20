@@ -1329,11 +1329,13 @@ fn decode_string(bytes: &[u8], coder: i32) -> Result<String, VmError> {
 }
 
 /// Whether a `CONSTANT_Class` name is a primitive or array descriptor rather than a binary name.
+/// Whether a `CONSTANT_Class` name is a type descriptor rather than a binary class name.
+///
+/// Only arrays: javac writes primitive class literals as `getstatic Integer.TYPE`, and a class
+/// constant naming a primitive (`"I"`, `"C"`) is invalid JVMS §4.4.1. The old single-letter rule
+/// misread a user class named `C` as `char` (found by S27's constructor reflection fixture).
 pub fn is_type_descriptor(name: &str) -> bool {
-    if name.starts_with('[') {
-        return true;
-    }
-    matches!(name, "I" | "J" | "F" | "D" | "Z" | "B" | "C" | "S" | "V")
+    name.starts_with('[')
 }
 
 /// The binary name inside an object-type descriptor (`Ljava/lang/String;` ->

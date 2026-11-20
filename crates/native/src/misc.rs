@@ -28,6 +28,29 @@ pub fn register(shared: &mut Shared) {
     // classes from the host image, so registration is all it needs (the loader natives it calls
     // later are answered where they are reached).
     shared.register_native("java/lang/ClassLoader", "registerNatives", "()V", no_op);
+    // `Reference.refersTo0`: the LL (lock-free) reference implementations check their referent
+    // through this; the VM stores it as the `referent` field.
+    // `BootLoader.<clinit>` publishes the unnamed module; this VM has no module graph, so the
+    // setter is a no-op (classes are resolved from the host image).
+    // No preview features: the VM targets class-file version 65 with the standard grammar.
+    shared.register_native(
+        "jdk/internal/misc/PreviewFeatures",
+        "isPreviewEnabled",
+        "()Z",
+        false_flag,
+    );
+    shared.register_native(
+        "jdk/internal/loader/BootLoader",
+        "setBootLoaderUnnamedModule0",
+        "(Ljava/lang/Module;)V",
+        no_op,
+    );
+    shared.register_native(
+        "java/lang/ref/Reference",
+        "refersTo0",
+        "(Ljava/lang/Object;)Z",
+        refers_to,
+    );
     // `NullPointerException.getMessage` asks the VM for the extended help text HotSpot
     // produces (`-XX:+ShowCodeDetailsInExceptionMessages`). This VM has no such analysis, so
     // the answer is `null` and `getMessage` falls back to the plain constructor message.
@@ -112,6 +135,25 @@ pub fn register(shared: &mut Shared) {
         "(J)D",
         long_bits_to_double,
     );
+}
+
+/// `Reference.refersTo0(Object)`: reference equality against the `referent` field.
+fn refers_to(ctx: &mut NativeCtx<'_>) -> Result<Value, VmError> {
+    let [this, other] = expect_args::<2>(ctx)?;
+    let reference = this.as_ref().ok_or(VmError::TypeMismatch {
+        expected: "a Reference",
+        found: *this,
+    })?;
+    let class = ctx.shared.class_of(reference).ok_or(VmError::Native(
+        "Reference.refersTo0 on an object with no class".to_owned(),
+    ))?;
+    let slot = ctx
+        .shared
+        .class(class)
+        .field_slot("referent", "Ljava/lang/Object;")
+        .ok_or_else(|| VmError::Native("Reference has no referent field".to_owned()))?;
+    let referent = ctx.shared.instance_field(reference, slot)?;
+    Ok(Value::Int(i32::from(referent.as_ref() == other.as_ref())))
 }
 
 /// `Thread.currentThread()`: the VM's one thread, created on first use. The constructor is not
