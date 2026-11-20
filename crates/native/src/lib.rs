@@ -16,6 +16,7 @@
 //! | [`misc`] | CDS flags, bit conversions, processor counts |
 
 pub mod class;
+pub mod class_basics;
 pub mod exceptions;
 pub mod io;
 pub mod memory;
@@ -29,6 +30,7 @@ pub fn register_jcl_natives(shared: &mut Shared) {
     system::register(shared);
     io::register(shared);
     class::register(shared);
+    class_basics::register(shared);
     memory::register(shared);
     misc::register(shared);
     exceptions::register(shared);
