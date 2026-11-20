@@ -32,5 +32,5 @@ appears, carries a `README.md` with its own admission rule.
 | Path | Kind | Owns |
 | :--- | :--- | :--- |
 | [`requirements.md`](requirements.md) | state | R1–R12, non-goals, milestone gates, constraints |
-| [`adr/`](adr/) | decisions | `0001`–`0013`, one decision per record |
+| [`adr/`](adr/) | decisions | `0001`–`0014`, one decision per record |
 | [`notes/`](notes/) | history | one note per completed slice |

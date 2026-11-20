@@ -19,9 +19,10 @@ reimplement the library's API (ADR-0005).
 
 - **Statement:** a class file at version 65, compiled by `javac --release 21`, loads, runs
   `main`, and writes the same bytes to stdout as the reference launcher.
-- **Acceptance:** `cargo test -p rava-cli` exits 0 on the boot test, which compares the
-  program's stdout with the host JVM's, byte for byte.
-- **Milestone:** M0.
+- **Acceptance:** `cargo test -p rava-cli --test boot` exits 0: a program loads from the image,
+  runs, and its result is verified. The byte-for-byte stdout comparison is G2's increment
+  (ADR-0014), because printing needs the `Unsafe`/VarHandle surface of M4.
+- **Milestone:** M0 (runs), G2 (prints the same bytes).
 
 ### R2 — Parse the class-file format forward-compatibly
 
@@ -135,7 +136,7 @@ None.
 
 | Milestone | What it delivers | Gate |
 | :--- | :--- | :--- |
-| M0 | Boot: read the image, bootstrap the core classes, first JCL natives, `println` | R3, R4, R5 |
+| M0 | Boot: read the image, bootstrap the core classes, first JCL natives, a program that runs with a verified result | R1 (run), R3, R4, R5 |
 | M1 | The core library: strings, arrays, exceptions, `Class` basics | M0 |
 | M2 | Class loading and modules: `(loader, name)` identity, resources | M1 |
 | M3 | Real threads and monitors | M2 |
@@ -146,6 +147,23 @@ None.
 
 > Committed in direction, not yet scheduled. A deferred goal is work the project intends to do,
 > with the increment that would prove it started; a non-goal is work it will not do.
+
+### G2 — A program prints on the host library
+
+- **Goal:** run a program that writes to `System.out`, with its bytes compared to the reference
+  launcher, byte for byte.
+- **Why deferred:** the printing path is the `Unsafe`/VarHandle surface. Measured: with class
+  objects fixed, it stops at `Unsafe.objectFieldOffset1`, and the encoding path also needs
+  `Unsafe` array access and the charset provider stack. ADR-0014 records the measurement and the
+  decision to make printing the acceptance of the `Unsafe` slice rather than of the boot
+  milestone.
+- **Priority:** after M4. The first increment is one small program that prints, compared with
+  the host launcher.
+- **Trigger:** the `Unsafe` field-offset and array-access model existing well enough to run
+  `PrintStream`'s writer chain.
+- **Risk if it slips:** the VM runs programs but cannot show their output; its observable
+  results are exit codes and the state its natives model. That is a real limit, recorded here
+  rather than hidden.
 
 ### G1 — A JIT compiler
 
