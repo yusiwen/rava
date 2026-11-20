@@ -195,6 +195,28 @@ pub fn initialize_system(
     let accessible = shared.load_class(path, "java/lang/reflect/AccessibleObject")?;
     ensure_initialized(shared, thread, path, accessible)?;
 
+    // HotSpot patches `UnsafeConstants` at boot (the class initializer writes zeros and returns).
+    // The values are the host's; without `ADDRESS_SIZE0` `alignToHeapWordSize` rounds every
+    // allocation to zero and `Unsafe.allocateMemory` answers 0.
+    let constants = shared.load_class(path, "jdk/internal/misc/UnsafeConstants")?;
+    ensure_initialized(shared, thread, path, constants)?;
+    {
+        let statics = &mut shared.classes[constants.index()].statics;
+        statics.insert("ADDRESS_SIZE0".to_owned(), Value::Int(8));
+        statics.insert("PAGE_SIZE".to_owned(), Value::Int(4096));
+        statics.insert("BIG_ENDIAN".to_owned(), Value::Int(0));
+        statics.insert("UNALIGNED_ACCESS".to_owned(), Value::Int(1));
+        statics.insert("DATA_CACHE_LINE_FLUSH_SIZE".to_owned(), Value::Int(0));
+    }
+
+    // `Unsafe` copies `UnsafeConstants.ADDRESS_SIZE0` into its own `ADDRESS_SIZE` in its
+    // static initializer, so it must be initialized after the constants are patched.
+    let memory_type = shared.load_class(path, "jdk/internal/misc/Unsafe")?;
+    ensure_initialized(shared, thread, path, memory_type)?;
+    shared.classes[memory_type.index()]
+        .statics
+        .insert("ADDRESS_SIZE".to_owned(), Value::Int(8));
+
     let utf8 = shared.intern(path, "UTF-8")?;
     let charset = static_call(
         shared,

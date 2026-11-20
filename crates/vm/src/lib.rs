@@ -127,6 +127,11 @@ pub struct Shared {
     /// The `java.lang.Thread` object `Thread.currentThread` answers. This VM has one thread for
     /// now (M3 adds real ones), so the object is created on first use and kept.
     pub main_thread: Option<ObjRef>,
+    /// Off-heap memory the library allocated through `Unsafe.allocateMemory`, keyed by the
+    /// address the VM handed out. The VM owns the bytes; `Address`-based accessors read here.
+    pub direct_memory: std::collections::HashMap<i64, Vec<u8>>,
+    /// The next address `Unsafe.allocateMemory` hands out (8-byte aligned).
+    pub next_direct_address: i64,
     /// The bytes available on standard input, fetched lazily by the first read native (`None`:
     /// not fetched yet). Tests set it directly; the CLI leaves it `None` and the native reads
     /// the process's stdin to end on first use.
@@ -186,6 +191,26 @@ pub struct Shared {
 }
 
 impl Shared {
+    /// The direct-memory block containing `address`, with the offset inside the block.
+    pub fn direct_block(&self, address: i64) -> Option<(&[u8], usize)> {
+        for (base, bytes) in &self.direct_memory {
+            if address >= *base && address < *base + bytes.len() as i64 {
+                return Some((bytes.as_slice(), (address - *base) as usize));
+            }
+        }
+        None
+    }
+
+    /// The mutable form of [`Shared::direct_block`].
+    pub fn direct_block_mut(&mut self, address: i64) -> Option<(&mut Vec<u8>, usize)> {
+        for (base, bytes) in self.direct_memory.iter_mut() {
+            if address >= *base && address < *base + bytes.len() as i64 {
+                return Some((bytes, (address - *base) as usize));
+            }
+        }
+        None
+    }
+
     pub fn new() -> Self {
         Self {
             // Index 0 is the null object, so every ObjRef is a valid index.
@@ -205,6 +230,8 @@ impl Shared {
             pinned: Vec::new(),
             stdin: None,
             stdin_pos: 0,
+            direct_memory: std::collections::HashMap::new(),
+            next_direct_address: 1 << 32,
             class_objects: HashMap::new(),
             class_targets: HashMap::new(),
             type_classes: HashMap::new(),

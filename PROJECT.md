@@ -102,6 +102,7 @@ A slice is done only when all of the following hold:
 | S25 | Lambda dispatch is SAM-only (interface + SAM stored on the lambda); `synchronized static`, `String.intern`, `Class.forName` | R1 | `cargo test -p rava-cli --test lambdas` exits 0 | done |
 | S27 | Reflection constructors are real `Constructor` objects; `newInstance` allocates and invokes; `ldc` of a class named like a primitive descriptor is a class | R4 | `cargo test -p rava-cli --test reflection` exits 0 | done |
 | S28 | Reflection fields and methods are real objects; `Field.get/set` and `Method.invoke` are intrinsics over the VM's slots | R4 | `cargo test -p rava-cli --test reflection_members` exits 0 | done |
+| S29 | Off-heap direct memory: `Unsafe.allocate/free/setMemory/copyMemory`, null-base accessors, `UnsafeConstants` patch | R12 | `cargo test -p rava-cli --test direct_memory` exits 0 | done |
 | S14 | `System.arraycopy`: primitives and reference arrays, bounds and kind checks, overlap-safe | R4 | `cargo test -p rava-cli --test arraycopy` exits 0 | done |
 | S19 | Java-side stack traces: `fillInStackTrace` fills `Throwable.stackTrace` from the VM's trace | R6 | `cargo test -p rava-cli --test stack_traces` exits 0 | done |
 
@@ -137,6 +138,7 @@ A slice is done only when all of the following hold:
 | S25 | `cargo test -p rava-cli --test lambdas` | 0 | 2026-11-20 | [S25 note](docs/notes/S25-lambda-sam.md) |
 | S27 | `cargo test -p rava-cli --test reflection` | 0 | 2026-11-20 | [S27 note](docs/notes/S27-reflection-constructors.md) |
 | S28 | `cargo test -p rava-cli --test reflection_members` | 0 | 2026-11-20 | [S28 note](docs/notes/S28-reflection-members.md) |
+| S29 | `cargo test -p rava-cli --test direct_memory` | 0 | 2026-11-21 | [S29 note](docs/notes/S29-direct-memory.md) |
 | S14 | `cargo test -p rava-cli --test arraycopy` | 0 | 2026-11-20 | [S14 note](docs/notes/S14-arraycopy.md) |
 | S19 | `cargo test -p rava-cli --test stack_traces` | 0 | 2026-11-20 | [S19 note](docs/notes/S19-stack-traces.md) |
 

@@ -256,12 +256,28 @@ fn write_bytes(
 /// Reads a cell: an instance field value, a reference element, or `width` bytes of a primitive
 /// array starting at a byte offset.
 fn read_cell(shared: &Shared, object: Value, offset: Value, kind: Kind) -> Result<Value, VmError> {
-    let reference = object
-        .as_ref()
-        .ok_or_else(|| mismatch("a non-null object", object))?;
     let raw = offset
         .as_long()
         .ok_or_else(|| mismatch("a long offset", offset))?;
+    // A null base is an `Address`-based access: the offset is an off-heap address into the
+    // VM's direct-memory map (the JDK's `Address`-based accessors, e.g. `DirectByteBuffer`).
+    if object.as_ref().is_none_or(|reference| reference.is_null()) {
+        if kind == Kind::Reference {
+            return Err(VmError::Native(
+                "a reference access needs an object base".to_owned(),
+            ));
+        }
+        let (bytes, start) = shared
+            .direct_block(raw)
+            .ok_or_else(|| VmError::Native(format!("no direct memory at {raw}")))?;
+        let bytes = bytes
+            .get(start..start + kind.width())
+            .ok_or_else(|| VmError::Native("direct memory read past the block".to_owned()))?;
+        return Ok(kind.decode(bytes));
+    }
+    let reference = object
+        .as_ref()
+        .ok_or_else(|| mismatch("a non-null object", object))?;
     // A negative offset names a static field: the base is the class object and the offset is
     // `-1 - declared-field index` (see `staticFieldOffset`).
     if raw < 0 {
@@ -326,12 +342,31 @@ fn write_cell(
     kind: Kind,
     value: Value,
 ) -> Result<(), VmError> {
-    let reference = object
-        .as_ref()
-        .ok_or_else(|| mismatch("a non-null object", object))?;
     let raw = offset
         .as_long()
         .ok_or_else(|| mismatch("a long offset", offset))?;
+    if object.as_ref().is_none_or(|reference| reference.is_null()) {
+        if kind == Kind::Reference {
+            return Err(VmError::Native(
+                "a reference access needs an object base".to_owned(),
+            ));
+        }
+        let bytes = kind.to_bytes(value)?;
+        let (memory, start) = shared
+            .direct_block_mut(raw)
+            .ok_or_else(|| VmError::Native(format!("no direct memory at {raw}")))?;
+        let width = kind.width();
+        if start + width > memory.len() {
+            return Err(VmError::Native(
+                "direct memory write past the block".to_owned(),
+            ));
+        }
+        memory[start..start + width].copy_from_slice(&bytes);
+        return Ok(());
+    }
+    let reference = object
+        .as_ref()
+        .ok_or_else(|| mismatch("a non-null object", object))?;
     if raw < 0 {
         if let Some(ClassTarget::Loaded(class)) = shared.class_targets.get(&reference) {
             let class = *class;
@@ -677,6 +712,140 @@ fn throw_exception(ctx: &mut NativeCtx<'_>) -> Result<Value, VmError> {
     Err(VmError::Thrown { object })
 }
 
+/// `Unsafe.pageSize()`: the host page size (the JDK uses it for alignment decisions).
+fn page_size(_ctx: &mut NativeCtx<'_>) -> Result<Value, VmError> {
+    Ok(Value::Int(4096))
+}
+
+fn allocate_address(ctx: &mut NativeCtx<'_>, size: usize) -> i64 {
+    let address = ctx.shared.next_direct_address;
+    // Align the next block to 8 bytes so an `int`/`long` never straddles two blocks.
+    ctx.shared.next_direct_address += (size.div_ceil(8) * 8).max(8) as i64;
+    ctx.shared.direct_memory.insert(address, vec![0; size]);
+    address
+}
+
+/// `Unsafe.allocateMemory(long)`: zero-filled VM-owned memory.
+fn allocate_memory(ctx: &mut NativeCtx<'_>) -> Result<Value, VmError> {
+    let [_this, size] = expect_args::<2>(ctx)?;
+    let size = size
+        .as_long()
+        .ok_or_else(|| mismatch("a long size", *size))?;
+    let size = usize::try_from(size.max(0)).unwrap_or(0);
+    let address = allocate_address(ctx, size);
+    Ok(Value::Long(address))
+}
+
+/// `Unsafe.reallocateMemory(long, long)`: grow or shrink, preserving the prefix.
+fn reallocate_memory(ctx: &mut NativeCtx<'_>) -> Result<Value, VmError> {
+    let [_this, address, size] = expect_args::<3>(ctx)?;
+    let address = address
+        .as_long()
+        .ok_or_else(|| mismatch("a long address", *address))?;
+    let size = size
+        .as_long()
+        .ok_or_else(|| mismatch("a long size", *size))?;
+    let size = usize::try_from(size.max(0)).unwrap_or(0);
+    let mut bytes = ctx
+        .shared
+        .direct_memory
+        .remove(&address)
+        .unwrap_or_default();
+    bytes.resize(size, 0);
+    let new_address = allocate_address(ctx, size);
+    ctx.shared.direct_memory.insert(new_address, bytes);
+    Ok(Value::Long(new_address))
+}
+
+/// `Unsafe.freeMemory(long)`: forget the block.
+fn free_memory(ctx: &mut NativeCtx<'_>) -> Result<Value, VmError> {
+    let [_this, address] = expect_args::<2>(ctx)?;
+    let address = address
+        .as_long()
+        .ok_or_else(|| mismatch("a long address", *address))?;
+    ctx.shared.direct_memory.remove(&address);
+    Ok(Value::NULL)
+}
+
+/// `Unsafe.setMemory(Object, long, long, byte)`.
+fn set_memory(ctx: &mut NativeCtx<'_>) -> Result<Value, VmError> {
+    let [_this, base, offset, length, value] = expect_args::<5>(ctx)?;
+    let offset = offset
+        .as_long()
+        .ok_or_else(|| mismatch("a long offset", *offset))?;
+    let length = length
+        .as_long()
+        .ok_or_else(|| mismatch("a long length", *length))?;
+    let length = usize::try_from(length.max(0)).unwrap_or(0);
+    let byte = value.as_int().unwrap_or(0) as u8;
+    if let Some(reference) = base.as_ref().filter(|reference| !reference.is_null()) {
+        let array = ctx.shared.array_mut(reference)?;
+        let start = usize::try_from(offset)
+            .map_err(|_| VmError::Native("a negative array offset".to_owned()))?;
+        let length_now = array.elements.len();
+        for index in start..start + length {
+            let cell = array
+                .elements
+                .get_mut(index)
+                .ok_or(VmError::IndexOutOfBounds {
+                    index: index as i32,
+                    length: length_now,
+                })?;
+            *cell = Value::Int(i32::from(byte));
+        }
+        return Ok(Value::NULL);
+    }
+    let (bytes, start) = ctx
+        .shared
+        .direct_block_mut(offset)
+        .ok_or_else(|| VmError::Native(format!("no direct memory at {offset}")))?;
+    if start + length > bytes.len() {
+        return Err(VmError::Native("setMemory past the block".to_owned()));
+    }
+    bytes[start..start + length].fill(byte);
+    Ok(Value::NULL)
+}
+
+/// `Unsafe.copyMemory(Object, long, Object, long, long)`: off-heap blocks only for now.
+fn copy_memory(ctx: &mut NativeCtx<'_>) -> Result<Value, VmError> {
+    let [_this, source, source_offset, target, target_offset, length] = expect_args::<6>(ctx)?;
+    let source_offset = source_offset
+        .as_long()
+        .ok_or_else(|| mismatch("a long offset", *source_offset))?;
+    let target_offset = target_offset
+        .as_long()
+        .ok_or_else(|| mismatch("a long offset", *target_offset))?;
+    let length = length
+        .as_long()
+        .ok_or_else(|| mismatch("a long length", *length))?;
+    let length = usize::try_from(length.max(0)).unwrap_or(0);
+    let has_object = |value: Value| value.as_ref().is_some_and(|reference| !reference.is_null());
+    if has_object(*source) || has_object(*target) {
+        return Err(VmError::Native(
+            "copyMemory between arrays is not implemented yet".to_owned(),
+        ));
+    }
+    let (source_bytes, source_start) = ctx
+        .shared
+        .direct_block(source_offset)
+        .ok_or_else(|| VmError::Native(format!("no direct memory at {source_offset}")))?;
+    let bytes = source_bytes
+        .get(source_start..source_start + length)
+        .ok_or_else(|| VmError::Native("copyMemory past the source block".to_owned()))?
+        .to_vec();
+    let (target_bytes, target_start) = ctx
+        .shared
+        .direct_block_mut(target_offset)
+        .ok_or_else(|| VmError::Native(format!("no direct memory at {target_offset}")))?;
+    if target_start + length > target_bytes.len() {
+        return Err(VmError::Native(
+            "copyMemory past the target block".to_owned(),
+        ));
+    }
+    target_bytes[target_start..target_start + length].copy_from_slice(&bytes);
+    Ok(Value::NULL)
+}
+
 /// `Unsafe.ensureClassInitialized0(Class)`: run `<clinit>` if it has not run.
 fn ensure_class_initialized(ctx: &mut NativeCtx<'_>) -> Result<Value, VmError> {
     let [_this, class] = expect_args::<2>(ctx)?;
@@ -768,6 +937,17 @@ pub fn register(shared: &mut Shared) {
         "staticFieldBase0",
         "(Ljava/lang/reflect/Field;)Ljava/lang/Object;",
         static_field_base,
+    );
+    shared.register_native(U, "pageSize", "()I", page_size);
+    shared.register_native(U, "allocateMemory0", "(J)J", allocate_memory);
+    shared.register_native(U, "reallocateMemory0", "(JJ)J", reallocate_memory);
+    shared.register_native(U, "freeMemory0", "(J)V", free_memory);
+    shared.register_native(U, "setMemory0", "(Ljava/lang/Object;JJB)V", set_memory);
+    shared.register_native(
+        U,
+        "copyMemory0",
+        "(Ljava/lang/Object;JLjava/lang/Object;JJ)V",
+        copy_memory,
     );
     shared.register_native(
         U,

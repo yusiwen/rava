@@ -3,7 +3,7 @@
 //! Small answers the library asks for once or twice: CDS is off, floats convert to their bit patterns, and the processor count is the host's.
 
 use rava_vm::native::expect_args;
-use rava_vm::{NativeCtx, Shared, Value, VmError};
+use rava_vm::{Array, ArrayKind, HeapObject, NativeCtx, Shared, Value, VmError};
 
 use crate::no_op;
 
@@ -32,6 +32,34 @@ pub fn register(shared: &mut Shared) {
     // through this; the VM stores it as the `referent` field.
     // `BootLoader.<clinit>` publishes the unnamed module; this VM has no module graph, so the
     // setter is a no-op (classes are resolved from the host image).
+    // `UnixFileSystem.<init>` asks the native layer for the working directory as bytes.
+    shared.register_native("sun/nio/fs/UnixNativeDispatcher", "getcwd", "()[B", getcwd);
+    // `UnixNativeDispatcher.<clinit>` asks the native layer to cache struct offsets; there is
+    // no native state behind it in this VM.
+    shared.register_native("sun/nio/fs/UnixNativeDispatcher", "init", "()I", zero_value);
+    // No native library ships with this VM: the builtin lookup answers "none".
+    shared.register_native(
+        "jdk/internal/loader/NativeLibraries",
+        "findBuiltinLib",
+        "(Ljava/lang/String;)Ljava/lang/String;",
+        null_value,
+    );
+    // `NativeLibraries` asks for the platform file name of a library; the VM never loads one,
+    // but the image reader's initialization path asks for the name.
+    shared.register_native(
+        "java/lang/System",
+        "mapLibraryName",
+        "(Ljava/lang/String;)Ljava/lang/String;",
+        map_library_name,
+    );
+    // The VM has 8-byte compare-and-set (it is single-threaded, so any answer consistent with
+    // that is fine); `Bits` uses this to pick its direct-memory bookkeeping.
+    shared.register_native(
+        "java/util/concurrent/atomic/AtomicLong",
+        "VMSupportsCS8",
+        "()Z",
+        true_flag,
+    );
     // No preview features: the VM targets class-file version 65 with the standard grammar.
     shared.register_native(
         "jdk/internal/misc/PreviewFeatures",
@@ -188,6 +216,51 @@ fn max_memory(_ctx: &mut NativeCtx<'_>) -> Result<Value, VmError> {
 /// A native whose answer is "no string".
 fn null_string(_ctx: &mut NativeCtx<'_>) -> Result<Value, VmError> {
     Ok(Value::NULL)
+}
+
+/// `UnixNativeDispatcher.getcwd()`: the working directory as a byte array.
+fn getcwd(ctx: &mut NativeCtx<'_>) -> Result<Value, VmError> {
+    let cwd = std::env::current_dir()
+        .map(|dir| dir.display().to_string())
+        .unwrap_or_else(|_| "/".to_owned());
+    let elements: Vec<Value> = cwd
+        .into_bytes()
+        .into_iter()
+        .map(|byte| Value::Int(i32::from(byte)))
+        .collect();
+    let array = ctx.shared.allocate(HeapObject::Array(Array {
+        kind: ArrayKind::Byte,
+        elements,
+        class_name: Some("[B".to_owned()),
+    }));
+    Ok(Value::Ref(array))
+}
+
+/// A native whose answer is `0`.
+fn zero_value(_ctx: &mut NativeCtx<'_>) -> Result<Value, VmError> {
+    Ok(Value::Int(0))
+}
+
+/// A native whose answer is `null`.
+fn null_value(_ctx: &mut NativeCtx<'_>) -> Result<Value, VmError> {
+    Ok(Value::NULL)
+}
+
+/// `System.mapLibraryName(String)`: `lib<name>.so` on this host.
+fn map_library_name(ctx: &mut NativeCtx<'_>) -> Result<Value, VmError> {
+    let [name] = expect_args::<1>(ctx)?;
+    let name = name.as_ref().ok_or(VmError::TypeMismatch {
+        expected: "a library name",
+        found: *name,
+    })?;
+    let name = ctx.shared.string_text(name)?;
+    let mapped = ctx.shared.intern(ctx.path, &format!("lib{name}.so"))?;
+    Ok(Value::Ref(mapped))
+}
+
+/// A native whose answer is "yes".
+fn true_flag(_ctx: &mut NativeCtx<'_>) -> Result<Value, VmError> {
+    Ok(Value::Int(1))
 }
 
 /// A native whose answer this VM can honestly give as "no".
