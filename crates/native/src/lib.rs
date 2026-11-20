@@ -18,6 +18,7 @@
 pub mod class;
 pub mod exceptions;
 pub mod io;
+pub mod memory;
 pub mod misc;
 pub mod system;
 
@@ -28,6 +29,7 @@ pub fn register_jcl_natives(shared: &mut Shared) {
     system::register(shared);
     io::register(shared);
     class::register(shared);
+    memory::register(shared);
     misc::register(shared);
     exceptions::register(shared);
 }

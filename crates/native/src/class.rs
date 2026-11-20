@@ -79,7 +79,7 @@ fn init_class_name(ctx: &mut NativeCtx<'_>) -> Result<Value, VmError> {
             )));
         }
     };
-    let string = ctx.shared.intern(&name);
+    let string = ctx.shared.intern(ctx.path, &name)?;
     let class_class = ctx.shared.class_of(reference);
     if let Some(class_class) = class_class
         && let Some(slot) = ctx
@@ -150,14 +150,10 @@ fn get_primitive_class(ctx: &mut NativeCtx<'_>) -> Result<Value, VmError> {
         expected: "a primitive name",
         found: *name,
     })?;
-    let text = match ctx.shared.heap.get(reference.index()) {
-        Some(rava_vm::HeapObject::Str(text)) => text.clone(),
-        other => {
-            return Err(VmError::Native(format!(
-                "getPrimitiveClass needs a string, got {other:?}"
-            )));
-        }
-    };
+    let text = ctx
+        .shared
+        .string_text(reference)
+        .map_err(|error| VmError::Native(format!("getPrimitiveClass needs a string: {error}")))?;
     let descriptor = match text.as_str() {
         "int" => "I",
         "long" => "J",

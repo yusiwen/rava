@@ -33,7 +33,6 @@ pub enum HeapObject {
     /// stale references are a bug the VM cannot detect (a generation counter would).
     Free,
     Instance(Instance),
-    Str(String),
     Builder(String),
     Array(Array),
     /// A `LambdaMetafactory` call site's product: the implementation to call and the values it

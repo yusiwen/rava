@@ -51,7 +51,7 @@ pub fn run_main(
 
     // `main`'s parameter is never null (JLS §10.9): an empty array is what Java passes when the
     // program has no arguments.
-    let args = shared.string_array(program_args);
+    let args = shared.string_array(path, program_args)?;
     invoke(shared, thread, path, owner, index, vec![Value::Ref(args)])?;
     Ok(())
 }
@@ -127,6 +127,16 @@ fn invoke(
                 native(&mut ctx)
             };
             return match outcome {
+                Err(VmError::MissingNative(key)) => {
+                    let frames: Vec<String> = thread
+                        .frames
+                        .iter()
+                        .map(|frame| shared.class(frame.class).name.clone())
+                        .collect();
+                    Err(VmError::MissingNative(format!(
+                        "{key} DEBUG frames={frames:?}"
+                    )))
+                }
                 Err(VmError::JavaException { class, message }) => Err(new_exception(
                     shared,
                     thread,
@@ -142,7 +152,24 @@ fn invoke(
             (method.name.clone(), method.descriptor.clone())
         };
         let owner = shared.class(class).name.clone();
-        return match call_native(shared, thread, path, &owner, &name, &descriptor, &args) {
+        return match call_native(shared, thread, path, &owner, &name, &descriptor, &args).map_err(
+            |error| match error {
+                // Name the caller too: the same native can be reached from several places and
+                // the class that declares it does not say where the program is.
+                VmError::MissingNative(key) => {
+                    let caller = thread
+                        .frames
+                        .last()
+                        .map(|frame| {
+                            let class = &shared.class(frame.class);
+                            format!("{}.{}", class.name, class.methods[frame.method].name)
+                        })
+                        .unwrap_or_else(|| "<none>".to_owned());
+                    VmError::MissingNative(format!("{key} (called from {caller})"))
+                }
+                other => other,
+            },
+        ) {
             Err(VmError::JavaException { class, message }) => Err(new_exception(
                 shared,
                 thread,
@@ -873,7 +900,7 @@ fn run_frame(
                             }
                             args.reverse();
                             let text = render_concat(shared, &recipe, &args)?;
-                            let reference = shared.new_string(text);
+                            let reference = shared.new_string(path, text)?;
                             thread.frames[frame_index].stack.push(Value::Ref(reference));
                         }
                         rava_vm::CallSite::Lambda {
@@ -904,6 +931,7 @@ fn run_frame(
                         } => {
                             let value = execute_record_method(
                                 shared,
+                                path,
                                 &mut thread.frames[frame_index],
                                 qualified,
                                 code,
@@ -1574,7 +1602,7 @@ fn allocate_exception(
 
     let mut args = vec![Value::Ref(object)];
     if let Some(text) = message {
-        let text = shared.new_string(text.to_owned());
+        let text = shared.new_string(path, text.to_owned())?;
         args.push(Value::Ref(text));
     }
     invoke(shared, thread, path, owner, index, args)?;
@@ -1744,22 +1772,26 @@ fn render_value(shared: &Shared, value: Value) -> Result<String, VmError> {
         Value::Float(number) => rava_vm::format::float_to_string(number),
         Value::Double(number) => rava_vm::format::double_to_string(number),
         Value::Ref(reference) if reference.is_null() => "null".to_owned(),
-        Value::Ref(reference) => match shared.heap.get(reference.index()) {
-            Some(HeapObject::Str(text)) => text.clone(),
-            Some(other) => {
-                return Err(VmError::Unsupported {
+        // A `String` renders as itself; anything else needs a `toString` call, which the concat
+        // recipe cannot make (JVMS `StringConcatFactory` handles it in the library instead).
+        Value::Ref(reference) => {
+            shared
+                .string_text(reference)
+                .map_err(|_| VmError::Unsupported {
                     feature: "toString",
-                    detail: format!("cannot render {other:?} in a concat recipe"),
-                });
-            }
-            None => return Err(VmError::Native(format!("dangling reference {reference:?}"))),
-        },
+                    detail: format!("cannot render {reference:?} in a concat recipe"),
+                })?
+        }
     })
 }
 
 /// Runs one of a record's generated methods over its component slots.
+// The record protocol needs the frame, the constants and the path; bundling them into a
+// struct would only move the argument list one level down.
+#[allow(clippy::too_many_arguments)]
 fn execute_record_method(
     shared: &mut Shared,
+    path: &ClassPath,
     frame: &mut Frame,
     qualified: &str,
     code: &rava_vm::Code,
@@ -1787,7 +1819,7 @@ fn execute_record_method(
                 text.push_str(&render_value(shared, value)?);
             }
             text.push(']');
-            Ok(Value::Ref(shared.new_string(text)))
+            Ok(Value::Ref(shared.new_string(path, text)?))
         }
         RecordMethodKind::Equals => {
             let other = pop(frame, qualified, code)?;
@@ -1846,8 +1878,8 @@ fn record_values_equal(shared: &Shared, left: Value, right: Value) -> bool {
             if a.is_null() || b.is_null() {
                 return a == b;
             }
-            match (shared.heap.get(a.index()), shared.heap.get(b.index())) {
-                (Some(HeapObject::Str(x)), Some(HeapObject::Str(y))) => x == y,
+            match (shared.string_text(a), shared.string_text(b)) {
+                (Ok(x), Ok(y)) => x == y,
                 _ => a == b,
             }
         }
@@ -1869,15 +1901,15 @@ fn record_value_hash(shared: &Shared, value: Value) -> i32 {
             if reference.is_null() {
                 return 0;
             }
-            match shared.heap.get(reference.index()) {
-                Some(HeapObject::Str(text)) => {
+            match shared.string_text(reference) {
+                Ok(text) => {
                     let mut hash: i32 = 0;
                     for unit in text.encode_utf16() {
                         hash = hash.wrapping_mul(31).wrapping_add(i32::from(unit));
                     }
                     hash
                 }
-                _ => reference.0 as i32,
+                Err(_) => reference.0 as i32,
             }
         }
     }

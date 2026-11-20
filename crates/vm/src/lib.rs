@@ -290,7 +290,6 @@ impl Shared {
                 // and the cache keeps its object alive.
                 HeapObject::Null
                 | HeapObject::Free
-                | HeapObject::Str(_)
                 | HeapObject::Builder(_)
                 | HeapObject::FieldRef(_, _)
                 | HeapObject::MethodRef(_, _)
@@ -319,26 +318,60 @@ impl Shared {
 
     /// Returns the canonical reference for a string constant (JVMS §5.3: `ldc` of the
     /// same string always yields the same object).
-    pub fn intern(&mut self, text: &str) -> ObjRef {
+    pub fn intern(&mut self, path: &ClassPath, text: &str) -> Result<ObjRef, VmError> {
         if let Some(reference) = self.interned.get(text) {
-            return *reference;
+            return Ok(*reference);
         }
-        let reference = self.allocate(HeapObject::Str(text.to_owned()));
+        let reference = self.new_string(path, text.to_owned())?;
         self.interned.insert(text.to_owned(), reference);
-        reference
+        Ok(reference)
     }
 
     pub fn write_out(&mut self, bytes: &[u8]) {
         self.out.extend_from_slice(bytes);
     }
 
-    /// Reads a string object's payload, or reports what the reference actually is.
-    pub fn string(&self, reference: ObjRef) -> Result<&str, VmError> {
-        match self.heap.get(reference.index()) {
-            Some(HeapObject::Str(text)) => Ok(text),
-            Some(other) => Err(VmError::Native(format!("expected a String, got {other:?}"))),
-            None => Err(VmError::Native(format!("dangling reference {reference:?}"))),
+    /// The text of a `java.lang.String` instance: its `byte[] value` decoded through `coder`.
+    ///
+    /// Strings are ordinary instances now, so this reads the host class's fields rather than a
+    /// VM-private payload.
+    pub fn string_text(&self, reference: ObjRef) -> Result<String, VmError> {
+        let class = self
+            .class_of(reference)
+            .ok_or_else(|| VmError::Native(format!("{reference:?} has no runtime class")))?;
+        if self.class(class).name != "java/lang/String" {
+            return Err(VmError::Native(format!(
+                "expected a String, got {}",
+                self.class(class).name
+            )));
         }
+        let value_slot = self
+            .class(class)
+            .field_slot("value", "[B")
+            .ok_or_else(|| VmError::Native("java.lang.String has no `value` field".to_owned()))?;
+        let coder_slot = self
+            .class(class)
+            .field_slot("coder", "B")
+            .ok_or_else(|| VmError::Native("java.lang.String has no `coder` field".to_owned()))?;
+        let value = self.instance_field(reference, value_slot)?;
+        let coder = self
+            .instance_field(reference, coder_slot)?
+            .as_int()
+            .ok_or_else(|| VmError::Native("java.lang.String.coder is not an int".to_owned()))?;
+        let bytes = value
+            .as_ref()
+            .ok_or_else(|| VmError::Native("java.lang.String.value is null".to_owned()))?;
+        let bytes: Vec<u8> = self
+            .array(bytes)?
+            .elements
+            .iter()
+            .map(|element| {
+                element.as_int().map(|byte| byte as u8).ok_or_else(|| {
+                    VmError::Native("java.lang.String.value holds a non-byte".to_owned())
+                })
+            })
+            .collect::<Result<_, _>>()?;
+        decode_string(&bytes, coder)
     }
 
     pub fn class(&self, id: ClassId) -> &Class {
@@ -577,10 +610,7 @@ impl Shared {
             .field_slot("message", "Ljava/lang/String;")?;
         let value = self.instance_field(object, slot).ok()?;
         match value.as_ref() {
-            Some(reference) => match self.heap.get(reference.index()) {
-                Some(HeapObject::Str(text)) => Some(text.clone()),
-                _ => None,
-            },
+            Some(reference) => self.string_text(reference).ok(),
             None => None,
         }
     }
@@ -670,7 +700,9 @@ impl Shared {
                     crate::resolve::ConstantValue::Float(value) => Value::Float(value),
                     crate::resolve::ConstantValue::Long(value) => Value::Long(value),
                     crate::resolve::ConstantValue::Double(value) => Value::Double(value),
-                    crate::resolve::ConstantValue::String(text) => Value::Ref(self.intern(&text)),
+                    crate::resolve::ConstantValue::String(text) => {
+                        Value::Ref(self.intern(path, &text)?)
+                    }
                 }
             }
         };
@@ -885,15 +917,15 @@ impl Shared {
     }
 
     /// A `String[]` holding fresh strings for `main`'s arguments.
-    pub fn string_array(&mut self, values: &[String]) -> ObjRef {
-        let elements: Vec<Value> = values
-            .iter()
-            .map(|value| Value::Ref(self.new_string(value.clone())))
-            .collect();
-        self.allocate(HeapObject::Array(Array {
+    pub fn string_array(&mut self, path: &ClassPath, values: &[String]) -> Result<ObjRef, VmError> {
+        let mut elements: Vec<Value> = Vec::with_capacity(values.len());
+        for value in values {
+            elements.push(Value::Ref(self.new_string(path, value.clone())?));
+        }
+        Ok(self.allocate(HeapObject::Array(Array {
             kind: ArrayKind::Reference,
             elements,
-        }))
+        })))
     }
 
     pub fn array(&self, reference: ObjRef) -> Result<&Array, VmError> {
@@ -964,7 +996,6 @@ impl Shared {
     pub fn class_of(&self, reference: ObjRef) -> Option<ClassId> {
         match self.heap.get(reference.index())? {
             HeapObject::Instance(instance) => Some(instance.class),
-            HeapObject::Str(_) => self.class_ids.get("java/lang/String").copied(),
             HeapObject::Builder(_) => self.class_ids.get("java/lang/StringBuilder").copied(),
             HeapObject::Array(_)
             | HeapObject::Lambda(_)
@@ -1072,9 +1103,68 @@ impl Shared {
         }
     }
 
-    /// Allocates a `String` object, with interning only where the JVM requires it.
-    pub fn new_string(&mut self, text: String) -> ObjRef {
-        self.allocate(HeapObject::Str(text))
+    /// Allocates a `java.lang.String` with the host class's fields: a `byte[] value` and the
+    /// `coder` byte (0 = Latin-1, 1 = UTF-16). Strings are instances so the library's own
+    /// methods can read them; a Rust string in the heap would make every `String` method fail
+    /// on its first `getfield`.
+    pub fn new_string(&mut self, path: &ClassPath, text: String) -> Result<ObjRef, VmError> {
+        let class = self.load_class(path, "java/lang/String")?;
+        let (bytes, coder) = encode_string(&text);
+        let value = self.allocate(HeapObject::Array(Array {
+            kind: ArrayKind::Byte,
+            elements: bytes
+                .iter()
+                .map(|byte| Value::Int(i32::from(*byte)))
+                .collect(),
+        }));
+        let reference = self.new_instance(class);
+        let value_slot = self
+            .class(class)
+            .field_slot("value", "[B")
+            .ok_or_else(|| VmError::Native("java.lang.String has no `value` field".to_owned()))?;
+        let coder_slot = self
+            .class(class)
+            .field_slot("coder", "B")
+            .ok_or_else(|| VmError::Native("java.lang.String has no `coder` field".to_owned()))?;
+        self.set_instance_field(reference, value_slot, Value::Ref(value))?;
+        self.set_instance_field(reference, coder_slot, Value::Int(i32::from(coder)))?;
+        Ok(reference)
+    }
+}
+
+/// Stores text the way `java.lang.String` does: Latin-1 when every character fits a byte, else
+/// UTF-16 big-endian. The returned byte says which (`0` Latin-1, `1` UTF-16), matching
+/// `String.coder`.
+fn encode_string(text: &str) -> (Vec<u8>, u8) {
+    if text.chars().all(|character| u32::from(character) <= 0xFF) {
+        (text.chars().map(|character| character as u8).collect(), 0)
+    } else {
+        let mut bytes = Vec::with_capacity(text.len() * 2);
+        for unit in text.encode_utf16() {
+            bytes.extend_from_slice(&unit.to_be_bytes());
+        }
+        (bytes, 1)
+    }
+}
+
+/// Decodes `String.value` through `String.coder`.
+fn decode_string(bytes: &[u8], coder: i32) -> Result<String, VmError> {
+    match coder {
+        0 => Ok(bytes.iter().map(|byte| char::from(*byte)).collect()),
+        1 => {
+            if bytes.len() % 2 != 0 {
+                return Err(VmError::Native(
+                    "a UTF-16 String has an odd number of bytes".to_owned(),
+                ));
+            }
+            let units: Vec<u16> = bytes
+                .chunks_exact(2)
+                .map(|pair| u16::from_be_bytes([pair[0], pair[1]]))
+                .collect();
+            String::from_utf16(&units)
+                .map_err(|_| VmError::Native("a String holds an unpaired surrogate".to_owned()))
+        }
+        other => Err(VmError::Native(format!("unknown String coder {other}"))),
     }
 }
 
@@ -1106,23 +1196,31 @@ pub fn type_name(descriptor: &str) -> String {
 mod tests {
     use super::*;
 
+    fn empty_array(shared: &mut Shared) -> ObjRef {
+        shared.allocate(HeapObject::Array(Array {
+            kind: ArrayKind::Reference,
+            elements: Vec::new(),
+        }))
+    }
+
     #[test]
     fn collection_keeps_roots_and_frees_the_rest() {
         let mut shared = Shared::new();
         let thread = ThreadState::new();
 
-        // Interned strings are roots.
-        let kept = shared.intern("kept");
-        let orphan = shared.new_string("orphan".to_owned());
+        // The intern table is a root set.
+        let kept = empty_array(&mut shared);
+        shared.interned.insert("kept".to_owned(), kept);
+        let orphan = empty_array(&mut shared);
 
         let stats = shared.collect(&thread);
         assert_eq!(stats.freed, 1, "only the orphan is unreachable");
         assert!(matches!(shared.heap[orphan.index()], HeapObject::Free));
-        assert!(matches!(shared.heap[kept.index()], HeapObject::Str(_)));
+        assert!(matches!(shared.heap[kept.index()], HeapObject::Array(_)));
 
         // The freed slot is reused, which is why a stale reference is a bug the VM cannot
         // detect: the index stays valid and now names a different object.
-        let reused = shared.new_string("reused".to_owned());
+        let reused = empty_array(&mut shared);
         assert_eq!(reused, orphan);
     }
 
@@ -1131,7 +1229,7 @@ mod tests {
         let mut shared = Shared::new();
         let thread = ThreadState::new();
 
-        let inner = shared.new_string("inner".to_owned());
+        let inner = empty_array(&mut shared);
         let _orphan = shared.allocate(HeapObject::Array(Array {
             kind: ArrayKind::Reference,
             elements: vec![Value::Ref(inner)],
@@ -1141,7 +1239,7 @@ mod tests {
         let stats = shared.collect(&thread);
         assert_eq!(stats.freed, 2);
 
-        let inner = shared.new_string("inner".to_owned());
+        let inner = empty_array(&mut shared);
         let outer = shared.allocate(HeapObject::Array(Array {
             kind: ArrayKind::Reference,
             elements: vec![Value::Ref(inner)],
@@ -1151,8 +1249,8 @@ mod tests {
         let stats = shared.collect(&thread);
         assert_eq!(
             stats.freed, 0,
-            "the array is a root and the string is reachable from it"
+            "the array is a root and the element is reachable from it"
         );
-        assert!(matches!(shared.heap[inner.index()], HeapObject::Str(_)));
+        assert!(matches!(shared.heap[inner.index()], HeapObject::Array(_)));
     }
 }

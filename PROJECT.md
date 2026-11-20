@@ -34,7 +34,7 @@ and milestones M0–M5 are planned but not built. `scripts/workflow-check.sh` ru
 | :--- | :--- | :--- | :--- | :--- |
 | — | **Migration baseline**: the VM core from the previous iteration, without its own class library or synthetic `Object` | S1–S3 | done | notes S1–S3 |
 | M0 | Boot: read the host image, complete the instruction set the library uses, bootstrap `Object`/`String`/`Class`/`System`, first JCL natives, a program that runs with a verified result | S4–S8 | done | notes S4–S9; ADR-0014 |
-| M1 | The core library: strings, arrays, exceptions, `Class` basics | S9 | todo | #1 and S9 landed early, in M0 |
+| M1 | The core library: strings, arrays, exceptions, `Class` basics | S9, S10, S12 | todo | #1, S9, S10 and S12 landed early; strings wait on arrays |
 | M2 | Loaders and modules: `(loader, name)` identity, resources | — | todo | — |
 | M3 | Real threads and monitors | — | todo | ADR-0010 |
 | M4 | `MethodHandle`, `VarHandle`, `Unsafe` | — | todo | ADR-0012 |
@@ -86,6 +86,7 @@ A slice is done only when all of the following hold:
 | S7 | First JCL natives: `System.out`, `PrintStream`, `FileOutputStream`, `FileDescriptor` | R5 | `cargo test -p rava-cli --test natives` exits 0 | done |
 | S8 | M0 acceptance: a program loads from the image, runs, and its result is verified | R1 | `cargo test -p rava-cli --test boot` exits 0 | done |
 | S9 | Class objects are instances of the host's `java.lang.Class`, with a VM-side reverse map | R4 | `cargo test -p rava-cli --test class_object` exits 0 | done |
+| S10 | Strings are instances of the host's `java.lang.String`; the field-only methods run | R4 | `cargo test -p rava-cli --test strings` exits 0 | done |
 | S12 | Exception basics: `Throwable.fillInStackTrace` captures a trace once per throwable, so constructing one works and an uncaught one is reported | R6 | `cargo test -p rava-cli --test exceptions` exits 0 | done |
 
 ## Slice log
@@ -103,6 +104,7 @@ A slice is done only when all of the following hold:
 | S6 | `cargo test -p rava-vm --test bootstrap` | 0 | 2026-11-20 | [S6 note](docs/notes/S6-bootstrap.md) |
 | S7 | `cargo test -p rava-cli --test natives` | 0 | 2026-11-20 | [S7 note](docs/notes/S7-first-natives.md) |
 | S9 | `cargo test -p rava-cli --test class_object` | 0 | 2026-11-20 | [S9 note](docs/notes/S9-class-objects.md) |
+| S10 | `cargo test -p rava-cli --test strings` | 0 | 2026-11-20 | [S10 note](docs/notes/S10-string-instances.md) |
 | S8 | `cargo test -p rava-cli --test boot` | 0 | 2026-11-20 | [S8 note](docs/notes/S8-boot-mounted.md) |
 | S12 | `cargo test -p rava-cli --test exceptions` | 0 | 2026-11-20 | [S12 note](docs/notes/S12-exceptions.md) |
 
@@ -143,13 +145,13 @@ A slice is done only when all of the following hold:
    monitors and interpreter were carried over from the previous iteration; its class library,
    corpus and synthetic `Object` were not. `cargo test` passes on the migrated unit tests, and
    `cargo xtask ci` is green.
-3. **M0 is complete (S4–S9)**: the image is read, the instruction set is complete, the core
-   classes load, the first eleven JCL natives are registered, class objects are real instances of
-   the host's `java.lang.Class`, and S8 runs a self-checking program through `rava run`.
-   **Printing is G2** (ADR-0014): the path stops at `Unsafe.objectFieldOffset1`, so it is the
-   acceptance of the `Unsafe`/VarHandle work, which starts at M4. **Next is M1**: strings
-   (`HeapObject::Str` is still not an instance of `java.lang.String`, so `length()`/`charAt`
-   read fields of a non-instance), arrays, exceptions.
+3. **M0 is complete (S4–S9); M1 has started**: strings are instances of the host's
+   `java.lang.String` (S10), so `length`/`charAt` and the VM's own text extraction work. The
+   rest of `String` waits on S11 (arrays): `StringLatin1.hashCode` reaches
+   `ArraysSupport.<clinit>` → `Unsafe`, then `vectorizedHashCode` → `checkcast [B`, which needs
+   array class objects. `equals`/`concat`/`substring` then need `Unsafe.getIntUnaligned` and
+   `System.arraycopy`. **Next is S11**, then the remaining string methods.
+   **Printing is G2** (ADR-0014), after M4's `Unsafe`.
 4. **The previous project is archived** at `/home/yusiwen/git/jvm` and is read-only history.
    The GitHub repository is deleted and recreated by the human; the local origin in
    `## Environments` is the intended remote, not a live one.

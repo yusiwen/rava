@@ -179,8 +179,9 @@ fn java_reads_and_calls_the_class_object() {
     let Value::Ref(name) = name else {
         panic!("NAME is {name:?}");
     };
-    assert!(
-        matches!(&shared.heap[name.index()], HeapObject::Str(text) if text == "ClassInfo"),
+    assert_eq!(
+        shared.string_text(*name).expect("NAME is a String"),
+        "ClassInfo",
         "getName returned the wrong name"
     );
 

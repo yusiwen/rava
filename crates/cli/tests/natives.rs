@@ -532,7 +532,7 @@ fn primitive_class_objects_come_from_names() {
     let path = host_path();
     let mut shared = rava_vm::Shared::new();
     rava_native::register_jcl_natives(&mut shared);
-    let name = shared.intern("int");
+    let name = shared.intern(&path, "int").expect("int");
     let function = *shared
         .natives
         .get("java/lang/Class.getPrimitiveClass(Ljava/lang/String;)Ljava/lang/Class;")
@@ -697,8 +697,11 @@ fn class_queries_answer_from_the_target() {
     let Value::Ref(name) = name else {
         panic!("initClassName is not a string");
     };
-    assert!(
-        matches!(&shared.heap[name.index()], HeapObject::Str(text) if text == "java.lang.String")
+    assert_eq!(
+        shared
+            .string_text(name)
+            .expect("initClassName returns a String"),
+        "java.lang.String"
     );
     // The native caches the name in the object, so a second call reads the field like the host's
     // `getName` does; both answers must agree.
@@ -721,8 +724,51 @@ fn class_queries_answer_from_the_target() {
     let Value::Ref(primitive_name) = primitive_name else {
         panic!("initClassName is not a string");
     };
-    assert!(matches!(
-        &shared.heap[primitive_name.index()],
-        HeapObject::Str(text) if text == "int"
-    ));
+    assert_eq!(shared.string_text(primitive_name).expect("a String"), "int");
+}
+
+#[test]
+fn unsafe_reports_the_array_geometry() {
+    let path = host_path();
+    let mut shared = rava_vm::Shared::new();
+    rava_native::register_jcl_natives(&mut shared);
+    let mut thread = ThreadState::new();
+
+    for (descriptor, scale) in [
+        ("[B", 1),
+        ("[C", 2),
+        ("[I", 4),
+        ("[J", 8),
+        ("[Ljava/lang/Object;", 1),
+    ] {
+        let class = shared.type_class(&path, descriptor).expect(descriptor);
+        let call = |shared: &mut rava_vm::Shared, thread: &mut ThreadState, name: &str| -> Value {
+            let function = *shared.natives.get(name).expect(name);
+            let args = [Value::NULL, Value::Ref(class)];
+            let mut ctx = NativeCtx {
+                shared,
+                thread,
+                path: &path,
+                args: &args,
+            };
+            function(&mut ctx).unwrap_or_else(|error| panic!("{name}: {error}"))
+        };
+        assert_eq!(
+            call(
+                &mut shared,
+                &mut thread,
+                "jdk/internal/misc/Unsafe.arrayBaseOffset0(Ljava/lang/Class;)I"
+            ),
+            Value::Int(0)
+        );
+        assert_eq!(
+            call(
+                &mut shared,
+                &mut thread,
+                "jdk/internal/misc/Unsafe.arrayIndexScale0(Ljava/lang/Class;)I"
+            ),
+            Value::Int(scale),
+            "{descriptor}"
+        );
+    }
 }

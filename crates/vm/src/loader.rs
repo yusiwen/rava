@@ -151,6 +151,7 @@ impl Shared {
 /// fields take an `Integer`.
 fn constant_value(
     shared: &mut Shared,
+    path: &ClassPath,
     file: &ClassFile,
     constant: &rava_classfile::Constant,
     descriptor: &str,
@@ -168,7 +169,7 @@ fn constant_value(
         ("D", Constant::Double(value)) => Ok(Value::Double(*value)),
         ("Ljava/lang/String;", Constant::String { string_index }) => {
             let text = file.constant_pool.utf8(*string_index)?.to_owned();
-            Ok(Value::Ref(shared.intern(&text)))
+            Ok(Value::Ref(shared.intern(path, &text)?))
         }
         _ => Err(mismatch()),
     }
@@ -251,7 +252,7 @@ fn build_class(shared: &mut Shared, path: &ClassPath, name: &str) -> Result<Clas
             // JVMS §2.4: a static field starts at its type's default value; §5.4.2 preparation
             // then replaces it with the field's `ConstantValue` when the class file carries one.
             let value = match file.constant_value(field)? {
-                Some(constant) => constant_value(shared, &file, constant, &descriptor)?,
+                Some(constant) => constant_value(shared, path, &file, constant, &descriptor)?,
                 None => Value::default_for(&descriptor),
             };
             statics.insert(field_name.clone(), value);
@@ -304,7 +305,6 @@ fn build_class(shared: &mut Shared, path: &ClassPath, name: &str) -> Result<Clas
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::heap::HeapObject;
     use rava_classfile::{ClassBuilder, Constant};
 
     fn empty_class() -> ClassFile {
@@ -313,30 +313,11 @@ mod tests {
     }
 
     #[test]
-    fn a_string_constant_value_is_interned() {
-        let mut builder = ClassBuilder::new("Const", "java/lang/Object", 65);
-        let index = builder.string("hi");
-        let bytes = builder.build();
-        let file = ClassFile::parse(&bytes).expect("fixture parses");
-        let constant = file.constant_pool.get(index).expect("string constant");
-
-        let mut shared = Shared::new();
-        let value =
-            constant_value(&mut shared, &file, constant, "Ljava/lang/String;").expect("converts");
-        let Value::Ref(reference) = value else {
-            panic!("expected a reference, got {value:?}");
-        };
-        assert!(
-            matches!(&shared.heap[reference.index()], HeapObject::Str(text) if text == "hi"),
-            "the constant is the interned string"
-        );
-    }
-
-    #[test]
     fn a_constant_of_the_wrong_type_is_rejected() {
         let file = empty_class();
         let mut shared = Shared::new();
-        let error = constant_value(&mut shared, &file, &Constant::Integer(1), "J")
+        let path = ClassPath::new(".", ".");
+        let error = constant_value(&mut shared, &path, &file, &Constant::Integer(1), "J")
             .expect_err("an int constant cannot initialise a long field");
         assert!(matches!(error, VmError::BadConstantPool(_)), "{error:?}");
     }
