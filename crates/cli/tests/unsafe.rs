@@ -18,8 +18,10 @@ fn jdk_home() -> std::ffi::OsString {
     })
 }
 
-fn fixture_dir() -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("rava-unsafe-{}", std::process::id()));
+fn fixture_dir(name: &str) -> PathBuf {
+    // Each test names its directory: the suite runs in parallel and a shared one races between
+    // `remove_dir_all` and `create_dir_all` (issue #33).
+    let dir = std::env::temp_dir().join(format!("rava-unsafe-{}-{}", std::process::id(), name));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("fixture directory");
     dir
@@ -35,8 +37,8 @@ fn build_holder(dir: &Path) {
     std::fs::write(dir.join("Holder.class"), builder.build()).expect("fixture class");
 }
 
-fn setup() -> (ClassPath, Shared, ThreadState, rava_vm::ClassId) {
-    let dir = fixture_dir();
+fn setup(name: &str) -> (ClassPath, Shared, ThreadState, rava_vm::ClassId) {
+    let dir = fixture_dir(name);
     build_holder(&dir);
     let path: ClassPath = rava_cli::class_path(Path::new(&jdk_home()), &dir).expect("class path");
     let mut shared = Shared::new();
@@ -76,7 +78,7 @@ fn array(shared: &mut Shared, kind: ArrayKind, elements: Vec<Value>) -> rava_vm:
 
 #[test]
 fn field_offsets_are_the_instance_slots() {
-    let (path, mut shared, mut thread, holder) = setup();
+    let (path, mut shared, mut thread, holder) = setup("fields");
     let class = shared.class_object(&path, holder).expect("class object");
     let offset = |shared: &mut Shared, thread: &mut ThreadState, name: &str| -> i64 {
         let name = shared.intern(&path, name).expect("intern");
@@ -199,7 +201,7 @@ fn field_offsets_are_the_instance_slots() {
 
 #[test]
 fn arrays_are_addressed_by_byte_offsets() {
-    let (path, mut shared, mut thread, _holder) = setup();
+    let (path, mut shared, mut thread, _holder) = setup("arrays");
     let ints = array(
         &mut shared,
         ArrayKind::Int,
@@ -281,7 +283,7 @@ fn arrays_are_addressed_by_byte_offsets() {
 
 #[test]
 fn reference_arrays_are_element_addressed_and_cas_works() {
-    let (path, mut shared, mut thread, _holder) = setup();
+    let (path, mut shared, mut thread, _holder) = setup("refs");
     let first = shared.intern(&path, "first").expect("intern");
     let second = shared.intern(&path, "second").expect("intern");
     let refs = array(
@@ -343,7 +345,7 @@ fn reference_arrays_are_element_addressed_and_cas_works() {
 
 #[test]
 fn allocate_instance_has_default_fields_and_throw_exception_unwinds() {
-    let (path, mut shared, mut thread, holder) = setup();
+    let (path, mut shared, mut thread, holder) = setup("allocate");
     let class = shared.class_object(&path, holder).expect("class object");
     let instance = call(
         &mut shared,
