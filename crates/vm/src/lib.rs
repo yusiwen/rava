@@ -491,6 +491,10 @@ impl Shared {
     }
 
     /// The class object for a primitive or array type, allocated once per descriptor.
+    ///
+    /// An array class object also carries its component type, in the host `Class.componentType`
+    /// field: JDK 21's `Class.getComponentType()` is a Java method reading that field, not a
+    /// native, so the VM has to fill it here or the query answers `null`.
     pub fn type_class(&mut self, path: &ClassPath, descriptor: &str) -> Result<ObjRef, VmError> {
         if let Some(reference) = self.type_classes.get(descriptor) {
             return Ok(*reference);
@@ -500,7 +504,104 @@ impl Shared {
         self.class_targets
             .insert(reference, ClassTarget::Type(descriptor.to_owned()));
         self.type_classes.insert(descriptor.to_owned(), reference);
+        if let Some(component) = descriptor.strip_prefix('[') {
+            let component_class = self.component_class_object(path, component)?;
+            if let Some(slot) = self
+                .class(class_class)
+                .field_slot("componentType", "Ljava/lang/Class;")
+            {
+                self.set_instance_field(reference, slot, Value::Ref(component_class))?;
+            }
+        }
         Ok(reference)
+    }
+
+    /// The class object of one array component descriptor: the loaded class behind an object
+    /// type (`Ljava/lang/String;`), or the cached type class behind a primitive or array one
+    /// (`I`, `[I`).
+    pub fn component_class_object(
+        &mut self,
+        path: &ClassPath,
+        descriptor: &str,
+    ) -> Result<ObjRef, VmError> {
+        match object_descriptor_name(descriptor) {
+            Some(name) => {
+                let class = self.load_class(path, name)?;
+                self.class_object(path, class)
+            }
+            None => self.type_class(path, descriptor),
+        }
+    }
+
+    /// The array class descriptor of a heap array (`[I`, `[Ljava/lang/String;`, `[[I`), or
+    /// `None` for a reference that is not an array. This is the array-side answer that
+    /// [`Shared::class_of`] cannot give: an array class has no [`ClassId`].
+    pub fn array_class(&self, reference: ObjRef) -> Option<&str> {
+        match self.heap.get(reference.index())? {
+            HeapObject::Array(array) => array.class_name.as_deref(),
+            _ => None,
+        }
+    }
+
+    /// Whether the array class `actual` is assignable to the type `target`, where `target` is
+    /// either a binary class name (`java/lang/Object`) or a primitive/array descriptor (`[I`).
+    ///
+    /// Arrays obey the JVM's subtype rules (JVMS §4.10.1.2): an array is an `Object`,
+    /// `Cloneable` and `Serializable`; array-to-array is covariant in the component type for
+    /// reference components and exact for primitives. A nested array component is itself a
+    /// reference type, so `[[I` is assignable to `[Ljava/lang/Object;`.
+    pub fn is_array_assignable(
+        &mut self,
+        path: &ClassPath,
+        actual: &str,
+        target: &str,
+    ) -> Result<bool, VmError> {
+        if actual == target {
+            return Ok(true);
+        }
+        if !actual.starts_with('[') {
+            return Ok(false);
+        }
+        if !target.starts_with('[') {
+            // Every array is an Object, Cloneable and Serializable.
+            return Ok(matches!(
+                target,
+                "java/lang/Object" | "java/lang/Cloneable" | "java/io/Serializable"
+            ));
+        }
+        self.component_is_assignable(path, &actual[1..], &target[1..])
+    }
+
+    /// Whether the component types of two array classes are assignable. Descriptors here are
+    /// one level down: `I`, `[I`, or `Ljava/lang/String;`.
+    fn component_is_assignable(
+        &mut self,
+        path: &ClassPath,
+        actual: &str,
+        target: &str,
+    ) -> Result<bool, VmError> {
+        if actual == target {
+            return Ok(true);
+        }
+        if target.starts_with('[') {
+            return self.is_array_assignable(path, actual, target);
+        }
+        if actual.starts_with('[') {
+            // An array component is a reference: it is only assignable to a reference target.
+            return Ok(matches!(
+                target,
+                "Ljava/lang/Object;" | "Ljava/lang/Cloneable;" | "Ljava/io/Serializable;"
+            ));
+        }
+        let (Some(actual_name), Some(target_name)) = (
+            object_descriptor_name(actual),
+            object_descriptor_name(target),
+        ) else {
+            return Ok(false);
+        };
+        let actual = self.load_class(path, actual_name)?;
+        let target = self.load_class(path, target_name)?;
+        Ok(self.is_assignable(actual, target))
     }
 
     /// The descriptor a heap reference names, if it is a primitive or array class object.
@@ -925,6 +1026,7 @@ impl Shared {
         Ok(self.allocate(HeapObject::Array(Array {
             kind: ArrayKind::Reference,
             elements,
+            class_name: Some("[Ljava/lang/String;".to_owned()),
         })))
     }
 
@@ -1079,6 +1181,7 @@ impl Shared {
         self.allocate(HeapObject::Array(Array {
             kind: ArrayKind::Reference,
             elements: Vec::new(),
+            class_name: Some("[Ljava/lang/String;".to_owned()),
         }))
     }
 
@@ -1116,6 +1219,7 @@ impl Shared {
                 .iter()
                 .map(|byte| Value::Int(i32::from(*byte)))
                 .collect(),
+            class_name: Some("[B".to_owned()),
         }));
         let reference = self.new_instance(class);
         let value_slot = self
@@ -1176,6 +1280,12 @@ pub fn is_type_descriptor(name: &str) -> bool {
     matches!(name, "I" | "J" | "F" | "D" | "Z" | "B" | "C" | "S" | "V")
 }
 
+/// The binary name inside an object-type descriptor (`Ljava/lang/String;` ->
+/// `java/lang/String`), or `None` for a primitive or array descriptor.
+fn object_descriptor_name(descriptor: &str) -> Option<&str> {
+    descriptor.strip_prefix('L')?.strip_suffix(';')
+}
+
 /// `Class.getName` for a type descriptor: `int`, `[Ljava.lang.String;`, `[[I`.
 pub fn type_name(descriptor: &str) -> String {
     match descriptor {
@@ -1200,6 +1310,7 @@ mod tests {
         shared.allocate(HeapObject::Array(Array {
             kind: ArrayKind::Reference,
             elements: Vec::new(),
+            class_name: None,
         }))
     }
 
@@ -1233,6 +1344,7 @@ mod tests {
         let _orphan = shared.allocate(HeapObject::Array(Array {
             kind: ArrayKind::Reference,
             elements: vec![Value::Ref(inner)],
+            class_name: None,
         }));
         // The array is not a root, so both it and `inner` go; then make one reachable and
         // prove the walk keeps its element alive.
@@ -1243,6 +1355,7 @@ mod tests {
         let outer = shared.allocate(HeapObject::Array(Array {
             kind: ArrayKind::Reference,
             elements: vec![Value::Ref(inner)],
+            class_name: None,
         }));
         shared.interned.insert("root".to_owned(), outer);
 

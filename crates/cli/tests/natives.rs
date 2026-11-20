@@ -271,6 +271,7 @@ fn file_output_stream_writes_to_file_descriptor_one() {
     let data = shared.allocate(rava_vm::HeapObject::Array(rava_vm::Array {
         kind: rava_vm::ArrayKind::Byte,
         elements: vec![Value::Int(i32::from(b'h')), Value::Int(i32::from(b'i'))],
+        class_name: Some("[B".to_owned()),
     }));
 
     let function = *shared

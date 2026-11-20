@@ -16,7 +16,7 @@ use rava_vm::native::NativeCtx;
 use rava_vm::resolve;
 use rava_vm::{
     Array, ArrayKind, BinOp, ClassId, ClassPath, Compare, Convert, Frame, HeapObject,
-    Initialization, Instr, ObjRef, Shared, ThreadState, UnOp, Value, VmError,
+    Initialization, Instr, ObjRef, Shared, ThreadState, UnOp, Value, VmError, is_type_descriptor,
 };
 
 /// What one instruction did.
@@ -560,16 +560,30 @@ fn run_frame(
                 }
                 Instr::NewArray(atype) => {
                     let length = pop_int(&mut thread.frames[frame_index], qualified, code)?;
-                    let kind = newarray_kind(atype)?;
-                    let reference = allocate_array_checked(shared, thread, path, kind, length)?;
+                    let (kind, class_name) = newarray_kind(atype)?;
+                    let reference =
+                        allocate_array_checked(shared, thread, path, kind, length, class_name)?;
                     thread.frames[frame_index].stack.push(Value::Ref(reference));
                 }
-                Instr::ANewArray(_constant) => {
-                    // The element class is not needed until `instanceof` and `checkcast` exist;
-                    // the array itself only has to be a reference array of the right length.
+                Instr::ANewArray(constant) => {
+                    // `anewarray` names the *element* type: `java/lang/String` makes
+                    // `[Ljava/lang/String;`, and an element that is already an array type
+                    // (`[I`) gains one more dimension (`[[I`).
                     let length = pop_int(&mut thread.frames[frame_index], qualified, code)?;
-                    let reference =
-                        allocate_array_checked(shared, thread, path, ArrayKind::Reference, length)?;
+                    let element = resolve::class_constant(shared.class(class), constant)?;
+                    let class_name = if element.starts_with('[') {
+                        format!("[{element}")
+                    } else {
+                        format!("[L{element};")
+                    };
+                    let reference = allocate_array_checked(
+                        shared,
+                        thread,
+                        path,
+                        ArrayKind::Reference,
+                        length,
+                        &class_name,
+                    )?;
                     thread.frames[frame_index].stack.push(Value::Ref(reference));
                 }
                 Instr::MultiANewArray {
@@ -593,8 +607,7 @@ fn run_frame(
                         ));
                     }
                     let descriptor = resolve::class_constant(shared.class(class), constant)?;
-                    let base = element_kind(&descriptor)?;
-                    let reference = allocate_multi(shared, base, &dims)?;
+                    let reference = allocate_multi(shared, &dims, &descriptor, 0)?;
                     thread.frames[frame_index].stack.push(Value::Ref(reference));
                 }
 
@@ -849,13 +862,9 @@ fn run_frame(
                 }
                 Instr::InstanceOf(constant) => {
                     let target = resolve::class_constant(shared.class(class), constant)?;
-                    let target_id = shared.load_class(path, &target)?;
                     let result = match pop(&mut thread.frames[frame_index], qualified, code)? {
                         Value::Ref(reference) if !reference.is_null() => {
-                            match shared.class_of(reference) {
-                                Some(actual) => shared.is_assignable(actual, target_id),
-                                None => false,
-                            }
+                            reference_is_instance(shared, path, reference, &target)?
                         }
                         // `null instanceof T` is false.
                         _ => false,
@@ -866,14 +875,10 @@ fn run_frame(
                 }
                 Instr::CheckCast(constant) => {
                     let target = resolve::class_constant(shared.class(class), constant)?;
-                    let target_id = shared.load_class(path, &target)?;
                     let value = pop(&mut thread.frames[frame_index], qualified, code)?;
                     let allowed = match value {
                         Value::Ref(reference) if !reference.is_null() => {
-                            match shared.class_of(reference) {
-                                Some(actual) => shared.is_assignable(actual, target_id),
-                                None => false,
-                            }
+                            reference_is_instance(shared, path, reference, &target)?
                         }
                         // A null reference passes any cast.
                         _ => true,
@@ -1299,16 +1304,16 @@ fn call_native(
     function(&mut ctx)
 }
 
-fn newarray_kind(atype: u8) -> Result<ArrayKind, VmError> {
+fn newarray_kind(atype: u8) -> Result<(ArrayKind, &'static str), VmError> {
     Ok(match atype {
-        4 => ArrayKind::Boolean,
-        5 => ArrayKind::Char,
-        6 => ArrayKind::Float,
-        7 => ArrayKind::Double,
-        8 => ArrayKind::Byte,
-        9 => ArrayKind::Short,
-        10 => ArrayKind::Int,
-        11 => ArrayKind::Long,
+        4 => (ArrayKind::Boolean, "[Z"),
+        5 => (ArrayKind::Char, "[C"),
+        6 => (ArrayKind::Float, "[F"),
+        7 => (ArrayKind::Double, "[D"),
+        8 => (ArrayKind::Byte, "[B"),
+        9 => (ArrayKind::Short, "[S"),
+        10 => (ArrayKind::Int, "[I"),
+        11 => (ArrayKind::Long, "[J"),
         other => {
             return Err(VmError::BadConstantPool(format!(
                 "unknown newarray atype {other}"
@@ -1317,14 +1322,13 @@ fn newarray_kind(atype: u8) -> Result<ArrayKind, VmError> {
     })
 }
 
-/// The innermost element kind of an array class descriptor such as `[[I`.
-fn element_kind(descriptor: &str) -> Result<ArrayKind, VmError> {
-    let base = descriptor
-        .trim_start_matches('[')
-        .as_bytes()
-        .first()
-        .copied();
-    Ok(match base {
+/// The kind of one array component descriptor: an object or array component is a reference,
+/// a primitive one is its own kind. This is the component kind of the *last allocated* level of
+/// a `multianewarray`, which need not be the innermost primitive: `new int[2][]` allocates an
+/// array of `[I`, so its elements are references, not ints.
+fn component_kind(descriptor: &str) -> Result<ArrayKind, VmError> {
+    Ok(match descriptor.as_bytes().first() {
+        Some(b'[') | Some(b'L') => ArrayKind::Reference,
         Some(b'I') => ArrayKind::Int,
         Some(b'J') => ArrayKind::Long,
         Some(b'F') => ArrayKind::Float,
@@ -1333,13 +1337,49 @@ fn element_kind(descriptor: &str) -> Result<ArrayKind, VmError> {
         Some(b'B') => ArrayKind::Byte,
         Some(b'C') => ArrayKind::Char,
         Some(b'S') => ArrayKind::Short,
-        Some(b'L') => ArrayKind::Reference,
         _ => {
             return Err(VmError::BadConstantPool(format!(
-                "not an array type: {descriptor}"
+                "not a component type: {descriptor}"
             )));
         }
     })
+}
+
+/// Whether `reference` is an instance of `target`, where `target` is a binary class name or a
+/// primitive/array descriptor (the two forms a `CONSTANT_Class` can hold).
+///
+/// An array has no [`ClassId`], so [`Shared::class_of`] answers `None` for it; its runtime type
+/// is the descriptor the allocator stored, and the array rules live in
+/// [`Shared::is_array_assignable`].
+fn reference_is_instance(
+    shared: &mut Shared,
+    path: &ClassPath,
+    reference: ObjRef,
+    target: &str,
+) -> Result<bool, VmError> {
+    if is_type_descriptor(target) {
+        // Resolve the target through the same type-class cache `Foo.class` uses, so the check
+        // and the class object agree.
+        let target_class = shared.type_class(path, target)?;
+        let descriptor = shared
+            .type_class_ref(target_class)
+            .ok_or_else(|| VmError::Native(format!("{target} is not a type class object")))?
+            .to_owned();
+        let Some(actual) = shared.array_class(reference).map(str::to_owned) else {
+            // A primitive names no object; only arrays pass a descriptor cast.
+            return Ok(false);
+        };
+        return shared.is_array_assignable(path, &actual, &descriptor);
+    }
+    let target = shared.load_class(path, target)?;
+    if let Some(actual) = shared.class_of(reference) {
+        return Ok(shared.is_assignable(actual, target));
+    }
+    let Some(actual) = shared.array_class(reference).map(str::to_owned) else {
+        return Ok(false);
+    };
+    let target_name = shared.class(target).name.clone();
+    shared.is_array_assignable(path, &actual, &target_name)
 }
 
 /// Allocates an array, turning a negative length into the exception Java raises rather than a VM
@@ -1350,6 +1390,7 @@ fn allocate_array_checked(
     path: &ClassPath,
     kind: ArrayKind,
     length: i32,
+    class_name: &str,
 ) -> Result<ObjRef, VmError> {
     if length < 0 {
         return Err(new_exception(
@@ -1360,29 +1401,50 @@ fn allocate_array_checked(
             Some(&length.to_string()),
         ));
     }
-    allocate_array(shared, kind, length)
+    allocate_array(shared, kind, length, Some(class_name.to_owned()))
 }
 
-fn allocate_array(shared: &mut Shared, kind: ArrayKind, length: i32) -> Result<ObjRef, VmError> {
+fn allocate_array(
+    shared: &mut Shared,
+    kind: ArrayKind,
+    length: i32,
+    class_name: Option<String>,
+) -> Result<ObjRef, VmError> {
     if length < 0 {
         return Err(VmError::NegativeArraySize { length });
     }
     let elements = vec![kind.default_value(); length as usize];
-    Ok(shared.allocate(HeapObject::Array(Array { kind, elements })))
+    Ok(shared.allocate(HeapObject::Array(Array {
+        kind,
+        elements,
+        class_name,
+    })))
 }
 
-/// Allocates `multianewarray` dimensions: every level but the last holds arrays.
-fn allocate_multi(shared: &mut Shared, base: ArrayKind, dims: &[i32]) -> Result<ObjRef, VmError> {
-    let kind = if dims.len() == 1 {
-        base
-    } else {
+/// Allocates `multianewarray` dimensions: every level but the last holds arrays, and each level
+/// carries its own class descriptor (`[[I` -> `[I` -> `I`'s array).
+fn allocate_multi(
+    shared: &mut Shared,
+    dims: &[i32],
+    descriptor: &str,
+    level: usize,
+) -> Result<ObjRef, VmError> {
+    let kind = if dims.len() > 1 {
         ArrayKind::Reference
+    } else {
+        let component = descriptor.get(level + 1..).ok_or_else(|| {
+            VmError::BadConstantPool(format!(
+                "{descriptor} has fewer dimensions than multianewarray requested"
+            ))
+        })?;
+        component_kind(component)?
     };
     let length = dims[0];
-    let reference = allocate_array(shared, kind, length)?;
+    let class_name = descriptor[level..].to_owned();
+    let reference = allocate_array(shared, kind, length, Some(class_name))?;
     if dims.len() > 1 {
         for index in 0..length {
-            let inner = allocate_multi(shared, base, &dims[1..])?;
+            let inner = allocate_multi(shared, &dims[1..], descriptor, level + 1)?;
             shared.array_mut(reference)?.elements[index as usize] = Value::Ref(inner);
         }
     }
