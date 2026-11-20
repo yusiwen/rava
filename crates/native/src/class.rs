@@ -30,6 +30,12 @@ pub fn register(shared: &mut Shared) {
     );
     shared.register_native("java/lang/Class", "isPrimitive", "()Z", is_primitive);
     shared.register_native("java/lang/Class", "isArray", "()Z", is_array);
+    shared.register_native(
+        "java/lang/Class",
+        "getComponentType",
+        "()Ljava/lang/Class;",
+        get_component_type,
+    );
     shared.register_native("java/lang/Class", "isInterface", "()Z", is_interface);
     shared.register_native(
         "java/lang/Class",
@@ -46,19 +52,26 @@ pub fn register(shared: &mut Shared) {
 }
 
 /// `Object.getClass()`: the class object of the receiver's runtime class.
+///
+/// An array has no [`ClassId`](rava_vm::ClassId), so its runtime class is the type class object
+/// for its descriptor; [`Shared::type_class`] caches it, which is what makes
+/// `new int[3].getClass() == int[].class` hold.
 fn get_class(ctx: &mut NativeCtx<'_>) -> Result<Value, VmError> {
     let [this] = expect_args::<1>(ctx)?;
     let reference = this.as_ref().ok_or(VmError::TypeMismatch {
         expected: "an object reference",
         found: *this,
     })?;
-    let class = ctx.shared.class_of(reference).ok_or_else(|| {
-        VmError::Native(format!(
-            "getClass on a value with no runtime class ({reference:?})"
-        ))
-    })?;
     let path = ctx.path;
-    Ok(Value::Ref(ctx.shared.class_object(path, class)?))
+    if let Some(class) = ctx.shared.class_of(reference) {
+        return Ok(Value::Ref(ctx.shared.class_object(path, class)?));
+    }
+    if let Some(descriptor) = ctx.shared.array_class(reference).map(str::to_owned) {
+        return Ok(Value::Ref(ctx.shared.type_class(path, &descriptor)?));
+    }
+    Err(VmError::Native(format!(
+        "getClass on a value with no runtime class ({reference:?})"
+    )))
 }
 
 /// `Class.initClassName()`: the name `Class.getName` would give, cached in the object's `name`
@@ -123,6 +136,32 @@ fn is_array(ctx: &mut NativeCtx<'_>) -> Result<Value, VmError> {
         Some(ClassTarget::Type(descriptor)) if descriptor.starts_with('[')
     );
     Ok(Value::Int(i32::from(array)))
+}
+
+/// `Class.getComponentType()`: the component class of an array class, or `null` for a
+/// non-array.
+///
+/// JDK 21 declares this method in Java, reading the final `Class.componentType` field that
+/// [`Shared::type_class`] populates when it creates an array class object, so the native is
+/// normally unreachable. It is registered for the native seam (another image may declare it
+/// native) and answers from the same model.
+fn get_component_type(ctx: &mut NativeCtx<'_>) -> Result<Value, VmError> {
+    let [this] = expect_args::<1>(ctx)?;
+    let reference = this.as_ref().ok_or(VmError::TypeMismatch {
+        expected: "a class object",
+        found: *this,
+    })?;
+    let Some(ClassTarget::Type(descriptor)) = ctx.shared.class_targets.get(&reference) else {
+        return Ok(Value::NULL);
+    };
+    let Some(component) = descriptor.strip_prefix('[') else {
+        return Ok(Value::NULL);
+    };
+    let component = component.to_owned();
+    let path = ctx.path;
+    Ok(Value::Ref(
+        ctx.shared.component_class_object(path, &component)?,
+    ))
 }
 
 fn is_interface(ctx: &mut NativeCtx<'_>) -> Result<Value, VmError> {

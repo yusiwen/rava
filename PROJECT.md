@@ -87,6 +87,7 @@ A slice is done only when all of the following hold:
 | S8 | M0 acceptance: a program loads from the image, runs, and its result is verified | R1 | `cargo test -p rava-cli --test boot` exits 0 | done |
 | S9 | Class objects are instances of the host's `java.lang.Class`, with a VM-side reverse map | R4 | `cargo test -p rava-cli --test class_object` exits 0 | done |
 | S10 | Strings are instances of the host's `java.lang.String`; the field-only methods run | R4 | `cargo test -p rava-cli --test strings` exits 0 | done |
+| S11 | Array class objects: an array knows its class descriptor, so `getClass`, `instanceof`/`checkcast`, `getComponentType` and the `Class` queries work for arrays | R4 | `cargo test -p rava-cli --test arrays` exits 0 | done |
 | S12 | Exception basics: `Throwable.fillInStackTrace` captures a trace once per throwable, so constructing one works and an uncaught one is reported | R6 | `cargo test -p rava-cli --test exceptions` exits 0 | done |
 | S13 | The `Class` query natives: `isInstance`, `isAssignableFrom`, `getSuperclass`, `getModifiers` | R4 | `cargo test -p rava-cli --test class_basics` exits 0 | done |
 
@@ -106,6 +107,7 @@ A slice is done only when all of the following hold:
 | S7 | `cargo test -p rava-cli --test natives` | 0 | 2026-11-20 | [S7 note](docs/notes/S7-first-natives.md) |
 | S9 | `cargo test -p rava-cli --test class_object` | 0 | 2026-11-20 | [S9 note](docs/notes/S9-class-objects.md) |
 | S10 | `cargo test -p rava-cli --test strings` | 0 | 2026-11-20 | [S10 note](docs/notes/S10-string-instances.md) |
+| S11 | `cargo test -p rava-cli --test arrays` | 0 | 2026-11-20 | [S11 note](docs/notes/S11-array-classes.md) |
 | S8 | `cargo test -p rava-cli --test boot` | 0 | 2026-11-20 | [S8 note](docs/notes/S8-boot-mounted.md) |
 | S12 | `cargo test -p rava-cli --test exceptions` | 0 | 2026-11-20 | [S12 note](docs/notes/S12-exceptions.md) |
 | S13 | `cargo test -p rava-cli --test class_basics` | 0 | 2026-11-20 | [S13 note](docs/notes/S13-class-basics.md) |

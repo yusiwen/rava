@@ -93,6 +93,13 @@ pub struct Lambda {
 pub struct Array {
     pub kind: ArrayKind,
     pub elements: Vec<Value>,
+    /// The array's class descriptor: `[I`, `[Ljava/lang/String;`, `[[I`. It is what
+    /// `Object.getClass` and `instanceof`/`checkcast` name the array by; without it a heap
+    /// array has no runtime class and every array `checkcast` fails.
+    ///
+    /// `None` is only for an array a unit test allocates by hand without a class; every array
+    /// the interpreter or the VM allocates carries a descriptor.
+    pub class_name: Option<String>,
 }
 
 #[derive(Debug)]
