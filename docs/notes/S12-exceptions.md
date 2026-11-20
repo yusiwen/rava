@@ -2,7 +2,8 @@
 
 - **Slice:** S12 (M1's exceptions)
 - **Requirements:** R6
-- **Acceptance:** `cargo test -p rava-cli --test exceptions` exited 0 on 2026-11-20 (3 tests).
+- **Acceptance:** `cargo test -p rava-cli --test exceptions` exited 0 on 2026-11-20 (4 tests;
+  `getMessage`/`toString` were added when S15 made string concatenation run).
 
 ## What surprised me
 
@@ -73,7 +74,7 @@ builder takes offsets rather than labels.
 
 | Fact | Value |
 | :--- | ---: |
-| Acceptance tests | 3 (make, caught, uncaught) |
+| Acceptance tests | 4 (make, caught, uncaught, message/toString) |
 | `rava run ThrowException --home $JAVA21_HOME --cp <dir>` | exit 1 |
 | Frames in the uncaught report | 6 (innermost `Throwable.fillInStackTrace`) |
 | Workspace tests, `cargo xtask ci` | 78 passed / 0 failed over 20 test binaries |

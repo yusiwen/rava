@@ -259,3 +259,72 @@ fn an_uncaught_exception_exits_one_and_names_the_class() {
         String::from_utf8_lossy(&output.stdout)
     );
 }
+
+/// `ThrowMessage.main`: `var e = new IllegalStateException("boom"); MSG = e.getMessage(); TOSTR = e.toString();`
+///
+/// `getMessage` reads the `detailMessage` field; `toString` concatenates the class name, `": "`
+/// and the message through the host `String` methods (S10/S15), so this also pins the two slices
+/// together.
+fn build_throw_message(dir: &Path) {
+    let mut builder = ClassBuilder::new("ThrowMessage", "java/lang/Object", 65);
+    builder.field(0x0009, "MSG", "Ljava/lang/String;");
+    builder.field(0x0009, "TOSTR", "Ljava/lang/String;");
+    let exception = builder.class("java/lang/IllegalStateException");
+    let init = builder.method_ref(
+        "java/lang/IllegalStateException",
+        "<init>",
+        "(Ljava/lang/String;)V",
+    );
+    let get_message =
+        builder.method_ref("java/lang/Throwable", "getMessage", "()Ljava/lang/String;");
+    let to_string = builder.method_ref("java/lang/Throwable", "toString", "()Ljava/lang/String;");
+    let msg = builder.field_ref("ThrowMessage", "MSG", "Ljava/lang/String;");
+    let tostr = builder.field_ref("ThrowMessage", "TOSTR", "Ljava/lang/String;");
+    let boom = builder.string("boom");
+
+    let mut code = Code::new();
+    code.call(0xbb, exception); // new
+    code.op(0x59); // dup
+    code.call(0x13, boom); // ldc
+    code.call(0xb7, init); // invokespecial
+    code.op(0x4c); // astore_1
+    code.op(0x2b); // aload_1
+    code.call(0xb6, get_message); // invokevirtual
+    code.call(0xb3, msg); // putstatic
+    code.op(0x2b); // aload_1
+    code.call(0xb6, to_string); // invokevirtual
+    code.call(0xb3, tostr); // putstatic
+    code.op(0xb1); // return
+
+    builder.method(
+        0x0009,
+        "main",
+        "([Ljava/lang/String;)V",
+        Some((3, 2, code.done())),
+    );
+    write(dir, "ThrowMessage", builder.build());
+}
+
+#[test]
+fn the_message_and_to_string_come_from_the_host_throwable() {
+    let dir = fixture_dir("message");
+    build_throw_message(&dir);
+    let path = host_path(&dir);
+    let mut shared = Shared::new();
+    rava_native::register_jcl_natives(&mut shared);
+    let mut thread = ThreadState::new();
+    rava_interp::run_main(&mut shared, &mut thread, &path, "ThrowMessage", &[])
+        .unwrap_or_else(|error| panic!("ThrowMessage failed: {error}"));
+    let id = shared.class_ids["ThrowMessage"];
+    let statics = &shared.classes[id.index()].statics;
+    let text = |name: &str| match statics.get(name) {
+        Some(Value::Ref(reference)) => shared.string_text(*reference).expect("a String"),
+        other => panic!("{name} is {other:?}"),
+    };
+    assert_eq!(text("MSG"), "boom", "getMessage");
+    assert_eq!(
+        text("TOSTR"),
+        "java.lang.IllegalStateException: boom",
+        "toString"
+    );
+}

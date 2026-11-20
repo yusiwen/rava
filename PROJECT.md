@@ -34,7 +34,7 @@ and milestones M0–M5 are planned but not built. `scripts/workflow-check.sh` ru
 | :--- | :--- | :--- | :--- | :--- |
 | — | **Migration baseline**: the VM core from the previous iteration, without its own class library or synthetic `Object` | S1–S3 | done | notes S1–S3 |
 | M0 | Boot: read the host image, complete the instruction set the library uses, bootstrap `Object`/`String`/`Class`/`System`, first JCL natives, a program that runs with a verified result | S4–S8 | done | notes S4–S9; ADR-0014 |
-| M1 | The core library: strings, arrays, exceptions, `Class` basics | S9–S16 | todo | S9–S16 landed; `Class` completion (S17) and Java-side stack traces remain |
+| M1 | The core library: strings, arrays, exceptions, `Class` basics | S9–S16 | done | Deferred walls tracked in #21 and #28; [M1 note](docs/notes/M1-core-library.md) |
 | M2 | Loaders and modules: `(loader, name)` identity, resources | — | todo | — |
 | M3 | Real threads and monitors | — | todo | ADR-0010 |
 | M4 | `MethodHandle`, `VarHandle`, `Unsafe` | — | todo | ADR-0012 |
@@ -155,13 +155,12 @@ A slice is done only when all of the following hold:
    monitors and interpreter were carried over from the previous iteration; its class library,
    corpus and synthetic `Object` were not. `cargo test` passes on the migrated unit tests, and
    `cargo xtask ci` is green.
-3. **M0 is complete (S4–S9); M1 has started**: strings are instances of the host's
-   `java.lang.String` (S10), so `length`/`charAt` and the VM's own text extraction work. The
-   rest of `String` waits on S11 (arrays): `StringLatin1.hashCode` reaches
-   `ArraysSupport.<clinit>` → `Unsafe`, then `vectorizedHashCode` → `checkcast [B`, which needs
-   array class objects. `equals`/`concat`/`substring` then need `Unsafe.getIntUnaligned` and
-   `System.arraycopy`. **Next is S11**, then the remaining string methods.
-   **Printing is G2** (ADR-0014), after M4's `Unsafe`.
+3. **M0 and M1 are complete (S4–S16)**. Strings, arrays, exceptions and the `Class` queries run
+   against the host library; `System.arraycopy` and `StringBuilder` work. The remaining walls are
+   M4-shaped and tracked: `Class.getInterfaces` and the reflection data need `Unsafe`'s
+   object-field model (#28); Java-side throwable stack traces need a decision on the JDK's
+   `backtrace` format (#21); printing is G2 (ADR-0014), after `Unsafe`. **Next is M2** (loaders
+   and modules) unless the human reorders it before `Unsafe`.
 4. **The previous project is archived** at `/home/yusiwen/git/jvm` and is read-only history.
    The GitHub repository is deleted and recreated by the human; the local origin in
    `## Environments` is the intended remote, not a live one.
