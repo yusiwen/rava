@@ -16,6 +16,7 @@
 //! | [`misc`] | CDS flags, bit conversions, processor counts |
 
 pub mod class;
+pub mod exceptions;
 pub mod io;
 pub mod misc;
 pub mod system;
@@ -28,6 +29,7 @@ pub fn register_jcl_natives(shared: &mut Shared) {
     io::register(shared);
     class::register(shared);
     misc::register(shared);
+    exceptions::register(shared);
 }
 
 /// The answer for a native that only exists because the library calls it at initialization.

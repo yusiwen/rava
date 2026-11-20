@@ -86,6 +86,7 @@ A slice is done only when all of the following hold:
 | S7 | First JCL natives: `System.out`, `PrintStream`, `FileOutputStream`, `FileDescriptor` | R5 | `cargo test -p rava-cli --test natives` exits 0 | done |
 | S8 | M0 acceptance: a program loads from the image, runs, and its result is verified | R1 | `cargo test -p rava-cli --test boot` exits 0 | done |
 | S9 | Class objects are instances of the host's `java.lang.Class`, with a VM-side reverse map | R4 | `cargo test -p rava-cli --test class_object` exits 0 | done |
+| S12 | Exception basics: `Throwable.fillInStackTrace` captures a trace once per throwable, so constructing one works and an uncaught one is reported | R6 | `cargo test -p rava-cli --test exceptions` exits 0 | done |
 
 ## Slice log
 
@@ -103,6 +104,7 @@ A slice is done only when all of the following hold:
 | S7 | `cargo test -p rava-cli --test natives` | 0 | 2026-11-20 | [S7 note](docs/notes/S7-first-natives.md) |
 | S9 | `cargo test -p rava-cli --test class_object` | 0 | 2026-11-20 | [S9 note](docs/notes/S9-class-objects.md) |
 | S8 | `cargo test -p rava-cli --test boot` | 0 | 2026-11-20 | [S8 note](docs/notes/S8-boot-mounted.md) |
+| S12 | `cargo test -p rava-cli --test exceptions` | 0 | 2026-11-20 | [S12 note](docs/notes/S12-exceptions.md) |
 
 ## Decision log
 
