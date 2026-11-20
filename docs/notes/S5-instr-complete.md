@@ -24,7 +24,7 @@ reading is two values". With `dup2` the approximation starts rejecting valid cod
 `long` needs one value, on two `int`s two — so the depth check now counts *slots*, which is
 what `max_stack` is written in. Every instruction's slot effect is fixed by its opcode, so this
 is exact and needs no type information; the type-checking half of JVMS §4.10.1 is still out of
-scope (ADR-0014). The rewrite also made `long`/`double` arithmetic and `getfield`/`putfield`
+scope (ADR-0011). The rewrite also made `long`/`double` arithmetic and `getfield`/`putfield`
 depth accounting exact for the first time.
 
 ## What the specification says
@@ -63,7 +63,7 @@ The measurement that forced this slice still holds: `String.join` needed `dup2`,
 - `jsr`, `ret` and `jsr_w` stay unimplemented: they are forbidden from class-file 51 on, and
   version 65 is the target.
 - The verifier is exact about depth and blind about types; a wrong-type program passes it and
-  fails at run time with a `TypeMismatch` from the interpreter. ADR-0014 still describes the
+  fails at run time with a `TypeMismatch` from the interpreter. ADR-0011 still describes the
   trade.
 - Loading the four classes through `Shared::load_class` was probed and works (all five core
   classes link, including `String`), which is S6's starting point — it is not part of this

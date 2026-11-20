@@ -15,7 +15,7 @@
 //! Depth is counted in *slots*, the unit `max_stack` is written in: a `long` or `double` takes
 //! two, and every instruction's slot effect is fixed by its opcode, so no type information is
 //! needed to get the depth right. What the check cannot see is whether the *types* fit — that is
-//! the trade ADR-0014 records.
+//! the trade ADR-0011 records.
 
 use crate::code::{BinOp, Code, Compare, Convert, Instr, UnOp};
 use crate::error::VmError;
@@ -236,7 +236,7 @@ pub fn verify(code: &Code, class: &crate::Class, qualified: &str) -> Result<(), 
 
     // A handler is entered with exactly one reference on the stack: the throwable (JVMS §4.10.1.6).
     // Seeding it is what makes a handler body that assumes an empty stack fail, which is the one
-    // type rule a depth checker can afford (ADR-0014).
+    // type rule a depth checker can afford (ADR-0011).
     for handler in &code.handlers {
         let start = handler.start;
         let end = handler.end;

@@ -34,7 +34,7 @@ and milestones M0–M5 are planned but not built. `scripts/workflow-check.sh` ru
 | :--- | :--- | :--- | :--- | :--- |
 | — | **Migration baseline**: the VM core from the previous iteration, without its own class library or synthetic `Object` | S1–S3 | done | notes S1–S3 |
 | M0 | Boot: read the host image, complete the instruction set the library uses, bootstrap `Object`/`String`/`Class`/`System`, first JCL natives, `println` | S4–S8 | todo | — |
-| M1 | The core library: strings, arrays, exceptions, `Class` basics | — | todo | #1 landed in M0 (static fields) |
+| M1 | The core library: strings, arrays, exceptions, `Class` basics | S9 | todo | #1 and S9 landed early, in M0 |
 | M2 | Loaders and modules: `(loader, name)` identity, resources | — | todo | — |
 | M3 | Real threads and monitors | — | todo | ADR-0010 |
 | M4 | `MethodHandle`, `VarHandle`, `Unsafe` | — | todo | ADR-0012 |
@@ -84,6 +84,7 @@ A slice is done only when all of the following hold:
 | S6 | Bootstrap the core classes from the host; the synthetic `Object` path is already gone | R4 | `cargo test -p rava-vm --test bootstrap` exits 0 | done |
 | S7 | First JCL natives: `System.out`, `PrintStream`, `FileOutputStream`, `FileDescriptor` | R5 | `cargo test -p rava-cli --test natives` exits 0 | done |
 | S8 | M0 acceptance: a program that prints, compared with the host launcher | R1 | `cargo test -p rava-cli --test boot` exits 0 | todo |
+| S9 | Class objects are instances of the host's `java.lang.Class`, with a VM-side reverse map | R4 | `cargo test -p rava-cli --test class_object` exits 0 | done |
 
 ## Slice log
 
@@ -99,6 +100,7 @@ A slice is done only when all of the following hold:
 | S5 | `cargo test -p rava-vm --test instr` | 0 | 2026-11-20 | [S5 note](docs/notes/S5-instr-complete.md) |
 | S6 | `cargo test -p rava-vm --test bootstrap` | 0 | 2026-11-20 | [S6 note](docs/notes/S6-bootstrap.md) |
 | S7 | `cargo test -p rava-cli --test natives` | 0 | 2026-11-20 | [S7 note](docs/notes/S7-first-natives.md) |
+| S9 | `cargo test -p rava-cli --test class_object` | 0 | 2026-11-20 | [S9 note](docs/notes/S9-class-objects.md) |
 
 ## Decision log
 
@@ -136,10 +138,11 @@ A slice is done only when all of the following hold:
    monitors and interpreter were carried over from the previous iteration; its class library,
    corpus and synthetic `Object` were not. `cargo test` passes on the migrated unit tests, and
    `cargo xtask ci` is green.
-3. **S4–S7 landed**: the image is read, the instruction set is complete, the core classes load,
-   and the first eleven JCL natives are registered and exercised from Java. **Next is S8**, which
-   is blocked on #9: `println` needs `Class` objects that behave like the host's (assertions read
-   `Class.classLoader`) and `Unsafe` for the charset path. Both walls were measured, not guessed.
+3. **S4–S7 and S9 landed**: the image is read, the instruction set is complete, the core classes
+   load, the first eleven JCL natives are registered, and class objects are real instances of the
+   host's `java.lang.Class` (so `assert`, `getName` and `getClass` work). **S8 is still blocked on
+   #9, now by `Unsafe` alone**: the io path reaches `MethodHandles.<clinit>`, which wants the
+   member-name machinery that calls `Unsafe`. The class-object wall is gone.
 4. **The previous project is archived** at `/home/yusiwen/git/jvm` and is read-only history.
    The GitHub repository is deleted and recreated by the human; the local origin in
    `## Environments` is the intended remote, not a live one.
