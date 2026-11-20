@@ -826,7 +826,7 @@ fn run_frame(
                     let result = match pop(&mut thread.frames[frame_index], qualified, code)? {
                         Value::Ref(reference) if !reference.is_null() => {
                             match shared.class_of(reference) {
-                                Some(actual) => is_instance_of(shared, actual, target_id),
+                                Some(actual) => shared.is_assignable(actual, target_id),
                                 None => false,
                             }
                         }
@@ -844,7 +844,7 @@ fn run_frame(
                     let allowed = match value {
                         Value::Ref(reference) if !reference.is_null() => {
                             match shared.class_of(reference) {
-                                Some(actual) => is_instance_of(shared, actual, target_id),
+                                Some(actual) => shared.is_assignable(actual, target_id),
                                 None => false,
                             }
                         }
@@ -936,9 +936,7 @@ fn run_frame(
                                             .iter()
                                             .enumerate()
                                             .skip(start)
-                                            .find(|(_, case)| {
-                                                is_instance_of(shared, actual, **case)
-                                            })
+                                            .find(|(_, case)| shared.is_assignable(actual, **case))
                                             .map(|(index, _)| index as i32)
                                     }) {
                                         Some(index) => index,
@@ -1757,45 +1755,6 @@ fn render_value(shared: &Shared, value: Value) -> Result<String, VmError> {
             None => return Err(VmError::Native(format!("dangling reference {reference:?}"))),
         },
     })
-}
-
-/// `instanceof`, including interfaces: the class, its superclasses, and every interface
-/// reachable from any of them.
-fn is_instance_of(shared: &Shared, actual: ClassId, target: ClassId) -> bool {
-    let mut visited_interfaces = Vec::new();
-    let mut current = Some(actual);
-    while let Some(class) = current {
-        if class == target {
-            return true;
-        }
-        for interface in &shared.class(class).interfaces {
-            if is_interface_of(shared, *interface, target, &mut visited_interfaces) {
-                return true;
-            }
-        }
-        current = shared.class(class).super_class;
-    }
-    false
-}
-
-fn is_interface_of(
-    shared: &Shared,
-    interface: ClassId,
-    target: ClassId,
-    visited: &mut Vec<ClassId>,
-) -> bool {
-    if interface == target {
-        return true;
-    }
-    if visited.contains(&interface) {
-        return false;
-    }
-    visited.push(interface);
-    shared
-        .class(interface)
-        .interfaces
-        .iter()
-        .any(|parent| is_interface_of(shared, *parent, target, visited))
 }
 
 /// Runs one of a record's generated methods over its component slots.

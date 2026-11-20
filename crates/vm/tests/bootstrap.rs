@@ -199,3 +199,38 @@ fn object_is_not_synthesized() {
     assert_eq!(objects.len(), 1, "Object is loaded exactly once");
     assert!(objects[0].file.is_some(), "Object must come from the image");
 }
+
+#[test]
+fn assignability_follows_the_host_hierarchy() {
+    let (mut shared, path) = setup();
+    let string = shared
+        .load_class(&path, "java/lang/String")
+        .expect("String");
+    let object = shared
+        .load_class(&path, "java/lang/Object")
+        .expect("Object");
+    let comparable = shared
+        .load_class(&path, "java/lang/Comparable")
+        .expect("Comparable");
+    let runnable = shared
+        .load_class(&path, "java/lang/Runnable")
+        .expect("Runnable");
+
+    assert!(
+        shared.is_assignable(string, string),
+        "a class is assignable to itself"
+    );
+    assert!(shared.is_assignable(string, object), "String is an Object");
+    assert!(
+        shared.is_assignable(string, comparable),
+        "String implements Comparable"
+    );
+    assert!(
+        !shared.is_assignable(object, string),
+        "Object is not a String"
+    );
+    assert!(
+        !shared.is_assignable(string, runnable),
+        "String is not Runnable"
+    );
+}

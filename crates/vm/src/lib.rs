@@ -918,6 +918,47 @@ impl Shared {
         }
     }
 
+    /// Whether `actual` is `target` or a subtype of it (JVMS §5.4.4): the class itself, one of
+    /// its superclasses, or an interface it implements, transitively.
+    ///
+    /// The interpreter's `instanceof`/`checkcast` and the `Class` natives both ask this, which
+    /// is why it lives on `Shared` rather than in the interpreter.
+    pub fn is_assignable(&self, actual: ClassId, target: ClassId) -> bool {
+        let mut visited = Vec::new();
+        let mut current = Some(actual);
+        while let Some(class) = current {
+            if class == target {
+                return true;
+            }
+            for interface in &self.class(class).interfaces {
+                if self.interface_is_assignable(*interface, target, &mut visited) {
+                    return true;
+                }
+            }
+            current = self.class(class).super_class;
+        }
+        false
+    }
+
+    fn interface_is_assignable(
+        &self,
+        interface: ClassId,
+        target: ClassId,
+        visited: &mut Vec<ClassId>,
+    ) -> bool {
+        if interface == target {
+            return true;
+        }
+        if visited.contains(&interface) {
+            return false;
+        }
+        visited.push(interface);
+        self.class(interface)
+            .interfaces
+            .iter()
+            .any(|parent| self.interface_is_assignable(*parent, target, visited))
+    }
+
     /// The runtime class of a reference: the instance's class for objects, the library
     /// class for the strings and builders the VM owns storage for.
     pub fn class_of(&self, reference: ObjRef) -> Option<ClassId> {
