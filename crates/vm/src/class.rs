@@ -43,8 +43,10 @@ pub struct MethodInfo {
     /// `(instruction index, source line)` from the `LineNumberTable`, sorted by index. Empty
     /// when the class was compiled without debug information.
     pub lines: Vec<(u32, u16)>,
-    /// The native implementation, resolved at load time from the registry. `None` for a Java
-    /// method, or for a native the registry does not know (which `invoke` reports by name).
+    /// The native or intrinsic implementation, resolved at load time from the registry.
+    /// `None` for an ordinary Java method, or for a native the registry does not know (which
+    /// `invoke` reports by name). An intrinsic is a non-`native` method the VM implements
+    /// itself; see [`crate::Shared::intrinsics`].
     pub native: Option<crate::native::NativeFn>,
     /// `Class.name(descriptor)`, built once at load. Every error message and every stack trace
     /// needs it, and building it per call was most of the per-call cost the ceiling experiment

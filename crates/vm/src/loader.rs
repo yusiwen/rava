@@ -221,13 +221,19 @@ fn build_class(shared: &mut Shared, path: &ClassPath, name: &str) -> Result<Clas
             lines.sort_unstable();
             lines.dedup_by_key(|(index, _)| *index);
         }
+        // A declared `native` binds from `natives`; an ordinary Java method binds from
+        // `intrinsics`, which is how the VM replaces a host body that depends on VM-private
+        // state (`Throwable.fillInStackTrace()`, see `Shared::intrinsics`).
         let native = if method.is_native() {
             shared
                 .natives
                 .get(&crate::native::key(name, &method_name, &descriptor))
                 .copied()
         } else {
-            None
+            shared
+                .intrinsics
+                .get(&crate::native::key(name, &method_name, &descriptor))
+                .copied()
         };
         let qualified: Arc<str> = Arc::from(format!("{name}.{method_name}{descriptor}"));
         methods.push(MethodInfo {

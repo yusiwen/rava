@@ -106,6 +106,14 @@ pub struct Shared {
     pub classes: Vec<Class>,
     pub class_ids: HashMap<String, ClassId>,
     pub natives: HashMap<String, NativeFn>,
+    /// Java methods the VM implements itself in place of their class-file body, keyed like
+    /// [`Shared::natives`]. Needed when the host's Java body cannot work against this VM's
+    /// representation: `Throwable.fillInStackTrace()` resets `stackTrace` to its
+    /// `UNASSIGNED_STACK` sentinel right after the private native fills it, so a plain native
+    /// would never make the captured array visible to `getStackTrace()`. The loader binds an
+    /// intrinsic only for a method that is not declared `native`; a declared native uses
+    /// `natives`.
+    pub intrinsics: HashMap<String, NativeFn>,
     pub interned: HashMap<String, ObjRef>,
     /// Per-object monitors, created on first entry. `depth` is re-entrancy: a thread that
     /// already holds the monitor may enter again, which is what makes a `synchronized` block
@@ -176,6 +184,7 @@ impl Shared {
             classes: Vec::new(),
             class_ids: HashMap::new(),
             natives: HashMap::new(),
+            intrinsics: HashMap::new(),
             interned: HashMap::new(),
             monitors: HashMap::new(),
             invoker: None,
@@ -1006,6 +1015,21 @@ impl Shared {
         function: NativeFn,
     ) {
         self.natives
+            .insert(native::key(owner, name, descriptor), function);
+    }
+
+    /// Registers a VM implementation for a Java method, replacing its class-file body.
+    ///
+    /// This is the escape hatch for host methods whose Java body cannot work against this VM's
+    /// representation of a field; the doc comment on [`Shared::intrinsics`] names the first one.
+    pub fn register_intrinsic(
+        &mut self,
+        owner: &str,
+        name: &str,
+        descriptor: &str,
+        function: NativeFn,
+    ) {
+        self.intrinsics
             .insert(native::key(owner, name, descriptor), function);
     }
 

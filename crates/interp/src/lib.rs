@@ -103,50 +103,54 @@ fn invoke(
     shared.classes[class.index()].invocations[method_index] += 1;
     // One refcount bump, not a `format!` and two `String` clones: the ceiling experiment (S37)
     // found the diagnostic work was most of the per-call cost.
-    let (is_native, access_flags, code, qualified) = {
+    let (is_native, native, access_flags, code, qualified) = {
         let method = &shared.class(class).methods[method_index];
         (
             method.is_native,
+            method.native,
             method.access_flags,
             method.code.clone(),
             Arc::clone(&method.qualified),
         )
     };
 
+    // A native or an intrinsic is resolved at load time, so a call allocates nothing. An
+    // intrinsic is a Java method the VM implements itself because the host body needs
+    // VM-private state; `Throwable.fillInStackTrace()` is the first (see `rava_native`).
+    if let Some(native) = native {
+        let outcome = {
+            let mut ctx = NativeCtx {
+                shared,
+                thread,
+                path,
+                args: &args,
+            };
+            native(&mut ctx)
+        };
+        return match outcome {
+            Err(VmError::MissingNative(key)) => {
+                let frames: Vec<String> = thread
+                    .frames
+                    .iter()
+                    .map(|frame| shared.class(frame.class).name.clone())
+                    .collect();
+                Err(VmError::MissingNative(format!(
+                    "{key} DEBUG frames={frames:?}"
+                )))
+            }
+            Err(VmError::JavaException { class, message }) => Err(new_exception(
+                shared,
+                thread,
+                path,
+                &class,
+                message.as_deref(),
+            )),
+            other => other,
+        };
+    }
     if is_native {
-        // The implementation was resolved at load time, so a call allocates nothing. A native the
-        // registry does not know is reported by name, which is the only path that needs strings.
-        if let Some(native) = shared.class(class).methods[method_index].native {
-            let outcome = {
-                let mut ctx = NativeCtx {
-                    shared,
-                    thread,
-                    path,
-                    args: &args,
-                };
-                native(&mut ctx)
-            };
-            return match outcome {
-                Err(VmError::MissingNative(key)) => {
-                    let frames: Vec<String> = thread
-                        .frames
-                        .iter()
-                        .map(|frame| shared.class(frame.class).name.clone())
-                        .collect();
-                    Err(VmError::MissingNative(format!(
-                        "{key} DEBUG frames={frames:?}"
-                    )))
-                }
-                Err(VmError::JavaException { class, message }) => Err(new_exception(
-                    shared,
-                    thread,
-                    path,
-                    &class,
-                    message.as_deref(),
-                )),
-                other => other,
-            };
-        }
+        // A native the registry did not know at load time is looked up here, which is the only
+        // path that needs strings (native registration order is otherwise not observable).
         let (name, descriptor) = {
             let method = &shared.class(class).methods[method_index];
             (method.name.clone(), method.descriptor.clone())
@@ -742,7 +746,15 @@ fn run_frame(
                         }
                     }
 
-                    let target = resolve::method_ref(shared.class(class), constant)?;
+                    let mut target = resolve::method_ref(shared.class(class), constant)?;
+                    if target.class_name.starts_with('[') {
+                        // JVMS §5.4.3.3: an array class has no class file of its own, so a
+                        // method call on it resolves in `java.lang.Object`. `getStackTrace()`
+                        // is the first caller: it clones `[Ljava/lang/StackTraceElement;`,
+                        // and without this the loader is asked for a class named by a
+                        // descriptor and reports `ClassNotFound`.
+                        target.class_name = "java/lang/Object".to_owned();
+                    }
                     let named = shared.load_class(path, &target.class_name)?;
                     ensure_initialized(shared, thread, path, named)?;
 

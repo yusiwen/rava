@@ -3,7 +3,7 @@
 //! `Object.getClass` hands out the mirror; the `Class` methods answer from the VM's `class_targets` map, and `initClassName` caches its answer in the object's `name` field.
 
 use rava_vm::native::expect_args;
-use rava_vm::{ClassTarget, NativeCtx, Shared, Value, VmError};
+use rava_vm::{Array, ClassTarget, HeapObject, NativeCtx, Shared, Value, VmError};
 
 use crate::no_op;
 
@@ -14,6 +14,12 @@ pub fn register(shared: &mut Shared) {
         "getClass",
         "()Ljava/lang/Class;",
         get_class,
+    );
+    shared.register_native(
+        "java/lang/Object",
+        "clone",
+        "()Ljava/lang/Object;",
+        clone_array,
     );
     shared.register_native("java/lang/Class", "registerNatives", "()V", no_op);
     shared.register_native(
@@ -195,4 +201,48 @@ fn get_caller_class(ctx: &mut NativeCtx<'_>) -> Result<Value, VmError> {
     let class = caller.class;
     let path = ctx.path;
     Ok(Value::Ref(ctx.shared.class_object(path, class)?))
+}
+
+/// `Object.clone()` for arrays (JVMS §5.4.3.3, §6.5 `invokevirtual`).
+///
+/// An array's class is a descriptor, not a loaded class, and calling a method on it resolves in
+/// `java.lang.Object` — `clone` is the only method this matters for before `Object`'s other
+/// methods are reached. This slice implements the array half only: the elements are copied
+/// value by value (a primitive copies its value, a reference copies the handle) into a fresh
+/// array of the same element kind and class descriptor. An instance clone would need a shallow
+/// copy of the field vector, which no slice needs yet, so it is reported as unsupported rather
+/// than approximated.
+fn clone_array(ctx: &mut NativeCtx<'_>) -> Result<Value, VmError> {
+    let [this] = expect_args::<1>(ctx)?;
+    let reference = this.as_ref().ok_or(VmError::TypeMismatch {
+        expected: "an array reference",
+        found: *this,
+    })?;
+    let copy = match ctx.shared.heap.get(reference.index()) {
+        Some(HeapObject::Array(array)) => Array {
+            kind: array.kind,
+            elements: array.elements.clone(),
+            class_name: array.class_name.clone(),
+        },
+        Some(HeapObject::Null) => {
+            return Err(VmError::TypeMismatch {
+                expected: "an array reference",
+                found: Value::NULL,
+            });
+        }
+        Some(_) => {
+            return Err(VmError::Unsupported {
+                feature: "Object.clone on an instance",
+                detail: "this slice implements array clone only; an instance clone needs a \
+                         shallow field copy"
+                    .to_owned(),
+            });
+        }
+        None => {
+            return Err(VmError::Native(format!(
+                "clone on dangling reference {reference:?}"
+            )));
+        }
+    };
+    Ok(Value::Ref(ctx.shared.allocate(HeapObject::Array(copy))))
 }
