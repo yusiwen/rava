@@ -37,6 +37,8 @@ pub struct ClassBuilder {
     major: u16,
     fields: Vec<FieldEntry>,
     methods: Vec<MethodEntry>,
+    /// The next constant-pool index; `long`/`double` consume two (JVMS §4.4.5).
+    next_index: u16,
 }
 
 impl ClassBuilder {
@@ -50,6 +52,7 @@ impl ClassBuilder {
             major,
             fields: Vec::new(),
             methods: Vec::new(),
+            next_index: 1,
         };
         builder.this_class = builder.class(this);
         builder.super_class = builder.class(super_name);
@@ -65,7 +68,7 @@ impl ClassBuilder {
         let mut entry = vec![1u8];
         entry.extend_from_slice(&(text.len() as u16).to_be_bytes());
         entry.extend_from_slice(text.as_bytes());
-        self.push(key, entry)
+        self.push(key, entry, 1)
     }
 
     /// A `CONSTANT_Class` naming `name`, deduplicated.
@@ -77,7 +80,7 @@ impl ClassBuilder {
         }
         let mut entry = vec![7u8];
         entry.extend_from_slice(&name_index.to_be_bytes());
-        self.push(key, entry)
+        self.push(key, entry, 1)
     }
 
     /// A `CONSTANT_String`, deduplicated.
@@ -89,7 +92,30 @@ impl ClassBuilder {
         }
         let mut entry = vec![8u8];
         entry.extend_from_slice(&text_index.to_be_bytes());
-        self.push(key, entry)
+        self.push(key, entry, 1)
+    }
+
+    /// A `CONSTANT_Long` (JVMS §4.4.5). It occupies two constant-pool entries, so the next index
+    /// skips one.
+    pub fn long(&mut self, value: i64) -> u16 {
+        let key = format!("L{value}");
+        if let Some(index) = self.index.get(&key) {
+            return *index;
+        }
+        let mut entry = vec![5u8];
+        entry.extend_from_slice(&value.to_be_bytes());
+        self.push(key, entry, 2)
+    }
+
+    /// A `CONSTANT_Double` (JVMS §4.4.5), also two entries wide.
+    pub fn double(&mut self, value: f64) -> u16 {
+        let key = format!("D{}", value.to_bits());
+        if let Some(index) = self.index.get(&key) {
+            return *index;
+        }
+        let mut entry = vec![6u8];
+        entry.extend_from_slice(&value.to_bits().to_be_bytes());
+        self.push(key, entry, 2)
     }
 
     /// A `CONSTANT_NameAndType`, deduplicated.
@@ -103,7 +129,7 @@ impl ClassBuilder {
         let mut entry = vec![12u8];
         entry.extend_from_slice(&name_index.to_be_bytes());
         entry.extend_from_slice(&descriptor_index.to_be_bytes());
-        self.push(key, entry)
+        self.push(key, entry, 1)
     }
 
     /// A `CONSTANT_Fieldref`, deduplicated.
@@ -117,7 +143,7 @@ impl ClassBuilder {
         let mut entry = vec![9u8];
         entry.extend_from_slice(&class_index.to_be_bytes());
         entry.extend_from_slice(&nat_index.to_be_bytes());
-        self.push(key, entry)
+        self.push(key, entry, 1)
     }
 
     /// A `CONSTANT_Methodref`, deduplicated.
@@ -131,7 +157,7 @@ impl ClassBuilder {
         let mut entry = vec![10u8];
         entry.extend_from_slice(&class_index.to_be_bytes());
         entry.extend_from_slice(&nat_index.to_be_bytes());
-        self.push(key, entry)
+        self.push(key, entry, 1)
     }
 
     /// Adds a field. `access` is the raw access-flags word (`0x0009` is `public static`).
@@ -185,7 +211,7 @@ impl ClassBuilder {
         out.extend_from_slice(&[0xCA, 0xFE, 0xBA, 0xBE]);
         out.extend_from_slice(&0u16.to_be_bytes()); // minor
         out.extend_from_slice(&self.major.to_be_bytes());
-        out.extend_from_slice(&(self.entries.len() as u16 + 1).to_be_bytes());
+        out.extend_from_slice(&self.next_index.to_be_bytes());
         for entry in &self.entries {
             out.extend_from_slice(entry);
         }
@@ -236,8 +262,9 @@ impl ClassBuilder {
         out
     }
 
-    fn push(&mut self, key: String, entry: Vec<u8>) -> u16 {
-        let index = self.entries.len() as u16 + 1;
+    fn push(&mut self, key: String, entry: Vec<u8>, width: u16) -> u16 {
+        let index = self.next_index;
+        self.next_index += width;
         self.entries.push(entry);
         self.index.insert(key, index);
         index

@@ -184,10 +184,20 @@ fn invoke(
     let code = code
         .ok_or_else(|| VmError::BadConstantPool(format!("{} has no body", qualified.as_ref())))?;
     let mut frame = thread.take_frame(class, method_index, code.max_locals);
-    for (slot, value) in args.iter().enumerate() {
-        if slot < frame.locals.len() {
-            frame.locals[slot] = *value;
+    // Locals are addressed by JVM slot, not by value: `long` and `double` take two slots
+    // (JVMS §2.6.1), so the argument after one starts two slots later. Binding by value position
+    // put it one slot early, and the callee's `aload_2`/`iload_2` read a NULL slot — the bug
+    // behind `StringConcatHelper.mix`'s bare NullPointerException.
+    let mut slot = 0;
+    for value in &args {
+        if slot >= frame.locals.len() {
+            break;
         }
+        frame.locals[slot] = *value;
+        slot += match value {
+            Value::Long(_) | Value::Double(_) => 2,
+            _ => 1,
+        };
     }
 
     // `synchronized` on the method holds the monitor for the whole body (JVMS §2.11.10).
