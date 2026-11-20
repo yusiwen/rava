@@ -82,6 +82,7 @@ pub fn initialize_system(
     }
     let descriptors = shared.load_class(path, "java/io/FileDescriptor")?;
     ensure_initialized(shared, thread, path, descriptors)?;
+    let fd_in = static_field(shared, descriptors, "in")?;
     let fd_out = static_field(shared, descriptors, "out")?;
     let fd_err = static_field(shared, descriptors, "err")?;
 
@@ -97,16 +98,53 @@ pub fn initialize_system(
         .map(|dir| dir.display().to_string())
         .unwrap_or_else(|_| ".".to_owned());
     let java_home = path.bootstrap.display().to_string();
+    let user_home = std::env::var("HOME").unwrap_or_else(|_| "/".to_owned());
+    let user_name = std::env::var("USER").unwrap_or_else(|_| "rava".to_owned());
+    let temp_dir = std::env::temp_dir().display().to_string();
+    // `StaticProperty.<clinit>` throws `InternalError` for any of these it cannot find (it reads
+    // them through `System.getProperties()`), and the charset stack initializes it. The locale
+    // entries are the default (root) locale.
     for (key, value) in [
         ("line.separator", "\n".to_owned()),
         ("file.encoding", "UTF-8".to_owned()),
         ("sun.jnu.encoding", "UTF-8".to_owned()),
+        ("native.encoding", "UTF-8".to_owned()),
         ("java.version", "21.0.9".to_owned()),
         ("java.class.version", "65.0".to_owned()),
         ("java.specification.version", "21".to_owned()),
+        ("java.vm.name", "rava".to_owned()),
+        ("java.vm.version", "21.0.9".to_owned()),
+        ("java.vm.vendor", "rava".to_owned()),
         ("java.home", java_home),
+        ("java.io.tmpdir", temp_dir),
+        ("java.library.path", String::new()),
+        ("sun.boot.library.path", String::new()),
         ("os.name", "Linux".to_owned()),
+        ("os.arch", std::env::consts::ARCH.to_owned()),
+        ("os.version", "unknown".to_owned()),
         ("user.dir", user_dir),
+        ("user.home", user_home),
+        ("user.name", user_name),
+        ("user.language", String::new()),
+        ("user.country", String::new()),
+        ("user.script", String::new()),
+        ("user.variant", String::new()),
+        ("user.language.display", String::new()),
+        ("user.language.format", String::new()),
+        ("user.country.display", String::new()),
+        ("user.country.format", String::new()),
+        ("user.script.display", String::new()),
+        ("user.script.format", String::new()),
+        ("user.variant.display", String::new()),
+        ("user.variant.format", String::new()),
+        ("user.extensions", String::new()),
+        ("user.extensions.display", String::new()),
+        ("user.extensions.format", String::new()),
+        ("user.region", String::new()),
+        ("java.locale.useOldISOCodes", "false".to_owned()),
+        ("jdk.serialFilter", String::new()),
+        ("jdk.serialFilterFactory", String::new()),
+        ("java.properties.date", String::new()),
     ] {
         let key = shared.intern(path, key)?;
         let value = shared.new_string(path, value)?;
@@ -167,7 +205,26 @@ pub fn initialize_system(
     shared.pin(out);
     let err = stream(shared, thread, path, fd_err, charset)?;
     shared.pin(err);
+    let input_file = construct(
+        shared,
+        thread,
+        path,
+        "java/io/FileInputStream",
+        "(Ljava/io/FileDescriptor;)V",
+        &[fd_in],
+    )?;
+    shared.pin(input_file);
+    let input = construct(
+        shared,
+        thread,
+        path,
+        "java/io/BufferedInputStream",
+        "(Ljava/io/InputStream;)V",
+        &[Value::Ref(input_file)],
+    )?;
+    shared.pin(input);
     let statics = &mut shared.classes[system.index()].statics;
+    statics.insert("in".to_owned(), Value::Ref(input));
     statics.insert("out".to_owned(), Value::Ref(out));
     statics.insert("err".to_owned(), Value::Ref(err));
     Ok(())

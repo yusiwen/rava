@@ -127,6 +127,12 @@ pub struct Shared {
     /// The `java.lang.Thread` object `Thread.currentThread` answers. This VM has one thread for
     /// now (M3 adds real ones), so the object is created on first use and kept.
     pub main_thread: Option<ObjRef>,
+    /// The bytes available on standard input, fetched lazily by the first read native (`None`:
+    /// not fetched yet). Tests set it directly; the CLI leaves it `None` and the native reads
+    /// the process's stdin to end on first use.
+    pub stdin: Option<Vec<u8>>,
+    /// How many of [`Shared::stdin`] have been consumed.
+    pub stdin_pos: usize,
     /// References the VM is building and cannot see from a frame or a static yet (the bootstrap
     /// constructs an object graph before it can store any of it). A collection treats them as
     /// roots; `unpin_all` releases them once the graph is reachable.
@@ -197,6 +203,8 @@ impl Shared {
             invoker: None,
             main_thread: None,
             pinned: Vec::new(),
+            stdin: None,
+            stdin_pos: 0,
             class_objects: HashMap::new(),
             class_targets: HashMap::new(),
             type_classes: HashMap::new(),

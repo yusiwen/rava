@@ -36,6 +36,189 @@ pub fn register(shared: &mut Shared) {
         "([BIIZ)V",
         write_bytes,
     );
+    // `System.in` is a FileInputStream over FileDescriptor.in; these are its read path.
+    shared.register_native("java/io/FileInputStream", "initIDs", "()V", no_op);
+    shared.register_native("java/io/FileInputStream", "read0", "()I", input_read0);
+    shared.register_native(
+        "java/io/FileInputStream",
+        "readBytes",
+        "([BII)I",
+        input_read_bytes,
+    );
+    shared.register_native(
+        "java/io/FileInputStream",
+        "available0",
+        "()I",
+        input_available,
+    );
+    shared.register_native("java/io/FileInputStream", "skip0", "(J)J", input_skip);
+    shared.register_native(
+        "java/io/FileInputStream",
+        "position0",
+        "()J",
+        input_position,
+    );
+    shared.register_native("java/io/FileInputStream", "length0", "()J", input_length);
+    // Closing a standard descriptor is a no-op: the VM's buffers outlive every stream.
+    shared.register_native("java/io/FileDescriptor", "close0", "()V", no_op);
+}
+
+/// Fills the stdin buffer from the process on first use. A program that never reads stdin never
+/// blocks on it; one that does reads its input to end (the CLI is not interactive).
+fn ensure_stdin(shared: &mut Shared) {
+    if shared.stdin.is_none() {
+        use std::io::Read;
+        let mut data = Vec::new();
+        let _ = std::io::stdin().read_to_end(&mut data);
+        shared.stdin = Some(data);
+        shared.stdin_pos = 0;
+    }
+}
+
+/// The descriptor number of a `FileInputStream`'s `fd` field.
+fn input_fd(ctx: &NativeCtx<'_>, stream: Value) -> Result<i32, VmError> {
+    let stream = stream.as_ref().ok_or(VmError::TypeMismatch {
+        expected: "FileInputStream",
+        found: stream,
+    })?;
+    let class = instance_class(ctx.shared, stream)?;
+    let slot = ctx
+        .shared
+        .class(class)
+        .field_slot("fd", "Ljava/io/FileDescriptor;")
+        .ok_or_else(|| VmError::Native("input stream has no `fd` field".to_owned()))?;
+    let descriptor = ctx.shared.instance_field(stream, slot)?;
+    let descriptor = descriptor
+        .as_ref()
+        .ok_or(VmError::Native("input stream has a null `fd`".to_owned()))?;
+    let descriptor_class = instance_class(ctx.shared, descriptor)?;
+    let fd_slot = ctx
+        .shared
+        .class(descriptor_class)
+        .field_slot("fd", "I")
+        .ok_or_else(|| VmError::Native("FileDescriptor has no `fd` field".to_owned()))?;
+    let fd = ctx
+        .shared
+        .instance_field(descriptor, fd_slot)?
+        .as_int()
+        .ok_or(VmError::Native(
+            "FileDescriptor.fd is not an int".to_owned(),
+        ))?;
+    Ok(fd)
+}
+
+fn input_read0(ctx: &mut NativeCtx<'_>) -> Result<Value, VmError> {
+    let [this] = expect_args::<1>(ctx)?;
+    let fd = input_fd(ctx, *this)?;
+    if fd != 0 {
+        return Err(VmError::Native(format!(
+            "file descriptor {fd} is not readable; only standard input has a reader"
+        )));
+    }
+    ensure_stdin(ctx.shared);
+    let data = ctx.shared.stdin.as_ref().expect("filled above");
+    let position = ctx.shared.stdin_pos;
+    if position >= data.len() {
+        return Ok(Value::Int(-1));
+    }
+    ctx.shared.stdin_pos = position + 1;
+    Ok(Value::Int(i32::from(data[position])))
+}
+
+fn input_read_bytes(ctx: &mut NativeCtx<'_>) -> Result<Value, VmError> {
+    let [this, array, offset, length] = expect_args::<4>(ctx)?;
+    let fd = input_fd(ctx, *this)?;
+    if fd != 0 {
+        return Err(VmError::Native(format!(
+            "file descriptor {fd} is not readable; only standard input has a reader"
+        )));
+    }
+    let array = array.as_ref().ok_or(VmError::TypeMismatch {
+        expected: "byte[]",
+        found: *array,
+    })?;
+    let offset = offset.as_int().ok_or(VmError::TypeMismatch {
+        expected: "int",
+        found: *offset,
+    })?;
+    let length = length.as_int().ok_or(VmError::TypeMismatch {
+        expected: "int",
+        found: *length,
+    })?;
+    if offset < 0 || length < 0 {
+        return Err(VmError::IndexOutOfBounds {
+            index: offset,
+            length: 0,
+        });
+    }
+    ensure_stdin(ctx.shared);
+    let data = ctx.shared.stdin.as_ref().expect("filled above");
+    let available = data.len() - ctx.shared.stdin_pos;
+    if available == 0 {
+        return Ok(Value::Int(-1));
+    }
+    let count = usize::try_from(length).unwrap_or(usize::MAX).min(available);
+    let bytes: Vec<u8> = data[ctx.shared.stdin_pos..ctx.shared.stdin_pos + count].to_vec();
+    {
+        let array = ctx.shared.array_mut(array)?;
+        let array_length = array.elements.len();
+        for (index, byte) in bytes.iter().enumerate() {
+            let cell = array
+                .elements
+                .get_mut(usize::try_from(offset).unwrap_or(usize::MAX) + index)
+                .ok_or(VmError::IndexOutOfBounds {
+                    index: offset + index as i32,
+                    length: array_length,
+                })?;
+            *cell = Value::Int(i32::from(*byte));
+        }
+    }
+    ctx.shared.stdin_pos += count;
+    Ok(Value::Int(count as i32))
+}
+
+fn input_available(ctx: &mut NativeCtx<'_>) -> Result<Value, VmError> {
+    let [this] = expect_args::<1>(ctx)?;
+    let fd = input_fd(ctx, *this)?;
+    if fd != 0 {
+        return Ok(Value::Int(0));
+    }
+    ensure_stdin(ctx.shared);
+    let data = ctx.shared.stdin.as_ref().expect("filled above");
+    Ok(Value::Int((data.len() - ctx.shared.stdin_pos) as i32))
+}
+
+fn input_skip(ctx: &mut NativeCtx<'_>) -> Result<Value, VmError> {
+    let [this, amount] = expect_args::<2>(ctx)?;
+    let fd = input_fd(ctx, *this)?;
+    if fd != 0 {
+        return Ok(Value::Long(0));
+    }
+    let amount = amount.as_long().ok_or(VmError::TypeMismatch {
+        expected: "long",
+        found: *amount,
+    })?;
+    ensure_stdin(ctx.shared);
+    let data = ctx.shared.stdin.as_ref().expect("filled above");
+    let available = (data.len() - ctx.shared.stdin_pos) as i64;
+    let skipped = amount.max(0).min(available);
+    ctx.shared.stdin_pos += skipped as usize;
+    Ok(Value::Long(skipped))
+}
+
+fn input_position(ctx: &mut NativeCtx<'_>) -> Result<Value, VmError> {
+    let [this] = expect_args::<1>(ctx)?;
+    let _ = input_fd(ctx, *this)?;
+    Ok(Value::Long(ctx.shared.stdin_pos as i64))
+}
+
+fn input_length(ctx: &mut NativeCtx<'_>) -> Result<Value, VmError> {
+    let [this] = expect_args::<1>(ctx)?;
+    let _ = input_fd(ctx, *this)?;
+    ensure_stdin(ctx.shared);
+    Ok(Value::Long(
+        ctx.shared.stdin.as_ref().expect("filled above").len() as i64,
+    ))
 }
 
 /// The OS handle is the descriptor number itself in this VM: the standard streams are
