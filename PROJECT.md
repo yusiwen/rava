@@ -89,6 +89,7 @@ A slice is done only when all of the following hold:
 | S10 | Strings are instances of the host's `java.lang.String`; the field-only methods run | R4 | `cargo test -p rava-cli --test strings` exits 0 | done |
 | S12 | Exception basics: `Throwable.fillInStackTrace` captures a trace once per throwable, so constructing one works and an uncaught one is reported | R6 | `cargo test -p rava-cli --test exceptions` exits 0 | done |
 | S13 | The `Class` query natives: `isInstance`, `isAssignableFrom`, `getSuperclass`, `getModifiers` | R4 | `cargo test -p rava-cli --test class_basics` exits 0 | done |
+| S14 | `System.arraycopy`: primitives and reference arrays, bounds and kind checks, overlap-safe | R4 | `cargo test -p rava-cli --test arraycopy` exits 0 | done |
 
 ## Slice log
 
@@ -109,6 +110,7 @@ A slice is done only when all of the following hold:
 | S8 | `cargo test -p rava-cli --test boot` | 0 | 2026-11-20 | [S8 note](docs/notes/S8-boot-mounted.md) |
 | S12 | `cargo test -p rava-cli --test exceptions` | 0 | 2026-11-20 | [S12 note](docs/notes/S12-exceptions.md) |
 | S13 | `cargo test -p rava-cli --test class_basics` | 0 | 2026-11-20 | [S13 note](docs/notes/S13-class-basics.md) |
+| S14 | `cargo test -p rava-cli --test arraycopy` | 0 | 2026-11-20 | [S14 note](docs/notes/S14-arraycopy.md) |
 
 ## Decision log
 
