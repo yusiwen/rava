@@ -20,7 +20,7 @@
 
 use rava_vm::native::expect_args;
 use rava_vm::{
-    Array, ArrayKind, ClassTarget, HeapObject, NativeCtx, ObjRef, Shared, Value, VmError,
+    Array, ArrayKind, ClassId, ClassTarget, HeapObject, NativeCtx, ObjRef, Shared, Value, VmError,
 };
 
 use crate::no_op;
@@ -259,11 +259,36 @@ fn read_cell(shared: &Shared, object: Value, offset: Value, kind: Kind) -> Resul
     let reference = object
         .as_ref()
         .ok_or_else(|| mismatch("a non-null object", object))?;
-    let offset = offset
+    let raw = offset
         .as_long()
         .ok_or_else(|| mismatch("a long offset", offset))?;
-    let offset = usize::try_from(offset)
-        .map_err(|_| VmError::Native("a negative Unsafe offset".to_owned()))?;
+    // A negative offset names a static field: the base is the class object and the offset is
+    // `-1 - declared-field index` (see `staticFieldOffset`).
+    if raw < 0 {
+        if let Some(ClassTarget::Loaded(class)) = shared.class_targets.get(&reference) {
+            let class = *class;
+            let index = usize::try_from(-raw - 1).map_err(|_| {
+                VmError::Native("a static Unsafe offset is out of range".to_owned())
+            })?;
+            let field = shared
+                .class(class)
+                .fields
+                .get(index)
+                .ok_or_else(|| VmError::Native("static field index out of range".to_owned()))?;
+            let value = shared
+                .class(class)
+                .statics
+                .get(&field.name)
+                .copied()
+                .ok_or_else(|| VmError::FieldNotFound {
+                    class: shared.class(class).name.clone(),
+                    name: field.name.clone(),
+                })?;
+            return kind.coerce(value);
+        }
+    }
+    let offset =
+        usize::try_from(raw).map_err(|_| VmError::Native("a negative Unsafe offset".to_owned()))?;
     match shared.heap.get(reference.index()) {
         Some(HeapObject::Instance(instance)) => {
             let slot = instance_slot(instance, offset)?;
@@ -304,11 +329,29 @@ fn write_cell(
     let reference = object
         .as_ref()
         .ok_or_else(|| mismatch("a non-null object", object))?;
-    let offset = offset
+    let raw = offset
         .as_long()
         .ok_or_else(|| mismatch("a long offset", offset))?;
-    let offset = usize::try_from(offset)
-        .map_err(|_| VmError::Native("a negative Unsafe offset".to_owned()))?;
+    if raw < 0 {
+        if let Some(ClassTarget::Loaded(class)) = shared.class_targets.get(&reference) {
+            let class = *class;
+            let index = usize::try_from(-raw - 1).map_err(|_| {
+                VmError::Native("a static Unsafe offset is out of range".to_owned())
+            })?;
+            let name = shared
+                .class(class)
+                .fields
+                .get(index)
+                .ok_or_else(|| VmError::Native("static field index out of range".to_owned()))?
+                .name
+                .clone();
+            let stored = kind.coerce(value)?;
+            shared.classes[class.index()].statics.insert(name, stored);
+            return Ok(());
+        }
+    }
+    let offset =
+        usize::try_from(raw).map_err(|_| VmError::Native("a negative Unsafe offset".to_owned()))?;
     match shared.heap.get(reference.index()) {
         Some(HeapObject::Instance(instance)) => {
             let slot = instance_slot(instance, offset)?;
@@ -530,10 +573,7 @@ fn object_field_offset_field(ctx: &mut NativeCtx<'_>) -> Result<Value, VmError> 
     let reference = field
         .as_ref()
         .ok_or_else(|| mismatch("a Field object", *field))?;
-    let (class, index) = ctx
-        .shared
-        .field_ref(reference)
-        .ok_or_else(|| VmError::Native(format!("{reference:?} is not a Field object")))?;
+    let (class, index) = field_target(ctx, reference)?;
     let info = ctx.shared.class(class).fields.get(index).ok_or_else(|| {
         VmError::Native(format!(
             "field index {index} is outside {}",
@@ -550,6 +590,64 @@ fn object_field_offset_field(ctx: &mut NativeCtx<'_>) -> Result<Value, VmError> 
             name,
         })?;
     Ok(Value::Long(slot as i64))
+}
+
+/// `Unsafe.staticFieldOffset(Field)`: a negative encoding of the declared-field index. The
+/// static base is the class object, so the offset says which static to read.
+fn static_field_offset(ctx: &mut NativeCtx<'_>) -> Result<Value, VmError> {
+    let [_this, field] = expect_args::<2>(ctx)?;
+    let reference = field
+        .as_ref()
+        .ok_or_else(|| mismatch("a Field object", *field))?;
+    let (_class, index) = field_target(ctx, reference)?;
+    Ok(Value::Long(-1 - index as i64))
+}
+
+/// `Unsafe.staticFieldBase(Field)`: the class object that holds the static.
+fn static_field_base(ctx: &mut NativeCtx<'_>) -> Result<Value, VmError> {
+    let [_this, field] = expect_args::<2>(ctx)?;
+    let reference = field
+        .as_ref()
+        .ok_or_else(|| mismatch("a Field object", *field))?;
+    let (class, _index) = field_target(ctx, reference)?;
+    Ok(Value::Ref(ctx.shared.class_object(ctx.path, class)?))
+}
+
+/// The `(class, declared-field index)` a `java.lang.reflect.Field` names.
+fn field_target(ctx: &mut NativeCtx<'_>, reference: ObjRef) -> Result<(ClassId, usize), VmError> {
+    let class = ctx
+        .shared
+        .class_of(reference)
+        .ok_or_else(|| VmError::Native(format!("{reference:?} has no runtime class")))?;
+    let clazz_slot = ctx
+        .shared
+        .class(class)
+        .field_slot("clazz", "Ljava/lang/Class;")
+        .ok_or_else(|| VmError::Native("Field has no clazz field".to_owned()))?;
+    let declaring = ctx.shared.instance_field(reference, clazz_slot)?;
+    let declaring = declaring
+        .as_ref()
+        .ok_or_else(|| VmError::Native("Field.clazz is null".to_owned()))?;
+    let target = match ctx.shared.class_targets.get(&declaring) {
+        Some(ClassTarget::Loaded(target)) => *target,
+        _ => {
+            return Err(VmError::Native(
+                "a Field's declaring class is not a loaded class".to_owned(),
+            ));
+        }
+    };
+    let slot_slot = ctx
+        .shared
+        .class(class)
+        .field_slot("slot", "I")
+        .ok_or_else(|| VmError::Native("Field has no slot field".to_owned()))?;
+    let index = ctx
+        .shared
+        .instance_field(reference, slot_slot)?
+        .as_int()
+        .ok_or_else(|| VmError::Native("Field.slot is not an int".to_owned()))?
+        as usize;
+    Ok((target, index))
 }
 
 /// `Unsafe.allocateInstance(Class)`: an instance with the class's default field values, without
@@ -658,6 +756,18 @@ pub fn register(shared: &mut Shared) {
         "arrayIndexScale0",
         "(Ljava/lang/Class;)I",
         array_index_scale,
+    );
+    shared.register_native(
+        U,
+        "staticFieldOffset0",
+        "(Ljava/lang/reflect/Field;)J",
+        static_field_offset,
+    );
+    shared.register_native(
+        U,
+        "staticFieldBase0",
+        "(Ljava/lang/reflect/Field;)Ljava/lang/Object;",
+        static_field_base,
     );
     shared.register_native(
         U,
