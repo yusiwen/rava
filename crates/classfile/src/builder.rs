@@ -36,6 +36,7 @@ pub struct ClassBuilder {
     super_class: u16,
     major: u16,
     fields: Vec<FieldEntry>,
+    interfaces: Vec<u16>,
     methods: Vec<MethodEntry>,
     /// The next constant-pool index; `long`/`double` consume two (JVMS §4.4.5).
     next_index: u16,
@@ -51,6 +52,7 @@ impl ClassBuilder {
             super_class: 0,
             major,
             fields: Vec::new(),
+            interfaces: Vec::new(),
             methods: Vec::new(),
             next_index: 1,
         };
@@ -160,6 +162,14 @@ impl ClassBuilder {
         self.push(key, entry, 1)
     }
 
+    /// Declares that this class implements `name` (a binary name), in the order given.
+    pub fn interface(&mut self, name: &str) {
+        let index = self.class(name);
+        if !self.interfaces.contains(&index) {
+            self.interfaces.push(index);
+        }
+    }
+
     /// Adds a field. `access` is the raw access-flags word (`0x0009` is `public static`).
     pub fn field(&mut self, access: u16, name: &str, descriptor: &str) {
         let name = self.utf8(name);
@@ -219,7 +229,10 @@ impl ClassBuilder {
         out.extend_from_slice(&0x0021u16.to_be_bytes()); // public super
         out.extend_from_slice(&self.this_class.to_be_bytes());
         out.extend_from_slice(&self.super_class.to_be_bytes());
-        out.extend_from_slice(&0u16.to_be_bytes()); // interfaces
+        out.extend_from_slice(&(self.interfaces.len() as u16).to_be_bytes());
+        for interface in &self.interfaces {
+            out.extend_from_slice(&interface.to_be_bytes());
+        }
         out.extend_from_slice(&(self.fields.len() as u16).to_be_bytes());
         for field in &self.fields {
             out.extend_from_slice(&field.access.to_be_bytes());

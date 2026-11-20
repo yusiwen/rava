@@ -35,6 +35,12 @@ pub fn register(shared: &mut Shared) {
         assertions_disabled,
     );
     shared.register_native("java/lang/Class", "isPrimitive", "()Z", is_primitive);
+    shared.register_native(
+        "java/lang/Class",
+        "getInterfaces0",
+        "()[Ljava/lang/Class;",
+        get_interfaces,
+    );
     shared.register_native("java/lang/Class", "isArray", "()Z", is_array);
     shared.register_native("java/lang/Class", "isInterface", "()Z", is_interface);
     shared.register_native(
@@ -110,6 +116,41 @@ fn init_class_name(ctx: &mut NativeCtx<'_>) -> Result<Value, VmError> {
 fn assertions_disabled(ctx: &mut NativeCtx<'_>) -> Result<Value, VmError> {
     let [_class] = expect_args::<1>(ctx)?;
     Ok(Value::Int(0))
+}
+
+/// `Class.getInterfaces0()`: the direct superinterfaces as class objects. The host's
+/// `getInterfaces()` wraps this and clones the array; a primitive or array class object has no
+/// loaded class behind it and reports none.
+fn get_interfaces(ctx: &mut NativeCtx<'_>) -> Result<Value, VmError> {
+    let [this] = expect_args::<1>(ctx)?;
+    let reference = this.as_ref().ok_or(VmError::TypeMismatch {
+        expected: "a class object",
+        found: *this,
+    })?;
+    let elements: Vec<Value> = match ctx.shared.class_targets.get(&reference) {
+        Some(rava_vm::ClassTarget::Loaded(class)) => {
+            let interfaces = ctx.shared.class(*class).interfaces.clone();
+            let mut elements = Vec::with_capacity(interfaces.len());
+            for interface in interfaces {
+                elements.push(Value::Ref(ctx.shared.class_object(ctx.path, interface)?));
+            }
+            elements
+        }
+        Some(rava_vm::ClassTarget::Type(_)) => Vec::new(),
+        None => {
+            return Err(VmError::Native(format!(
+                "{reference:?} is not a class object"
+            )));
+        }
+    };
+    let reference = ctx
+        .shared
+        .allocate(rava_vm::HeapObject::Array(rava_vm::Array {
+            kind: rava_vm::ArrayKind::Reference,
+            elements,
+            class_name: Some("[Ljava/lang/Class;".to_owned()),
+        }));
+    Ok(Value::Ref(reference))
 }
 
 fn is_primitive(ctx: &mut NativeCtx<'_>) -> Result<Value, VmError> {
