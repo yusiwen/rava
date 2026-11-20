@@ -20,8 +20,10 @@ and calls `System.setOut0` runs through the interpreter: the class initialisers 
 natives are dispatched, and `System.out` ends up pointing at the descriptor. That is the first
 executed Java program in this repository's history, even if it prints nothing.
 
-**The wall is the Class object model, not a native.** `FileOutputStream.<clinit>` evaluates
-`assert`s through `Class.desiredAssertionStatus()` — a Java method that reads
+**The wall is the Class object model, not a native.** `FileOutputStream`'s initializer calls
+`SharedSecrets.getJavaIOFileDescriptorAccess()`, which initialises
+`java.lang.invoke.MethodHandles`; that class's initializer evaluates its `assert`s through
+`Class.desiredAssertionStatus()`, a Java method whose first instruction reads
 `Class.classLoader`. This VM represents class objects as `HeapObject::ClassRef`, which has no
 fields, so the read fails with a type mismatch. Every JDK class that contains an `assert`
 triggers it. Fixing that is M1/M2 work (a class object must be an instance of the host's
