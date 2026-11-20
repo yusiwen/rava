@@ -670,14 +670,9 @@ fn run_frame(
                     let class_name = resolve::class_constant(shared.class(class), constant)?;
                     let owner = shared.load_class(path, &class_name)?;
                     ensure_initialized(shared, thread, path, owner)?;
-                    // The class library may give its instances storage the VM does not
-                    // model (a StringBuilder is a Rust String); anything else is a plain
-                    // instance with a field vector.
-                    let factory = shared.object_factory;
-                    let reference = match factory.and_then(|build| build(&class_name, owner)) {
-                        Some(object) => shared.allocate(object),
-                        None => shared.new_instance(owner),
-                    };
+                    // Every object is a plain instance with the host class's field vector;
+                    // the library gets its storage from the classes it declares.
+                    let reference = shared.new_instance(owner);
                     thread.frames[frame_index].stack.push(Value::Ref(reference));
                 }
 

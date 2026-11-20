@@ -54,7 +54,11 @@ fn build_fixture(dir: &Path) {
         "append",
         "(I)Ljava/lang/StringBuilder;",
     );
-    let to_string = builder.method_ref("java/lang/StringBuilder", "toString", "()Ljava/lang/String;");
+    let to_string = builder.method_ref(
+        "java/lang/StringBuilder",
+        "toString",
+        "()Ljava/lang/String;",
+    );
     let length = builder.method_ref("java/lang/String", "length", "()I");
     let hello = builder.string("hello");
     let digits = builder.string("0123456789");

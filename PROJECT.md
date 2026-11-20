@@ -34,7 +34,7 @@ and milestones M0–M5 are planned but not built. `scripts/workflow-check.sh` ru
 | :--- | :--- | :--- | :--- | :--- |
 | — | **Migration baseline**: the VM core from the previous iteration, without its own class library or synthetic `Object` | S1–S3 | done | notes S1–S3 |
 | M0 | Boot: read the host image, complete the instruction set the library uses, bootstrap `Object`/`String`/`Class`/`System`, first JCL natives, a program that runs with a verified result | S4–S8 | done | notes S4–S9; ADR-0014 |
-| M1 | The core library: strings, arrays, exceptions, `Class` basics | S9, S10, S12, S13 | todo | #1, S9, S10, S12 and S13 landed early; strings wait on arrays |
+| M1 | The core library: strings, arrays, exceptions, `Class` basics | S9, S10, S12, S13, S16 | todo | #1, S9, S10, S12, S13 and S16 landed early; strings wait on arrays |
 | M2 | Loaders and modules: `(loader, name)` identity, resources | — | todo | — |
 | M3 | Real threads and monitors | — | todo | ADR-0010 |
 | M4 | `MethodHandle`, `VarHandle`, `Unsafe` | — | todo | ADR-0012 |
@@ -90,6 +90,7 @@ A slice is done only when all of the following hold:
 | S11 | Array class objects: an array knows its class descriptor, so `getClass`, `instanceof`/`checkcast`, `getComponentType` and the `Class` queries work for arrays | R4 | `cargo test -p rava-cli --test arrays` exits 0 | done |
 | S12 | Exception basics: `Throwable.fillInStackTrace` captures a trace once per throwable, so constructing one works and an uncaught one is reported | R6 | `cargo test -p rava-cli --test exceptions` exits 0 | done |
 | S13 | The `Class` query natives: `isInstance`, `isAssignableFrom`, `getSuperclass`, `getModifiers` | R4 | `cargo test -p rava-cli --test class_basics` exits 0 | done |
+| S16 | `StringBuilder` runs through the host classes; the VM-side `Builder` shortcut is removed | R4 | `cargo test -p rava-cli --test stringbuilder` exits 0 | done |
 | S14 | `System.arraycopy`: primitives and reference arrays, bounds and kind checks, overlap-safe | R4 | `cargo test -p rava-cli --test arraycopy` exits 0 | done |
 
 ## Slice log
@@ -112,6 +113,7 @@ A slice is done only when all of the following hold:
 | S8 | `cargo test -p rava-cli --test boot` | 0 | 2026-11-20 | [S8 note](docs/notes/S8-boot-mounted.md) |
 | S12 | `cargo test -p rava-cli --test exceptions` | 0 | 2026-11-20 | [S12 note](docs/notes/S12-exceptions.md) |
 | S13 | `cargo test -p rava-cli --test class_basics` | 0 | 2026-11-20 | [S13 note](docs/notes/S13-class-basics.md) |
+| S16 | `cargo test -p rava-cli --test stringbuilder` | 0 | 2026-11-20 | [S16 note](docs/notes/S16-stringbuilder.md) |
 | S14 | `cargo test -p rava-cli --test arraycopy` | 0 | 2026-11-20 | [S14 note](docs/notes/S14-arraycopy.md) |
 
 ## Decision log

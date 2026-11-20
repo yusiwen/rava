@@ -92,8 +92,6 @@ pub type Invoker = fn(
 ) -> Result<Value, VmError>;
 
 /// Builds the initial heap object for a class, or `None` to get a plain instance.
-pub type ObjectFactory = fn(class_name: &str, class: ClassId) -> Option<HeapObject>;
-
 /// State shared by every thread: heap, class table, interned strings, natives, and the
 /// output sink (ADR-0006).
 pub struct Shared {
@@ -164,10 +162,6 @@ pub struct Shared {
     /// Everything the program wrote to stderr, kept separate so the CLI can flush it to the
     /// right stream at the end of the run.
     pub err: Vec<u8>,
-    /// How the replacement class library gives its instances storage the VM does not
-    /// model: a `StringBuilder` is a Rust `String`, an ordinary object is a field vector.
-    /// `new` asks this first, so the VM stays free of library-specific knowledge.
-    pub object_factory: Option<ObjectFactory>,
 }
 
 impl Shared {
@@ -201,7 +195,6 @@ impl Shared {
             steps: 0,
             out: Vec::new(),
             err: Vec::new(),
-            object_factory: None,
         }
     }
 
@@ -290,7 +283,6 @@ impl Shared {
                 // and the cache keeps its object alive.
                 HeapObject::Null
                 | HeapObject::Free
-                | HeapObject::Builder(_)
                 | HeapObject::FieldRef(_, _)
                 | HeapObject::MethodRef(_, _)
                 | HeapObject::ConstructorRef(_, _) => {}
@@ -1098,7 +1090,6 @@ impl Shared {
     pub fn class_of(&self, reference: ObjRef) -> Option<ClassId> {
         match self.heap.get(reference.index())? {
             HeapObject::Instance(instance) => Some(instance.class),
-            HeapObject::Builder(_) => self.class_ids.get("java/lang/StringBuilder").copied(),
             HeapObject::Array(_)
             | HeapObject::Lambda(_)
             | HeapObject::FieldRef(_, _)
@@ -1183,27 +1174,6 @@ impl Shared {
             elements: Vec::new(),
             class_name: Some("[Ljava/lang/String;".to_owned()),
         }))
-    }
-
-    /// The payload of a `StringBuilder` instance.
-    pub fn builder(&self, reference: ObjRef) -> Result<&str, VmError> {
-        match self.heap.get(reference.index()) {
-            Some(HeapObject::Builder(text)) => Ok(text),
-            Some(other) => Err(VmError::Native(format!(
-                "expected a StringBuilder, got {other:?}"
-            ))),
-            None => Err(VmError::Native(format!("dangling reference {reference:?}"))),
-        }
-    }
-
-    pub fn builder_mut(&mut self, reference: ObjRef) -> Result<&mut String, VmError> {
-        match self.heap.get_mut(reference.index()) {
-            Some(HeapObject::Builder(text)) => Ok(text),
-            Some(other) => Err(VmError::Native(format!(
-                "expected a StringBuilder, got {other:?}"
-            ))),
-            None => Err(VmError::Native(format!("dangling reference {reference:?}"))),
-        }
     }
 
     /// Allocates a `java.lang.String` with the host class's fields: a `byte[] value` and the
