@@ -92,6 +92,7 @@ A slice is done only when all of the following hold:
 | S13 | The `Class` query natives: `isInstance`, `isAssignableFrom`, `getSuperclass`, `getModifiers` | R4 | `cargo test -p rava-cli --test class_basics` exits 0 | done |
 | S16 | `StringBuilder` runs through the host classes; the VM-side `Builder` shortcut is removed | R4 | `cargo test -p rava-cli --test stringbuilder` exits 0 | done |
 | S15 | The rest of `String` runs (`hashCode`, `equals`, `compareTo`, `concat`, `substring`), on top of a local-variable slot fix | R4 | `cargo test -p rava-cli --test strings --test locals` exits 0 | done |
+| S18 | The `Unsafe` memory model: field slots as offsets, byte-addressed array storage, reference CAS, allocation and throw | R12 | `cargo test -p rava-cli --test unsafe` exits 0 | done |
 | S14 | `System.arraycopy`: primitives and reference arrays, bounds and kind checks, overlap-safe | R4 | `cargo test -p rava-cli --test arraycopy` exits 0 | done |
 
 ## Slice log
@@ -116,6 +117,7 @@ A slice is done only when all of the following hold:
 | S13 | `cargo test -p rava-cli --test class_basics` | 0 | 2026-11-20 | [S13 note](docs/notes/S13-class-basics.md) |
 | S16 | `cargo test -p rava-cli --test stringbuilder` | 0 | 2026-11-20 | [S16 note](docs/notes/S16-stringbuilder.md) |
 | S15 | `cargo test -p rava-cli --test strings --test locals` | 0 | 2026-11-20 | [S15 note](docs/notes/S15-string-methods.md) |
+| S18 | `cargo test -p rava-cli --test unsafe` | 0 | 2026-11-20 | [S18 note](docs/notes/S18-unsafe-model.md) |
 | S14 | `cargo test -p rava-cli --test arraycopy` | 0 | 2026-11-20 | [S14 note](docs/notes/S14-arraycopy.md) |
 
 ## Decision log

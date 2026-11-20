@@ -162,6 +162,12 @@ impl Class {
             .position(|slot| slot.name == name && slot.descriptor == descriptor)
     }
 
+    /// The slot of an instance field by name alone. `Unsafe.objectFieldOffset(Class, String)` has
+    /// no descriptor, and Java forbids two fields with the same name in one class.
+    pub fn field_slot_by_name(&self, name: &str) -> Option<usize> {
+        self.layout.iter().position(|slot| slot.name == name)
+    }
+
     pub fn method(&self, name: &str, descriptor: &str) -> Option<&MethodInfo> {
         self.methods
             .iter()
