@@ -165,6 +165,10 @@ None.
   results are exit codes and the state its natives model. That is a real limit, recorded here
   rather than hidden.
 
+**Status (2026-11-20):** delivered. S21 installed `System.out`/`err` from the host's own stream
+classes and printed through `println`/`printStackTrace`; S22 compacted a program on `java` and on
+`rava run` and compared stdout byte for byte (`crates/cli/tests/print_differential.rs`).
+
 ### G1 — A JIT compiler
 
 - **Goal:** compile the methods the interpreter spends its time in, and fall back to the

@@ -1270,7 +1270,10 @@ fn encode_string(text: &str) -> (Vec<u8>, u8) {
     } else {
         let mut bytes = Vec::with_capacity(text.len() * 2);
         for unit in text.encode_utf16() {
-            bytes.extend_from_slice(&unit.to_be_bytes());
+            // `StringUTF16` stores a char in the host's byte order and asks
+            // `StringUTF16.isBigEndian()` which one that is (JDK 21). Writing big-endian here
+            // swapped every non-Latin-1 character; the differential test in S22 caught it.
+            bytes.extend_from_slice(&unit.to_ne_bytes());
         }
         (bytes, 1)
     }
@@ -1288,7 +1291,7 @@ fn decode_string(bytes: &[u8], coder: i32) -> Result<String, VmError> {
             }
             let units: Vec<u16> = bytes
                 .chunks_exact(2)
-                .map(|pair| u16::from_be_bytes([pair[0], pair[1]]))
+                .map(|pair| u16::from_ne_bytes([pair[0], pair[1]]))
                 .collect();
             String::from_utf16(&units)
                 .map_err(|_| VmError::Native("a String holds an unpaired surrogate".to_owned()))

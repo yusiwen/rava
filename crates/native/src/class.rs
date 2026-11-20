@@ -55,6 +55,14 @@ pub fn register(shared: &mut Shared) {
         "()Ljava/lang/Class;",
         get_caller_class,
     );
+    // `StringUTF16` stores a 16-bit char in two bytes and asks which comes first; this host is
+    // little-endian (aarch64), so the low byte leads.
+    shared.register_native("java/lang/StringUTF16", "isBigEndian", "()Z", is_big_endian);
+}
+
+/// `StringUTF16.isBigEndian()`: false on this little-endian host.
+fn is_big_endian(_ctx: &mut NativeCtx<'_>) -> Result<Value, VmError> {
+    Ok(Value::Int(0))
 }
 
 /// `Object.getClass()`: the class object of the receiver's runtime class.
