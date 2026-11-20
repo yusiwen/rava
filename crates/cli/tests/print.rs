@@ -17,8 +17,10 @@ fn jdk_home() -> std::ffi::OsString {
     })
 }
 
-fn fixture_dir() -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("rava-print-{}", std::process::id()));
+fn fixture_dir(name: &str) -> PathBuf {
+    // One directory per test: the suite is parallel and a shared one races between
+    // `remove_dir_all` and `create_dir_all` (issue #33's shape).
+    let dir = std::env::temp_dir().join(format!("rava-print-{}-{}", std::process::id(), name));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("fixture directory");
     dir
@@ -64,7 +66,7 @@ fn run_class(dir: &Path, class: &str) -> Shared {
 
 #[test]
 fn println_reaches_the_vm_output_sink() {
-    let dir = fixture_dir();
+    let dir = fixture_dir("println");
     build_print(&dir);
     let shared = run(&dir);
     assert_eq!(
@@ -90,7 +92,7 @@ fn print_stack_trace_renders_through_the_streams() {
     code.extend_from_slice(&[0xb6, (print_trace >> 8) as u8, print_trace as u8]);
     code.push(0xb1); // return
     builder.method(0x0009, "main", "([Ljava/lang/String;)V", Some((2, 2, code)));
-    let dir = fixture_dir();
+    let dir = fixture_dir("trace");
     std::fs::write(dir.join("PrintTrace.class"), builder.build()).expect("fixture class");
     let shared = run_class(&dir, "PrintTrace");
     // `printStackTrace()` targets `System.err`, which is the fd-2 sink.
