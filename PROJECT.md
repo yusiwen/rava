@@ -37,7 +37,7 @@ and milestones M0–M5 are planned but not built. `scripts/workflow-check.sh` ru
 | M1 | The core library: strings, arrays, exceptions, `Class` basics | S9–S16 | done | Deferred walls tracked in #21 and #28; [M1 note](docs/notes/M1-core-library.md) |
 | M2 | Loaders and modules: `(loader, name)` identity, resources | — | todo | — |
 | M3 | Real threads and monitors | — | todo | ADR-0010 |
-| M4 | `MethodHandle`, `VarHandle`, `Unsafe` | S18–S21 | todo | `Unsafe` and printing landed (S18–S21); `MethodHandle`/`VarHandle` remain |
+| M4 | `MethodHandle`, `VarHandle`, `Unsafe` | S18–S21, S23 | todo | `Unsafe` and printing landed; `MethodHandle`/`VarHandle` remain |
 | M5 | Breadth: `java.util`, `java.io`, `java.nio`; a real jar | — | todo | — |
 | G2 | A program prints on the host library, compared with the reference launcher | S21, S22 | done | `println` and `printStackTrace` run (S21); stdout matches `java` byte for byte (S22) |
 | G1 | A JIT: compile one hot method, with the interpreter as the fallback and the oracle | — | deferred | requirements § Deferred goals, ADR-0013 |
@@ -96,6 +96,7 @@ A slice is done only when all of the following hold:
 | S20 | `Class.getInterfaces0`, the builder's `interfaces` table, and the public `getInterfaces` | R4 | `cargo test -p rava-cli --test class_interfaces` exits 0 | done |
 | S21 | G2's printing increment: `System.out`/`err` installed from the host streams, `println` and `printStackTrace` reach the VM sink | G2 | `cargo test -p rava-cli --test print` exits 0 | done |
 | S22 | G2's differential: the same program runs on `java` and on `rava run`, and the stdout bytes match | G2 | `cargo test -p rava-cli --test print_differential` exits 0 | done |
+| S23 | Bootstrap roots and `VM.savedProps`: autoboxing works and the standard streams survive a collection | R12 | `cargo test -p rava-cli --test boxing` exits 0 | done |
 | S14 | `System.arraycopy`: primitives and reference arrays, bounds and kind checks, overlap-safe | R4 | `cargo test -p rava-cli --test arraycopy` exits 0 | done |
 | S19 | Java-side stack traces: `fillInStackTrace` fills `Throwable.stackTrace` from the VM's trace | R6 | `cargo test -p rava-cli --test stack_traces` exits 0 | done |
 
@@ -125,6 +126,7 @@ A slice is done only when all of the following hold:
 | S20 | `cargo test -p rava-cli --test class_interfaces` | 0 | 2026-11-20 | [S20 note](docs/notes/S20-class-interfaces.md) |
 | S21 | `cargo test -p rava-cli --test print` | 0 | 2026-11-20 | [S21 note](docs/notes/S21-printing.md) |
 | S22 | `cargo test -p rava-cli --test print_differential` | 0 | 2026-11-20 | [S22 note](docs/notes/S22-g2-differential.md) |
+| S23 | `cargo test -p rava-cli --test boxing` | 0 | 2026-11-20 | [S23 note](docs/notes/S23-bootstrap-roots.md) |
 | S14 | `cargo test -p rava-cli --test arraycopy` | 0 | 2026-11-20 | [S14 note](docs/notes/S14-arraycopy.md) |
 | S19 | `cargo test -p rava-cli --test stack_traces` | 0 | 2026-11-20 | [S19 note](docs/notes/S19-stack-traces.md) |
 

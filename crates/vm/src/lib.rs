@@ -127,6 +127,10 @@ pub struct Shared {
     /// The `java.lang.Thread` object `Thread.currentThread` answers. This VM has one thread for
     /// now (M3 adds real ones), so the object is created on first use and kept.
     pub main_thread: Option<ObjRef>,
+    /// References the VM is building and cannot see from a frame or a static yet (the bootstrap
+    /// constructs an object graph before it can store any of it). A collection treats them as
+    /// roots; `unpin_all` releases them once the graph is reachable.
+    pub pinned: Vec<ObjRef>,
     /// One `java.lang.Class` object per class, so class objects compare by identity.
     pub class_objects: HashMap<ClassId, ObjRef>,
     /// What a class object names: a loaded class or a primitive/array descriptor. This is the
@@ -192,6 +196,7 @@ impl Shared {
             monitors: HashMap::new(),
             invoker: None,
             main_thread: None,
+            pinned: Vec::new(),
             class_objects: HashMap::new(),
             class_targets: HashMap::new(),
             type_classes: HashMap::new(),
@@ -260,6 +265,7 @@ impl Shared {
                 }
             }
         }
+        worklist.extend(self.pinned.iter().copied());
         worklist.extend(self.interned.values().copied());
         worklist.extend(self.class_objects.values().copied());
         worklist.extend(self.type_classes.values().copied());
@@ -607,6 +613,18 @@ impl Shared {
         let actual = self.load_class(path, actual_name)?;
         let target = self.load_class(path, target_name)?;
         Ok(self.is_assignable(actual, target))
+    }
+
+    /// Keeps `reference` alive across allocations that run Java code. The bootstrap uses it for
+    /// objects it is still assembling: they are not in a frame or a static yet, and a collection
+    /// during a constructor call would free them.
+    pub fn pin(&mut self, reference: ObjRef) {
+        self.pinned.push(reference);
+    }
+
+    /// Releases every pinned reference; the caller has made them reachable another way.
+    pub fn unpin_all(&mut self) {
+        self.pinned.clear();
     }
 
     /// The class that declares a static field, resolving through superinterfaces and the

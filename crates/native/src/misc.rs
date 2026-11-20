@@ -81,6 +81,9 @@ pub fn register(shared: &mut Shared) {
         "()I",
         available_processors,
     );
+    // `VM.saveProperties` sizes the direct-memory budget from `Runtime.maxMemory` when the
+    // property is absent. 512 MiB is a plain, honest ceiling for this VM.
+    shared.register_native("java/lang/Runtime", "maxMemory", "()J", max_memory);
     shared.register_native(
         "java/lang/Float",
         "floatToRawIntBits",
@@ -129,6 +132,11 @@ fn current_thread(ctx: &mut NativeCtx<'_>) -> Result<Value, VmError> {
     }
     ctx.shared.main_thread = Some(reference);
     Ok(Value::Ref(reference))
+}
+
+/// `Runtime.maxMemory()`: the VM's heap ceiling, 512 MiB.
+fn max_memory(_ctx: &mut NativeCtx<'_>) -> Result<Value, VmError> {
+    Ok(Value::Long(512 * 1024 * 1024))
 }
 
 /// A native whose answer is "no string".

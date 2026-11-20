@@ -92,6 +92,7 @@ pub fn initialize_system(
     // minimal `Properties` keeps every reader non-null and answers the keys the streams and
     // charset use.
     let props = construct(shared, thread, path, "java/util/Properties", "()V", &[])?;
+    shared.pin(props);
     let user_dir = std::env::current_dir()
         .map(|dir| dir.display().to_string())
         .unwrap_or_else(|_| ".".to_owned());
@@ -101,6 +102,8 @@ pub fn initialize_system(
         ("file.encoding", "UTF-8".to_owned()),
         ("sun.jnu.encoding", "UTF-8".to_owned()),
         ("java.version", "21.0.9".to_owned()),
+        ("java.class.version", "65.0".to_owned()),
+        ("java.specification.version", "21".to_owned()),
         ("java.home", java_home),
         ("os.name", "Linux".to_owned()),
         ("user.dir", user_dir),
@@ -124,6 +127,14 @@ pub fn initialize_system(
         statics.insert("lineSeparator".to_owned(), Value::Ref(newline));
         statics.insert("props".to_owned(), Value::Ref(props));
     }
+    // `VM.getSavedProperty` reads this field; `Integer$IntegerCache.<clinit>` calls it, so
+    // without it even autoboxing an `int` throws. The JDK fills it from `VM.saveProperties` in
+    // `initPhase1`; setting the field is the same result without running that method (which
+    // expects `java.class.version` and `Runtime.maxMemory`).
+    let vm = shared.load_class(path, "jdk/internal/misc/VM")?;
+    shared.classes[vm.index()]
+        .statics
+        .insert("savedProps".to_owned(), Value::Ref(props));
 
     // The charset encoders reach the JDK's own `JavaLangAccess` fast paths
     // (`sun.nio.cs.UTF_8.JLA.encodeASCII`); `System.setJavaLangAccess` installs it, and the
@@ -148,9 +159,14 @@ pub fn initialize_system(
         "(Ljava/lang/String;)Ljava/nio/charset/Charset;",
         &[Value::Ref(utf8)],
     )?;
+    if let Value::Ref(charset_object) = charset {
+        shared.pin(charset_object);
+    }
 
     let out = stream(shared, thread, path, fd_out, charset)?;
+    shared.pin(out);
     let err = stream(shared, thread, path, fd_err, charset)?;
+    shared.pin(err);
     let statics = &mut shared.classes[system.index()].statics;
     statics.insert("out".to_owned(), Value::Ref(out));
     statics.insert("err".to_owned(), Value::Ref(err));
@@ -202,6 +218,7 @@ fn stream(
         "(Ljava/io/FileDescriptor;)V",
         &[descriptor],
     )?;
+    shared.pin(file);
     let buffer = construct(
         shared,
         thread,
@@ -210,6 +227,7 @@ fn stream(
         "(Ljava/io/OutputStream;)V",
         &[Value::Ref(file)],
     )?;
+    shared.pin(buffer);
     construct(
         shared,
         thread,
