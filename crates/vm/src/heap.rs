@@ -83,6 +83,14 @@ impl ArrayKind {
 
 #[derive(Debug)]
 pub struct Lambda {
+    /// The functional interface the lambda implements: the return type of its call site
+    /// (`()LPattern$CharPredicate;`). It is the lambda's runtime class for dispatch and
+    /// `instanceof`.
+    pub interface: ClassId,
+    /// The interface method the lambda implements (`test`, `(I)Z`). A call to any *other*
+    /// method on the lambda (an interface default such as `union`) must dispatch normally.
+    pub sam_name: String,
+    pub sam_descriptor: String,
     pub target_class: ClassId,
     pub target_method: usize,
     pub captured: Vec<Value>,

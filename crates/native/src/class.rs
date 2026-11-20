@@ -2,6 +2,7 @@
 //!
 //! `Object.getClass` hands out the mirror; the `Class` methods answer from the VM's `class_targets` map, and `initClassName` caches its answer in the object's `name` field.
 
+use rava_vm::ClassId;
 use rava_vm::native::expect_args;
 use rava_vm::{Array, ClassTarget, HeapObject, NativeCtx, Shared, Value, VmError};
 
@@ -58,11 +59,89 @@ pub fn register(shared: &mut Shared) {
     // `StringUTF16` stores a 16-bit char in two bytes and asks which comes first; this host is
     // little-endian (aarch64), so the low byte leads.
     shared.register_native("java/lang/StringUTF16", "isBigEndian", "()Z", is_big_endian);
+    // `String.intern()` is the Java face of the VM's intern table; the same table `ldc` uses,
+    // so an interned literal and `"literal".intern()` are one object.
+    shared.register_native(
+        "java/lang/String",
+        "intern",
+        "()Ljava/lang/String;",
+        intern_string,
+    );
+    // `Class.forName` is how the library loads optional providers (`Locale`'s, for one); the
+    // bootstrap loader is the only loader this VM has, and `initialize` runs `<clinit>` through
+    // the interpreter's call seam.
+    shared.register_native(
+        "java/lang/Class",
+        "forName0",
+        "(Ljava/lang/String;ZLjava/lang/ClassLoader;Ljava/lang/Class;)Ljava/lang/Class;",
+        for_name,
+    );
 }
 
 /// `StringUTF16.isBigEndian()`: false on this little-endian host.
 fn is_big_endian(_ctx: &mut NativeCtx<'_>) -> Result<Value, VmError> {
     Ok(Value::Int(0))
+}
+
+/// `Class.forName0(String, boolean, ClassLoader, Class)`: load a class by binary name from the
+/// host image, running `<clinit>` when asked. Loaders are not modelled, so the loader and caller
+/// arguments are ignored.
+fn for_name(ctx: &mut NativeCtx<'_>) -> Result<Value, VmError> {
+    let args = expect_args::<4>(ctx)?;
+    let (name, initialize) = (args[0], args[1]);
+    let name_reference = name.as_ref().ok_or(VmError::TypeMismatch {
+        expected: "a class name String",
+        found: name,
+    })?;
+    let name = ctx.shared.string_text(name_reference)?;
+    let binary = name.replace('.', "/");
+    let class = if binary.starts_with('[') {
+        return Ok(Value::Ref(ctx.shared.type_class(ctx.path, &binary)?));
+    } else {
+        ctx.shared.load_class(ctx.path, &binary)?
+    };
+    if initialize.as_int().unwrap_or(0) != 0 {
+        initialize_class(ctx, class)?;
+    }
+    Ok(Value::Ref(ctx.shared.class_object(ctx.path, class)?))
+}
+
+/// Runs `<clinit>` (superclass first, JVMS §5.5) through the interpreter's call seam, which is
+/// what `Class.forName(name, true, ...)` promises.
+fn initialize_class(ctx: &mut NativeCtx<'_>, class: ClassId) -> Result<(), VmError> {
+    if let Some(parent) = ctx.shared.class(class).super_class {
+        initialize_class(ctx, parent)?;
+    }
+    match ctx.shared.begin_initialization(class) {
+        rava_vm::Initialization::AlreadyDone => Ok(()),
+        rava_vm::Initialization::Erroneous => Err(VmError::JavaException {
+            class: "java/lang/NoClassDefFoundError".to_owned(),
+            message: Some(format!(
+                "Could not initialize class {}",
+                ctx.shared.class(class).name
+            )),
+        }),
+        rava_vm::Initialization::Run(index) => {
+            let invoker = ctx.shared.invoker.ok_or_else(|| {
+                VmError::Native("Class.forName needs the interpreter's call seam".to_owned())
+            })?;
+            invoker(ctx.shared, ctx.thread, ctx.path, class, index, Vec::new())?;
+            ctx.shared.finish_initialization(class);
+            Ok(())
+        }
+    }
+}
+
+/// `String.intern()`: the canonical reference for the receiver's text.
+fn intern_string(ctx: &mut NativeCtx<'_>) -> Result<Value, VmError> {
+    let [this] = expect_args::<1>(ctx)?;
+    let reference = this.as_ref().ok_or(VmError::TypeMismatch {
+        expected: "a String",
+        found: *this,
+    })?;
+    let text = ctx.shared.string_text(reference)?;
+    let interned = ctx.shared.intern(ctx.path, &text)?;
+    Ok(Value::Ref(interned))
 }
 
 /// `Object.getClass()`: the class object of the receiver's runtime class.

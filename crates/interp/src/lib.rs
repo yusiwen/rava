@@ -509,21 +509,26 @@ fn invoke(
         };
     }
 
-    // `synchronized` on the method holds the monitor for the whole body (JVMS §2.11.10).
-    // A static synchronized method would lock its Class object, which this VM does not have.
+    // `synchronized` on the method holds the monitor for the whole body (JVMS §2.11.10). An
+    // instance method locks the receiver; a static method locks its Class object, which the VM
+    // has had since S9 (`Locale.getFormatLocale` is the first static synchronized method the
+    // library calls on the paths this VM reaches).
     let monitor = if access_flags & rava_vm::class::ACC_SYNCHRONIZED != 0 {
-        match args.first().copied().and_then(Value::as_ref) {
-            Some(reference) if !reference.is_null() => {
-                shared.monitor_enter(reference, thread.id)?;
-                Some(reference)
+        let lock = if access_flags & rava_vm::class::ACC_STATIC != 0 {
+            shared.class_object(path, class)?
+        } else {
+            match args.first().copied().and_then(Value::as_ref) {
+                Some(reference) if !reference.is_null() => reference,
+                _ => {
+                    return Err(VmError::Unsupported {
+                        feature: "synchronized instance method",
+                        detail: format!("{qualified} was called with a null receiver"),
+                    });
+                }
             }
-            _ => {
-                return Err(VmError::Unsupported {
-                    feature: "synchronized static method",
-                    detail: format!("{qualified} would lock its Class object"),
-                });
-            }
-        }
+        };
+        shared.monitor_enter(lock, thread.id)?;
+        Some(lock)
     } else {
         None
     };
@@ -1088,22 +1093,37 @@ fn run_frame(
                     // A lambda has no class of its own: calling its functional interface method
                     // runs the captured implementation with the call's arguments appended.
                     if !is_static && let Some(Value::Ref(receiver)) = args.first().copied() {
-                        let lambda = match shared.heap.get(receiver.index()) {
-                            Some(HeapObject::Lambda(lambda)) => Some((
-                                lambda.target_class,
-                                lambda.target_method,
-                                lambda.captured.clone(),
-                            )),
-                            _ => None,
-                        };
-                        if let Some((target_class, target_method, mut full)) = lambda {
-                            full.extend_from_slice(&args[1..]);
-                            let result =
-                                invoke(shared, thread, path, target_class, target_method, full)?;
-                            if !target.descriptor.ends_with('V') {
-                                thread.frames[frame_index].stack.push(result);
+                        let lambda = lambda_target(shared, receiver);
+                        if let Some((
+                            interface,
+                            sam_name,
+                            sam_descriptor,
+                            target_class,
+                            target_method,
+                            captured,
+                        )) = lambda
+                        {
+                            // Only the functional interface method runs the lambda body. Any
+                            // other call on the object (a default method such as
+                            // `CharPredicate.union`) must dispatch normally — otherwise the
+                            // lambda's own parameter list is fed a foreign argument list.
+                            if target.name == sam_name && target.descriptor == sam_descriptor {
+                                let mut full = captured;
+                                full.extend_from_slice(&args[1..]);
+                                let result = invoke(
+                                    shared,
+                                    thread,
+                                    path,
+                                    target_class,
+                                    target_method,
+                                    full,
+                                )?;
+                                if !target.descriptor.ends_with('V') {
+                                    thread.frames[frame_index].stack.push(result);
+                                }
+                                return Ok(Step::Continue);
                             }
-                            return Ok(Step::Continue);
+                            let _ = interface;
                         }
                     }
 
@@ -1245,6 +1265,8 @@ fn run_frame(
                         rava_vm::CallSite::Lambda {
                             target_class,
                             target_method,
+                            sam_name,
+                            sam_descriptor,
                         } => {
                             let count = resolve::parameter_count(&call_site.descriptor);
                             let mut captured = Vec::with_capacity(count);
@@ -1256,7 +1278,23 @@ fn run_frame(
                                 )?);
                             }
                             captured.reverse();
+                            // The call site's return type is the functional interface:
+                            // `()LPattern$CharPredicate;` makes the lambda a `CharPredicate`,
+                            // which is its runtime class for dispatch and `instanceof`.
+                            let return_type = call_site
+                                .descriptor
+                                .split_once(')')
+                                .map(|(_, returns)| returns)
+                                .unwrap_or("");
+                            let interface_name = return_type
+                                .strip_prefix('L')
+                                .and_then(|name| name.strip_suffix(';'))
+                                .unwrap_or(return_type);
+                            let interface = shared.load_class(path, interface_name)?;
                             let reference = shared.allocate(HeapObject::Lambda(rava_vm::Lambda {
+                                interface,
+                                sam_name,
+                                sam_descriptor,
                                 target_class,
                                 target_method,
                                 captured,
@@ -1592,21 +1630,35 @@ pub fn invoke_from_native(
     args: Vec<Value>,
 ) -> Result<Value, VmError> {
     // A native call has no caller frame, so the lambda interception that lives in the
-    // `invoke*` instruction arm cannot run: do it here as well.
+    // `invoke*` instruction arm cannot run: do it here as well, and only for the SAM method.
     if let Some(Value::Ref(receiver)) = args.first().copied() {
-        if let Some(lambda) = lambda_target(shared, receiver) {
-            let mut full = lambda.2;
-            full.extend_from_slice(&args[1..]);
-            return invoke(shared, thread, path, lambda.0, lambda.1, full);
+        if let Some((interface, sam_name, sam_descriptor, target_class, target_method, captured)) =
+            lambda_target(shared, receiver)
+        {
+            let _ = interface;
+            let (name, descriptor) = {
+                let method = &shared.class(class).methods[method_index];
+                (method.name.clone(), method.descriptor.clone())
+            };
+            if name == sam_name && descriptor == sam_descriptor {
+                let mut full = captured;
+                full.extend_from_slice(&args[1..]);
+                return invoke(shared, thread, path, target_class, target_method, full);
+            }
         }
     }
     invoke(shared, thread, path, class, method_index, args)
 }
 
 /// `(target_class, target_method, captured)` if the reference is a lambda.
-fn lambda_target(shared: &Shared, reference: ObjRef) -> Option<(ClassId, usize, Vec<Value>)> {
+type LambdaTarget = (ClassId, String, String, ClassId, usize, Vec<Value>);
+
+fn lambda_target(shared: &Shared, reference: ObjRef) -> Option<LambdaTarget> {
     match shared.heap.get(reference.index()) {
         Some(HeapObject::Lambda(lambda)) => Some((
+            lambda.interface,
+            lambda.sam_name.clone(),
+            lambda.sam_descriptor.clone(),
             lambda.target_class,
             lambda.target_method,
             lambda.captured.clone(),

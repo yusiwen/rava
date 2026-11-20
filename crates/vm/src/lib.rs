@@ -1171,8 +1171,10 @@ impl Shared {
     pub fn class_of(&self, reference: ObjRef) -> Option<ClassId> {
         match self.heap.get(reference.index())? {
             HeapObject::Instance(instance) => Some(instance.class),
+            // A lambda's runtime class is the functional interface it implements, so a default
+            // method called on it resolves there and `instanceof` works.
+            HeapObject::Lambda(lambda) => Some(lambda.interface),
             HeapObject::Array(_)
-            | HeapObject::Lambda(_)
             | HeapObject::FieldRef(_, _)
             | HeapObject::MethodRef(_, _)
             | HeapObject::ConstructorRef(_, _)

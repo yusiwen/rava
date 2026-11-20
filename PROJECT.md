@@ -99,6 +99,7 @@ A slice is done only when all of the following hold:
 | S23 | Bootstrap roots and `VM.savedProps`: autoboxing works and the standard streams survive a collection | R12 | `cargo test -p rava-cli --test boxing` exits 0 | done |
 | S24 | `System.in`: the host `FileInputStream`/`BufferedInputStream` over fd 0, the read natives, and the properties `StaticProperty` needs | R12 | `cargo test -p rava-cli --test stdin` exits 0 | done |
 | S26 | `printStackTrace` compared with the reference launcher; the hidden frames now match HotSpot | R6 | `cargo test -p rava-cli --test print_differential` exits 0 | done |
+| S25 | Lambda dispatch is SAM-only (interface + SAM stored on the lambda); `synchronized static`, `String.intern`, `Class.forName` | R1 | `cargo test -p rava-cli --test lambdas` exits 0 | done |
 | S14 | `System.arraycopy`: primitives and reference arrays, bounds and kind checks, overlap-safe | R4 | `cargo test -p rava-cli --test arraycopy` exits 0 | done |
 | S19 | Java-side stack traces: `fillInStackTrace` fills `Throwable.stackTrace` from the VM's trace | R6 | `cargo test -p rava-cli --test stack_traces` exits 0 | done |
 
@@ -131,6 +132,7 @@ A slice is done only when all of the following hold:
 | S23 | `cargo test -p rava-cli --test boxing` | 0 | 2026-11-20 | [S23 note](docs/notes/S23-bootstrap-roots.md) |
 | S24 | `cargo test -p rava-cli --test stdin` | 0 | 2026-11-20 | [S24 note](docs/notes/S24-system-in.md) |
 | S26 | `cargo test -p rava-cli --test print_differential` | 0 | 2026-11-20 | [S26 note](docs/notes/S26-stack-trace-differential.md) |
+| S25 | `cargo test -p rava-cli --test lambdas` | 0 | 2026-11-20 | [S25 note](docs/notes/S25-lambda-sam.md) |
 | S14 | `cargo test -p rava-cli --test arraycopy` | 0 | 2026-11-20 | [S14 note](docs/notes/S14-arraycopy.md) |
 | S19 | `cargo test -p rava-cli --test stack_traces` | 0 | 2026-11-20 | [S19 note](docs/notes/S19-stack-traces.md) |
 

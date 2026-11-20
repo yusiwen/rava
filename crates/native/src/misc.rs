@@ -24,6 +24,10 @@ pub fn register(shared: &mut Shared) {
         no_op,
     );
     shared.register_native("java/lang/Thread", "registerNatives", "()V", no_op);
+    // `ClassLoader.<clinit>` registers natives and creates the system loader; this VM resolves
+    // classes from the host image, so registration is all it needs (the loader natives it calls
+    // later are answered where they are reached).
+    shared.register_native("java/lang/ClassLoader", "registerNatives", "()V", no_op);
     // `NullPointerException.getMessage` asks the VM for the extended help text HotSpot
     // produces (`-XX:+ShowCodeDetailsInExceptionMessages`). This VM has no such analysis, so
     // the answer is `null` and `getMessage` falls back to the plain constructor message.

@@ -54,6 +54,9 @@ pub enum CallSite {
     Lambda {
         target_class: ClassId,
         target_method: usize,
+        /// The interface method this lambda implements; only calls to it run the target.
+        sam_name: String,
+        sam_descriptor: String,
     },
     /// `ObjectMethods.bootstrap`: a record's `toString`, `equals` or `hashCode`.
     RecordMethod {
@@ -93,6 +96,8 @@ enum Pending {
         owner: String,
         name: String,
         descriptor: String,
+        sam_name: String,
+        sam_descriptor: String,
     },
     /// A `SwitchBootstraps.typeSwitch` call site whose case classes still have to be loaded.
     TypeSwitch {
@@ -167,10 +172,28 @@ pub fn resolve(
                     )
                 })?;
                 let (impl_owner, impl_name, impl_descriptor) = handle_target(pool, handle_index)?;
+                // Bootstrap argument 0 is `samMethodType`, the interface method's descriptor.
+                let sam_type_index = *bootstrap.arguments.first().ok_or_else(|| {
+                    VmError::BadConstantPool(
+                        "LambdaMetafactory has no samMethodType argument".to_owned(),
+                    )
+                })?;
+                let sam_descriptor = match pool.get(sam_type_index)? {
+                    Constant::MethodType { descriptor_index } => {
+                        pool.utf8(*descriptor_index)?.to_owned()
+                    }
+                    other => {
+                        return Err(VmError::BadConstantPool(format!(
+                            "LambdaMetafactory's first argument is {other:?}, expected a MethodType"
+                        )));
+                    }
+                };
                 Pending::Lambda {
                     owner: impl_owner,
                     name: impl_name,
                     descriptor: impl_descriptor,
+                    sam_name: name.to_owned(),
+                    sam_descriptor,
                 }
             }
             ("java/lang/runtime/SwitchBootstraps", "typeSwitch") => {
@@ -287,6 +310,8 @@ pub fn resolve(
             owner,
             name,
             descriptor,
+            sam_name,
+            sam_descriptor,
         } => {
             let target_class = shared.load_class(path, &owner)?;
             let (target_class, target_method) = shared
@@ -296,9 +321,13 @@ pub fn resolve(
                     name,
                     descriptor,
                 })?;
+            // The call site's name is the SAM name (javac puts it in the `invokedynamic`
+            // NameAndType); the bootstrap's `samMethodType` gave the descriptor.
             CallSite::Lambda {
                 target_class,
                 target_method,
+                sam_name,
+                sam_descriptor,
             }
         }
     };
