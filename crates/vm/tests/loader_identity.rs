@@ -33,7 +33,7 @@ fn class_dir(name: &str) -> PathBuf {
 #[test]
 fn directory_source_loads_a_class() {
     let root = manifest_dir().join("../classfile/tests/fixtures");
-    let mut vm = Shared::with_bootstrap(Arc::new(DirectorySource::new(root)));
+    let vm = Shared::with_bootstrap(Arc::new(DirectorySource::new(root)));
 
     let id = vm.load_class(LoaderId::BOOTSTRAP, "Hello").unwrap();
     let entry = vm.entry(id).unwrap();
@@ -45,7 +45,7 @@ fn directory_source_loads_a_class() {
 #[test]
 fn jar_source_loads_a_deflated_class() {
     let source = JarSource::open(hello_jar()).unwrap();
-    let mut vm = Shared::with_bootstrap(Arc::new(source));
+    let vm = Shared::with_bootstrap(Arc::new(source));
 
     let id = vm.load_class(LoaderId::BOOTSTRAP, "Hello").unwrap();
     assert_eq!(vm.entry(id).unwrap().name, "Hello");
@@ -56,7 +56,7 @@ fn same_name_in_two_loaders_has_two_identities() {
     let bootstrap = scratch("bootstrap-empty");
     let left = class_dir("left");
     let right = class_dir("right");
-    let mut vm = Shared::with_bootstrap(Arc::new(DirectorySource::new(bootstrap)));
+    let vm = Shared::with_bootstrap(Arc::new(DirectorySource::new(bootstrap)));
 
     let left_loader = vm
         .add_loader(LoaderId::BOOTSTRAP, Arc::new(DirectorySource::new(left)))
@@ -78,7 +78,7 @@ fn same_name_in_two_loaders_has_two_identities() {
 fn parent_delegation_wins_over_the_application_source() {
     let bootstrap = class_dir("bootstrap-parent");
     let app = class_dir("app-child");
-    let mut vm = Shared::with_bootstrap(Arc::new(DirectorySource::new(bootstrap)));
+    let vm = Shared::with_bootstrap(Arc::new(DirectorySource::new(bootstrap)));
     let app_loader = vm
         .add_loader(LoaderId::BOOTSTRAP, Arc::new(DirectorySource::new(app)))
         .unwrap();
@@ -90,7 +90,7 @@ fn parent_delegation_wins_over_the_application_source() {
 #[test]
 fn define_class_records_the_defining_loader_and_rejects_duplicates() {
     let bootstrap = scratch("define-bootstrap");
-    let mut vm = Shared::with_bootstrap(Arc::new(DirectorySource::new(bootstrap)));
+    let vm = Shared::with_bootstrap(Arc::new(DirectorySource::new(bootstrap)));
     let app = vm
         .add_loader(
             LoaderId::BOOTSTRAP,
@@ -110,7 +110,7 @@ fn define_class_records_the_defining_loader_and_rejects_duplicates() {
 #[test]
 fn a_missing_class_is_reported_with_its_loader() {
     let bootstrap = scratch("missing-bootstrap");
-    let mut vm = Shared::with_bootstrap(Arc::new(DirectorySource::new(bootstrap)));
+    let vm = Shared::with_bootstrap(Arc::new(DirectorySource::new(bootstrap)));
     assert!(matches!(
         vm.load_class(LoaderId::BOOTSTRAP, "Missing"),
         Err(VmError::ClassNotFound { .. })

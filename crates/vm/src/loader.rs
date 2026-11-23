@@ -1,7 +1,7 @@
 //! Class identity and loader delegation.
 //!
-//! Identity is `(defining loader, binary name)`, never a bare name. The table is
-//! keyed by that pair so two loaders can define the same name independently.
+//! Identity is `(defining loader, binary name)`, never a bare name. The class table
+//! is keyed by that pair so two loaders can define the same name independently.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -51,19 +51,17 @@ struct Loader {
     source: Arc<dyn ClassSource>,
 }
 
-/// The class table and its loaders.
-///
-/// This is the M0 shape: identities and sources are fixed now; heap state and the
-/// interpreter attach to the same table in the next slices.
+/// The class table. [`crate::Shared`] owns it behind an `RwLock`; nothing outside
+/// this module mutates it directly.
 #[derive(Debug)]
-pub struct Shared {
+pub(crate) struct ClassTable {
     loaders: Vec<Loader>,
     classes: HashMap<ClassKey, ClassId>,
-    entries: Vec<ClassEntry>,
+    entries: Vec<Arc<ClassEntry>>,
 }
 
-impl Shared {
-    pub fn with_bootstrap(source: Arc<dyn ClassSource>) -> Self {
+impl ClassTable {
+    pub(crate) fn with_bootstrap(source: Arc<dyn ClassSource>) -> Self {
         Self {
             loaders: vec![Loader {
                 parent: None,
@@ -74,11 +72,7 @@ impl Shared {
         }
     }
 
-    pub fn bootstrap(&self) -> LoaderId {
-        LoaderId::BOOTSTRAP
-    }
-
-    pub fn add_loader(
+    pub(crate) fn add_loader(
         &mut self,
         parent: LoaderId,
         source: Arc<dyn ClassSource>,
@@ -97,7 +91,7 @@ impl Shared {
         Ok(id)
     }
 
-    pub fn lookup(&self, loader: LoaderId, name: &str) -> Option<ClassId> {
+    pub(crate) fn lookup(&self, loader: LoaderId, name: &str) -> Option<ClassId> {
         self.classes
             .get(&ClassKey {
                 loader,
@@ -106,15 +100,15 @@ impl Shared {
             .copied()
     }
 
-    pub fn entry(&self, id: ClassId) -> Option<&ClassEntry> {
+    pub(crate) fn entry(&self, id: ClassId) -> Option<&Arc<ClassEntry>> {
         self.entries.get(id.index())
     }
 
-    pub fn class_count(&self) -> usize {
+    pub(crate) fn class_count(&self) -> usize {
         self.entries.len()
     }
 
-    pub fn load_class(&mut self, loader: LoaderId, name: &str) -> Result<ClassId, VmError> {
+    pub(crate) fn load_class(&mut self, loader: LoaderId, name: &str) -> Result<ClassId, VmError> {
         self.require_loader(loader)?;
         let chain = self.chain(loader);
 
@@ -138,7 +132,7 @@ impl Shared {
         })
     }
 
-    pub fn define_class(
+    pub(crate) fn define_class(
         &mut self,
         loader: LoaderId,
         name: &str,
@@ -159,12 +153,12 @@ impl Shared {
         let file = Arc::new(ClassFile::parse(bytes)?);
         let id = ClassId(self.entries.len() as u32);
         self.classes.insert(key, id);
-        self.entries.push(ClassEntry {
+        self.entries.push(Arc::new(ClassEntry {
             id,
             loader,
             name: name.to_owned(),
             file,
-        });
+        }));
         Ok(id)
     }
 
