@@ -4,9 +4,9 @@ A Java 17 runtime in Rust, built to run Spring — not just a corpus.
 
 ## Status
 
-**Decisions accepted (2026-11-23). M0.1 is in place: the Cargo workspace, crates and
-the `cargo xtask ci` gate exist. The runtime itself is not built yet.** M0.2, the
-class-file parser with full metadata retention, is next.
+**Decisions accepted (2026-11-23). M0.1 (workspace) and M0.2 (class-file parser) are
+in place; the runtime itself is not built yet.** M0.3, ClassSource and
+`(loader, name)` identity, is next.
 
 ## What this project is
 
