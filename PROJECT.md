@@ -5,9 +5,9 @@
 **License:** MIT
 **Started:** 2026-11-22
 
-> Ledger. P0 and P1 were accepted on 2026-11-23. M0.1 (workspace) and M0.2
-> (class-file parser) are committed; the runtime itself is not built yet. Keep this file
-> honest and terse.
+> Ledger. P0 and P1 were accepted on 2026-11-23. M0.1 (workspace), M0.2 (parser)
+> and M0.3 (class sources and loader identity) are committed; the runtime itself is not
+> built yet. Keep this file honest and terse.
 
 ## Phase status
 
@@ -47,7 +47,7 @@ release process, if wanted, becomes its own phase.
 | :--- | :--- | :--- | :--- | :--- |
 | M0.1 | Cargo workspace, toolchain, crates and the `xtask ci` gate | R13 | `cargo xtask ci` exits 0 | done |
 | M0.2 | Class-file parser with full metadata retention | R13 | `cargo test -p rava-classfile` exits 0 | done |
-| M0.3 | ClassSource and `(loader, name)` class identity | R13 | `cargo test -p rava-vm --test loader_identity` exits 0 | todo |
+| M0.3 | ClassSource and `(loader, name)` class identity | R13 | `cargo test -p rava-vm --test loader_identity` exits 0 | done |
 | M0.4 | Heap handles, field layout and the `Shared`/`ThreadState` seams | R13 | `cargo test -p rava-vm --test heap_handles` exits 0 | todo |
 | M0.5 | Decoded IR, frames, call sites and Hello through the interpreter | R13 | `cargo test -p rava-interp --test hello` exits 0 | todo |
 | M0.6 | Safepoint polling, GC roots and the no-lock-across-Java-call invariant | R13 | `cargo test -p rava-vm --test safepoints` exits 0 | todo |
@@ -62,6 +62,7 @@ the only completed slice.
 | :--- | :--- | :--- | :--- | :--- |
 | M0.1 | `cargo xtask ci` | 0 | 2026-11-24 | Workspace, crates and the local gate; no runtime behavior yet |
 | M0.2 | `cargo test -p rava-classfile` | 0 | 2026-11-24 | Parser ported; raw attributes retained; 13 tests pass |
+| M0.3 | `cargo test -p rava-vm --test loader_identity` | 0 | 2026-11-24 | Directory and DEFLATE jar sources; parent-first delegation; 6 tests pass |
 
 ## Codebase
 
@@ -92,7 +93,7 @@ A fresh session should:
 
 1. Read `README.md`, `docs/requirements.md` and `docs/open-questions.md`.
 2. Read the ADRs in order; 0001–0005 are the project-defining decisions.
-3. M0.1 and M0.2 are done; the next slice is M0.3 (ClassSource and `(loader, name)` identity).
+3. M0.1–M0.3 are done; the next slice is M0.4 (heap handles, field layout and the `Shared`/`ThreadState` seams).
 4. Do not write runtime code outside an M0 slice.
 
 ## Open decisions

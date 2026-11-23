@@ -4,9 +4,9 @@ A Java 17 runtime in Rust, built to run Spring — not just a corpus.
 
 ## Status
 
-**Decisions accepted (2026-11-23). M0.1 (workspace) and M0.2 (class-file parser) are
-in place; the runtime itself is not built yet.** M0.3, ClassSource and
-`(loader, name)` identity, is next.
+**Decisions accepted (2026-11-23). M0.1–M0.3 are in place: workspace, class-file
+parser, and class sources with `(loader, name)` identity. The runtime itself is not
+built yet.** M0.4, heap handles and the `Shared`/`ThreadState` seams, is next.
 
 ## What this project is
 
