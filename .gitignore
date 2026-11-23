@@ -1,0 +1,7 @@
+/target
+/.direnv
+/result
+/result-*
+**/*.rs.bk
+.DS_Store
+/.worktrees

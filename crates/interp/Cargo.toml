@@ -1,0 +1,10 @@
+[package]
+name = "rava-interp"
+description = "Bytecode decoding and interpretation for rava"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+
+[dependencies]

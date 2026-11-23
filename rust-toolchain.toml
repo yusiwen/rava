@@ -1,0 +1,4 @@
+# Pin the compiler for local builds and CI.
+[toolchain]
+channel = "1.100.0"
+components = ["clippy", "rustfmt", "rust-src", "rust-analyzer"]

@@ -5,8 +5,8 @@
 **License:** MIT
 **Started:** 2026-11-22
 
-> Ledger. Nothing is committed and there is no runtime code yet. P0 and P1 were
-> accepted on 2026-11-23; implementation starts with M1. Keep this file honest and terse.
+> Ledger. P0 and P1 were accepted on 2026-11-23. The M0.1 workspace skeleton is
+> committed; the runtime itself is not built yet. Keep this file honest and terse.
 
 ## Phase status
 
@@ -14,7 +14,7 @@
 | :--- | :--- | :--- | :--- | :--- |
 | P0 | Requirements confirmed by the human | `docs/requirements.md` | human | done |
 | P1 | Decisions recorded and accepted | `docs/adr/` | human | done |
-| P2 | Work sliced into verifiable increments | `PROJECT.md` | self | todo |
+| P2 | Work sliced into verifiable increments | `PROJECT.md` | self | done |
 | P3 | Every slice implemented | code + commits | self | todo |
 | P4 | Tests pass, definition of done met | test suite | self | todo |
 | P5 | Deployed, smoke-tested, rollback ready | `docs/deploy.md` | human | n/a |
@@ -29,7 +29,7 @@ release process, if wanted, becomes its own phase.
 
 | Milestone | Delivers | Gate | Status |
 | :--- | :--- | :--- | :--- |
-| M0 | Foundation: parser/model, loader/ClassSource, heap/IR, Shared/ThreadState, safepoints, native registry, MemoryRegion | Hello + small corpus; metadata dump; loader identity; no-lock invariant | todo |
+| M0 | Foundation: parser/model, loader/ClassSource, heap/IR, Shared/ThreadState, safepoints, native registry, MemoryRegion | Hello + small corpus; metadata dump; loader identity; no-lock invariant | in-progress |
 | M1 | Surface manifest, target lock, `link-check` | Manifest reproducible; unresolved = 0 | todo |
 | M2 | C1 metadata, minimal library, Spring context | Metadata diff 0; bean graph starts | todo |
 | M3 | C2 dynamic code: Proxy, CGLIB, Objenesis, `Lookup`, `Unsafe` U0 | C2 suite exits 0 | todo |
@@ -44,10 +44,22 @@ release process, if wanted, becomes its own phase.
 
 | Id | Slice | Requirements | Acceptance command | Status |
 | :--- | :--- | :--- | :--- | :--- |
-| — | No slice is defined yet | — | — | — |
+| M0.1 | Cargo workspace, toolchain, crates and the `xtask ci` gate | R13 | `cargo xtask ci` exits 0 | done |
+| M0.2 | Class-file parser with full metadata retention | R13 | `cargo test -p rava-classfile` exits 0 | todo |
+| M0.3 | ClassSource and `(loader, name)` class identity | R13 | `cargo test -p rava-vm --test loader_identity` exits 0 | todo |
+| M0.4 | Heap handles, field layout and the `Shared`/`ThreadState` seams | R13 | `cargo test -p rava-vm --test heap_handles` exits 0 | todo |
+| M0.5 | Decoded IR, frames, call sites and Hello through the interpreter | R13 | `cargo test -p rava-interp --test hello` exits 0 | todo |
+| M0.6 | Safepoint polling, GC roots and the no-lock-across-Java-call invariant | R13 | `cargo test -p rava-vm --test safepoints` exits 0 | todo |
+| M0.7 | Verifier dataflow skeleton and the metadata dump fixture | R13 | `cargo test -p rava-vm --test verifier_skeleton` exits 0 | todo |
 
-P0 and P1 are accepted. Slices are created per milestone; the first is M0, with a
-runnable acceptance command.
+P0 and P1 are accepted; P2 is done because the M0 increments are now sliced. M0.1 is
+the only completed slice.
+
+## Slice log
+
+| Slice | Acceptance command | Exit | Date | Evidence |
+| :--- | :--- | :--- | :--- | :--- |
+| M0.1 | `cargo xtask ci` | 0 | 2026-11-24 | Workspace, crates and the local gate; no runtime behavior yet |
 
 ## Codebase
 
@@ -78,8 +90,7 @@ A fresh session should:
 
 1. Read `README.md`, `docs/requirements.md` and `docs/open-questions.md`.
 2. Read the ADRs in order; 0001–0005 are the project-defining decisions.
-3. P0 and P1 are accepted; the next work is the M0 foundation slice, with an
-   acceptance command.
+3. M0.1 is done; the next slice is M0.2 (class-file parser with metadata retention).
 4. Do not write runtime code outside an M0 slice.
 
 ## Open decisions

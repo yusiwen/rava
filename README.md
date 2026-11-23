@@ -4,9 +4,9 @@ A Java 17 runtime in Rust, built to run Spring — not just a corpus.
 
 ## Status
 
-**Decisions accepted (2026-11-23). There is no runtime code in this repository yet,
-and nothing is committed.** The requirements are approved (P0) and the ADRs are
-accepted (P1); implementation starts with M0 foundation.
+**Decisions accepted (2026-11-23). M0.1 is in place: the Cargo workspace, crates and
+the `cargo xtask ci` gate exist. The runtime itself is not built yet.** M0.2, the
+class-file parser with full metadata retention, is next.
 
 ## What this project is
 
@@ -60,6 +60,14 @@ remain as a decision record.
 The implementation may reuse existing Rust components (class-file parser, instruction
 model, interpreter) where they fit. Every imported component is re-reviewed against
 this project's requirements and ADRs; no decision record is imported with the code.
+
+## Development
+
+The Rust toolchain is pinned by `rust-toolchain.toml`; the local gate is:
+
+```sh
+cargo xtask ci
+```
 
 ## License
 
