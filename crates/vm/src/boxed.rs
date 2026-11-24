@@ -1,156 +1,366 @@
-//! Boxed primitive values and the `java.lang.Integer` natives (M2.10).
+//! Boxed primitive values and the primitive-wrapper natives (M2.10, M2.25).
 //!
-//! A box is [`crate::HeapObject::Boxed`] holding a [`BoxedPrimitive::Integer`]. It is an
-//! ordinary heap object rather than a second [`crate::Value`] variant, so it can live in
-//! an `Object`-typed slot, `getClass` reports `java.lang.Integer`, and
-//! `java.lang.Object`'s reference-identity methods still apply when they are reached
-//! directly. The registry entries here override the C1 stub, which carries neither
-//! `Code` nor, for most methods, `ACC_NATIVE`.
+//! A box is [`crate::HeapObject::Boxed`] holding a [`BoxedPrimitive`]. It is an ordinary
+//! heap object rather than a second [`crate::Value`] variant, so it can live in an
+//! `Object`-typed slot, `getClass` reports the boxed class, and `java.lang.Object`'s
+//! reference-identity methods still apply when they are reached directly. The registry
+//! entries here override the C1 stub, which carries neither `Code` nor, for most methods,
+//! `ACC_NATIVE`.
 //!
-//! M2.10 models one box. `Boolean` and `Long` boxes, the small-integer cache, the
-//! `String`-taking `valueOf`/`parseInt` overloads and the unsigned/format families are
-//! later slices. [`unbox_argument`] and [`box_result`] are the two conversion helpers the
-//! reflective invocation path shares: `int` is boxed and unboxed, a reference is passed
-//! through with its [`crate::ObjRef`] untouched, and every other primitive descriptor is
-//! a typed error rather than a guess.
+//! M2.25 models the whole family: `Byte`, `Short`, `Integer`, `Long`, `Float` and
+//! `Double` (the `java.lang.Number` subclasses, with every accessor the JDK defines)
+//! plus `Character` and `Boolean`. Each wrapper gets `valueOf`, its `xxxValue` accessors,
+//! `parseXxx`, both `toString` forms, `equals`, `hashCode` and `compareTo`/`compare`.
+//! There is no small-value cache, so every `valueOf` allocates a new object. A malformed
+//! `parseXxx` is a typed [`crate::VmError::Native`], not a synthesized
+//! `NumberFormatException`. The float parsers are Rust's: a hex floating literal is
+//! rejected, and the case-insensitive `inf`/`infinity`/`nan` spellings are accepted where
+//! Java's grammar is `Infinity`/`NaN`; the integer parsers accept ASCII digits only.
+//!
+//! [`unbox_argument`] and [`box_result`] are the two conversion helpers the reflective
+//! invocation path shares: every primitive descriptor is boxed and unboxed through its
+//! own wrapper, a numeric parameter accepts a narrower numeric wrapper by Java's widening
+//! rule (JLS §5.3), a reference is passed through with its [`crate::ObjRef`] untouched,
+//! and a box of the wrong kind is a typed error rather than a guess.
 
 use crate::VmError;
-use crate::heap::{BoxedPrimitive, HeapError, HeapObject, ObjRef};
+use crate::heap::{BoxedPrimitive, HeapError, ObjRef, canonical_double_bits, canonical_float_bits};
 use crate::loader::LoaderId;
 use crate::shared::Shared;
 use crate::thread::ThreadState;
 use crate::value::Value;
 
-/// Registers the M2.10 `java.lang.Integer` natives.
+/// Registers the primitive wrapper and `java.lang.Number` natives.
 ///
-/// The entries are keyed by the class that declares the Java method. `valueOf`,
-/// `parseInt`, the static `toString(int)` and the boxing conversions are
-/// `invokestatic` targets; `intValue`, `toString()`, `equals`, `hashCode` and
-/// `compareTo(Integer)` are `invokevirtual` targets on a boxed receiver.
+/// The entries are keyed by the class that declares the Java method. `valueOf`, the
+/// `parse*` family and the static `toString`/`hashCode`/`compare` helpers are
+/// `invokestatic` targets; `xxxValue`, `toString()`, `equals`, `hashCode` and
+/// `compareTo(same box)` are `invokevirtual` targets on a boxed receiver.
+///
+/// The `Number` accessors are registered twice on purpose: on each numeric wrapper
+/// (where the JDK declares an override) and on `java.lang.Number` itself, so a call that
+/// resolves to the abstract superclass still finds an implementation.
 pub fn register_natives(shared: &Shared) {
+    register_integer_natives(shared);
+    register_byte_natives(shared);
+    register_short_natives(shared);
+    register_long_natives(shared);
+    register_float_natives(shared);
+    register_double_natives(shared);
+    register_number_natives(shared);
+    register_character_natives(shared);
+    register_boolean_natives(shared);
+}
+
+/// Register the `java.lang.Integer` natives plus its inherited `Number` accessors.
+fn register_integer_natives(shared: &Shared) {
+    let class = "java/lang/Integer";
+    shared.register_native(class, "valueOf", "(I)Ljava/lang/Integer;", integer_value_of);
     shared.register_native(
-        "java/lang/Integer",
+        class,
         "valueOf",
-        "(I)Ljava/lang/Integer;",
-        integer_value_of,
-    );
-    shared.register_native("java/lang/Integer", "intValue", "()I", integer_int_value);
-    shared.register_native(
-        "java/lang/Integer",
-        "toString",
-        "()Ljava/lang/String;",
-        integer_to_string,
+        "(Ljava/lang/String;)Ljava/lang/Integer;",
+        integer_value_of_string,
     );
     shared.register_native(
-        "java/lang/Integer",
+        class,
+        "valueOf",
+        "(Ljava/lang/String;I)Ljava/lang/Integer;",
+        integer_value_of_string_radix,
+    );
+    shared.register_native(class, "intValue", "()I", box_int_value);
+    shared.register_native(class, "toString", "()Ljava/lang/String;", box_to_string);
+    shared.register_native(
+        class,
         "toString",
         "(I)Ljava/lang/String;",
         integer_to_string_of,
     );
+    shared.register_native(class, "equals", "(Ljava/lang/Object;)Z", box_equals);
+    shared.register_native(class, "hashCode", "()I", box_hash_code);
+    shared.register_native(class, "hashCode", "(I)I", integer_hash_code_of);
+    shared.register_native(class, "compareTo", "(Ljava/lang/Integer;)I", box_compare_to);
+    shared.register_native(class, "compare", "(II)I", integer_compare);
     shared.register_native(
-        "java/lang/Integer",
-        "equals",
-        "(Ljava/lang/Object;)Z",
-        integer_equals,
-    );
-    shared.register_native("java/lang/Integer", "hashCode", "()I", integer_hash_code);
-    shared.register_native(
-        "java/lang/Integer",
-        "compareTo",
-        "(Ljava/lang/Integer;)I",
-        integer_compare_to,
-    );
-    register_character_natives(shared);
-    shared.register_native(
-        "java/lang/Boolean",
-        "valueOf",
-        "(Z)Ljava/lang/Boolean;",
-        boolean_value_of,
-    );
-    shared.register_native(
-        "java/lang/Boolean",
-        "booleanValue",
-        "()Z",
-        boolean_boolean_value,
-    );
-    shared.register_native(
-        "java/lang/Boolean",
-        "parseBoolean",
-        "(Ljava/lang/String;)Z",
-        boolean_parse,
-    );
-    shared.register_native(
-        "java/lang/Boolean",
-        "toString",
-        "(Z)Ljava/lang/String;",
-        boolean_to_string_of,
-    );
-    shared.register_native(
-        "java/lang/Boolean",
-        "toString",
-        "()Ljava/lang/String;",
-        boolean_to_string,
-    );
-    shared.register_native("java/lang/Boolean", "hashCode", "()I", boolean_hash_code);
-    shared.register_native(
-        "java/lang/Boolean",
-        "equals",
-        "(Ljava/lang/Object;)Z",
-        boolean_equals,
-    );
-    shared.register_native(
-        "java/lang/Character",
-        "valueOf",
-        "(C)Ljava/lang/Character;",
-        character_value_of,
-    );
-    shared.register_native(
-        "java/lang/Character",
-        "charValue",
-        "()C",
-        character_char_value,
-    );
-    shared.register_native(
-        "java/lang/Character",
-        "toString",
-        "()Ljava/lang/String;",
-        character_box_to_string,
-    );
-    shared.register_native(
-        "java/lang/Character",
-        "hashCode",
-        "()I",
-        character_hash_code,
-    );
-    shared.register_native(
-        "java/lang/Character",
-        "equals",
-        "(Ljava/lang/Object;)Z",
-        character_equals,
-    );
-    shared.register_native(
-        "java/lang/Integer",
+        class,
         "toHexString",
         "(I)Ljava/lang/String;",
         integer_to_hex_string,
     );
     shared.register_native(
-        "java/lang/Integer",
+        class,
         "toBinaryString",
         "(I)Ljava/lang/String;",
         integer_to_binary_string,
     );
     shared.register_native(
-        "java/lang/Integer",
+        class,
         "toOctalString",
         "(I)Ljava/lang/String;",
         integer_to_octal_string,
     );
     shared.register_native(
-        "java/lang/Integer",
+        class,
         "parseInt",
         "(Ljava/lang/String;)I",
         integer_parse_int,
+    );
+    shared.register_native(
+        class,
+        "parseInt",
+        "(Ljava/lang/String;I)I",
+        integer_parse_int_radix,
+    );
+    register_number_accessors(shared, class);
+}
+
+/// Register the `java.lang.Byte` natives.
+fn register_byte_natives(shared: &Shared) {
+    let class = "java/lang/Byte";
+    shared.register_native(class, "valueOf", "(B)Ljava/lang/Byte;", byte_value_of);
+    shared.register_native(
+        class,
+        "valueOf",
+        "(Ljava/lang/String;)Ljava/lang/Byte;",
+        byte_value_of_string,
+    );
+    shared.register_native(
+        class,
+        "valueOf",
+        "(Ljava/lang/String;I)Ljava/lang/Byte;",
+        byte_value_of_string_radix,
+    );
+    shared.register_native(class, "byteValue", "()B", box_byte_value);
+    shared.register_native(class, "toString", "()Ljava/lang/String;", box_to_string);
+    shared.register_native(
+        class,
+        "toString",
+        "(B)Ljava/lang/String;",
+        byte_to_string_of,
+    );
+    shared.register_native(class, "equals", "(Ljava/lang/Object;)Z", box_equals);
+    shared.register_native(class, "hashCode", "()I", box_hash_code);
+    shared.register_native(class, "hashCode", "(B)I", byte_hash_code_of);
+    shared.register_native(class, "compareTo", "(Ljava/lang/Byte;)I", box_compare_to);
+    shared.register_native(class, "compare", "(BB)I", byte_compare);
+    shared.register_native(class, "parseByte", "(Ljava/lang/String;)B", byte_parse);
+    shared.register_native(
+        class,
+        "parseByte",
+        "(Ljava/lang/String;I)B",
+        byte_parse_radix,
+    );
+    register_number_accessors(shared, class);
+}
+
+/// Register the `java.lang.Short` natives.
+fn register_short_natives(shared: &Shared) {
+    let class = "java/lang/Short";
+    shared.register_native(class, "valueOf", "(S)Ljava/lang/Short;", short_value_of);
+    shared.register_native(
+        class,
+        "valueOf",
+        "(Ljava/lang/String;)Ljava/lang/Short;",
+        short_value_of_string,
+    );
+    shared.register_native(
+        class,
+        "valueOf",
+        "(Ljava/lang/String;I)Ljava/lang/Short;",
+        short_value_of_string_radix,
+    );
+    shared.register_native(class, "shortValue", "()S", box_short_value);
+    shared.register_native(class, "toString", "()Ljava/lang/String;", box_to_string);
+    shared.register_native(
+        class,
+        "toString",
+        "(S)Ljava/lang/String;",
+        short_to_string_of,
+    );
+    shared.register_native(class, "equals", "(Ljava/lang/Object;)Z", box_equals);
+    shared.register_native(class, "hashCode", "()I", box_hash_code);
+    shared.register_native(class, "hashCode", "(S)I", short_hash_code_of);
+    shared.register_native(class, "compareTo", "(Ljava/lang/Short;)I", box_compare_to);
+    shared.register_native(class, "compare", "(SS)I", short_compare);
+    shared.register_native(class, "parseShort", "(Ljava/lang/String;)S", short_parse);
+    shared.register_native(
+        class,
+        "parseShort",
+        "(Ljava/lang/String;I)S",
+        short_parse_radix,
+    );
+    register_number_accessors(shared, class);
+}
+
+/// Register the `java.lang.Long` natives.
+fn register_long_natives(shared: &Shared) {
+    let class = "java/lang/Long";
+    shared.register_native(class, "valueOf", "(J)Ljava/lang/Long;", long_value_of);
+    shared.register_native(
+        class,
+        "valueOf",
+        "(Ljava/lang/String;)Ljava/lang/Long;",
+        long_value_of_string,
+    );
+    shared.register_native(
+        class,
+        "valueOf",
+        "(Ljava/lang/String;I)Ljava/lang/Long;",
+        long_value_of_string_radix,
+    );
+    shared.register_native(class, "longValue", "()J", box_long_value);
+    shared.register_native(class, "toString", "()Ljava/lang/String;", box_to_string);
+    shared.register_native(
+        class,
+        "toString",
+        "(J)Ljava/lang/String;",
+        long_to_string_of,
+    );
+    shared.register_native(class, "equals", "(Ljava/lang/Object;)Z", box_equals);
+    shared.register_native(class, "hashCode", "()I", box_hash_code);
+    shared.register_native(class, "hashCode", "(J)I", long_hash_code_of);
+    shared.register_native(class, "compareTo", "(Ljava/lang/Long;)I", box_compare_to);
+    shared.register_native(class, "compare", "(JJ)I", long_compare);
+    shared.register_native(class, "parseLong", "(Ljava/lang/String;)J", long_parse);
+    shared.register_native(
+        class,
+        "parseLong",
+        "(Ljava/lang/String;I)J",
+        long_parse_radix,
+    );
+    shared.register_native(
+        class,
+        "toHexString",
+        "(J)Ljava/lang/String;",
+        long_to_hex_string,
+    );
+    register_number_accessors(shared, class);
+}
+
+/// Register the `java.lang.Float` natives.
+fn register_float_natives(shared: &Shared) {
+    let class = "java/lang/Float";
+    shared.register_native(class, "valueOf", "(F)Ljava/lang/Float;", float_value_of);
+    shared.register_native(
+        class,
+        "valueOf",
+        "(Ljava/lang/String;)Ljava/lang/Float;",
+        float_value_of_string,
+    );
+    shared.register_native(class, "floatValue", "()F", box_float_value);
+    shared.register_native(class, "toString", "()Ljava/lang/String;", box_to_string);
+    shared.register_native(
+        class,
+        "toString",
+        "(F)Ljava/lang/String;",
+        float_to_string_of,
+    );
+    shared.register_native(class, "equals", "(Ljava/lang/Object;)Z", box_equals);
+    shared.register_native(class, "hashCode", "()I", box_hash_code);
+    shared.register_native(class, "hashCode", "(F)I", float_hash_code_of);
+    shared.register_native(class, "compareTo", "(Ljava/lang/Float;)I", box_compare_to);
+    shared.register_native(class, "compare", "(FF)I", float_compare);
+    shared.register_native(class, "parseFloat", "(Ljava/lang/String;)F", float_parse);
+    shared.register_native(class, "isNaN", "()Z", box_is_nan);
+    shared.register_native(class, "isNaN", "(F)Z", float_is_nan);
+    shared.register_native(class, "isInfinite", "()Z", box_is_infinite);
+    shared.register_native(class, "isInfinite", "(F)Z", float_is_infinite);
+    shared.register_native(class, "isFinite", "(F)Z", float_is_finite);
+    shared.register_native(class, "floatToIntBits", "(F)I", float_to_int_bits);
+    register_number_accessors(shared, class);
+}
+
+/// Register the `java.lang.Double` natives.
+fn register_double_natives(shared: &Shared) {
+    let class = "java/lang/Double";
+    shared.register_native(class, "valueOf", "(D)Ljava/lang/Double;", double_value_of);
+    shared.register_native(
+        class,
+        "valueOf",
+        "(Ljava/lang/String;)Ljava/lang/Double;",
+        double_value_of_string,
+    );
+    shared.register_native(class, "doubleValue", "()D", box_double_value);
+    shared.register_native(class, "toString", "()Ljava/lang/String;", box_to_string);
+    shared.register_native(
+        class,
+        "toString",
+        "(D)Ljava/lang/String;",
+        double_to_string_of,
+    );
+    shared.register_native(class, "equals", "(Ljava/lang/Object;)Z", box_equals);
+    shared.register_native(class, "hashCode", "()I", box_hash_code);
+    shared.register_native(class, "hashCode", "(D)I", double_hash_code_of);
+    shared.register_native(class, "compareTo", "(Ljava/lang/Double;)I", box_compare_to);
+    shared.register_native(class, "compare", "(DD)I", double_compare);
+    shared.register_native(class, "parseDouble", "(Ljava/lang/String;)D", double_parse);
+    shared.register_native(class, "isNaN", "()Z", box_is_nan);
+    shared.register_native(class, "isNaN", "(D)Z", double_is_nan);
+    shared.register_native(class, "isInfinite", "()Z", box_is_infinite);
+    shared.register_native(class, "isInfinite", "(D)Z", double_is_infinite);
+    shared.register_native(class, "isFinite", "(D)Z", double_is_finite);
+    shared.register_native(class, "doubleToLongBits", "(D)J", double_to_long_bits);
+    register_number_accessors(shared, class);
+}
+
+/// Register the six `Number` conversion methods on one numeric wrapper class.
+fn register_number_accessors(shared: &Shared, class: &str) {
+    shared.register_native(class, "byteValue", "()B", box_byte_value);
+    shared.register_native(class, "shortValue", "()S", box_short_value);
+    shared.register_native(class, "intValue", "()I", box_int_value);
+    shared.register_native(class, "longValue", "()J", box_long_value);
+    shared.register_native(class, "floatValue", "()F", box_float_value);
+    shared.register_native(class, "doubleValue", "()D", box_double_value);
+}
+
+/// Register the `java.lang.Number` accessors.
+///
+/// A wrapper class declares its own overrides, so these entries are the fallback for a
+/// class whose stub inherits the method; the receiver-driven implementations work for
+/// any numeric box.
+fn register_number_natives(shared: &Shared) {
+    register_number_accessors(shared, "java/lang/Number");
+}
+
+/// Register the `java.lang.Boolean` natives.
+fn register_boolean_natives(shared: &Shared) {
+    let class = "java/lang/Boolean";
+    shared.register_native(class, "valueOf", "(Z)Ljava/lang/Boolean;", boolean_value_of);
+    shared.register_native(
+        class,
+        "valueOf",
+        "(Ljava/lang/String;)Ljava/lang/Boolean;",
+        boolean_value_of_string,
+    );
+    shared.register_native(class, "booleanValue", "()Z", boolean_boolean_value);
+    shared.register_native(
+        class,
+        "parseBoolean",
+        "(Ljava/lang/String;)Z",
+        boolean_parse,
+    );
+    shared.register_native(
+        class,
+        "toString",
+        "(Z)Ljava/lang/String;",
+        boolean_to_string_of,
+    );
+    shared.register_native(class, "toString", "()Ljava/lang/String;", boolean_to_string);
+    shared.register_native(class, "hashCode", "()I", boolean_hash_code);
+    shared.register_native(class, "hashCode", "(Z)I", boolean_hash_code_of);
+    shared.register_native(class, "equals", "(Ljava/lang/Object;)Z", boolean_equals);
+    shared.register_native(
+        class,
+        "compareTo",
+        "(Ljava/lang/Boolean;)I",
+        boolean_compare_to,
+    );
+    shared.register_native(class, "compare", "(ZZ)I", boolean_compare);
+    shared.register_native(
+        class,
+        "getBoolean",
+        "(Ljava/lang/String;)Z",
+        boolean_get_boolean,
     );
 }
 
@@ -161,49 +371,76 @@ pub fn is_reference_descriptor(descriptor: &str) -> bool {
 
 /// Convert one argument for a parameter of `descriptor`.
 ///
-/// `I` takes a `Value::Ref` to a boxed `Integer` and returns its `Value::Int`; `Z` reads
-/// a boxed `Boolean`, `C` a boxed `Character` and `B`/`S` a boxed `Integer` (there is no
-/// `Byte`/`Short` box yet). A reference descriptor passes the same handle through, null
-/// included. `J`, `F` and `D` remain errors: those boxes are not modelled.
+/// The conversion follows `java.lang.reflect`'s invocation rules: a numeric parameter
+/// accepts any numeric wrapper whose primitive widens to it (JLS §5.3), `Z` requires a
+/// boxed `Boolean`, `C` a boxed `Character`, and a reference descriptor passes the same
+/// handle through, null included. The returned [`Value`] is the primitive the interpreter
+/// expects for that descriptor: `B`/`S`/`I` as `Value::Int`, `J` as `Value::Long`, `F` as
+/// `Value::Float` and `D` as `Value::Double`.
 pub fn unbox_argument(shared: &Shared, descriptor: &str, value: Value) -> Result<Value, VmError> {
-    if descriptor == "I" || descriptor == "B" || descriptor == "S" {
-        return match value {
-            Value::Ref(reference) => Ok(Value::Int(shared.unbox_int(reference)?)),
-            other => Err(VmError::Native(format!(
-                "expected a boxed Integer for an {descriptor} parameter, found {other:?}"
-            ))),
-        };
-    }
     if descriptor == "Z" || descriptor == "C" {
         let Value::Ref(reference) = value else {
             return Err(VmError::Native(format!(
                 "expected a boxed value for a {descriptor} parameter, found {value:?}"
             )));
         };
-        if reference.is_null() {
-            return Err(VmError::Native(format!(
-                "cannot unbox a null reference as {descriptor}"
-            )));
-        }
-        let boxed = {
-            let heap = shared.heap();
-            match heap.get(reference) {
-                Ok(HeapObject::Boxed(boxed)) => *boxed,
-                Ok(_) => {
-                    return Err(VmError::Native(format!(
-                        "{reference} is not a boxed primitive"
-                    )));
-                }
-                Err(error) => return Err(VmError::Native(error.to_string())),
-            }
-        };
+        let boxed = shared.boxed(reference)?;
         return match (descriptor, boxed) {
             ("Z", BoxedPrimitive::Boolean(value)) => Ok(Value::Int(i32::from(value))),
-            ("C", BoxedPrimitive::Character(value)) => Ok(Value::Int(value as i32)),
+            ("C", BoxedPrimitive::Character(value)) => Ok(Value::Int(i32::from(value as u16))),
             _ => Err(VmError::Native(format!(
                 "{reference} is a boxed {}, not the {descriptor} box",
                 boxed.binary_name()
             ))),
+        };
+    }
+    if matches!(descriptor, "B" | "S" | "I" | "J" | "F" | "D") {
+        let Value::Ref(reference) = value else {
+            return Err(VmError::Native(format!(
+                "expected a boxed value for a {descriptor} parameter, found {value:?}"
+            )));
+        };
+        let boxed = shared.boxed(reference)?;
+        if !widens_to(boxed, descriptor) {
+            return Err(VmError::Native(format!(
+                "a boxed {} does not widen to the {descriptor} parameter",
+                boxed.binary_name()
+            )));
+        }
+        // A `char` widens to `int`/`long`/`float`/`double` without a `Number` conversion,
+        // so read it as its code unit before applying the target conversion.
+        let boxed = match boxed {
+            BoxedPrimitive::Character(character) => {
+                BoxedPrimitive::Integer(i32::from(character as u16))
+            }
+            other => other,
+        };
+        return match descriptor {
+            "B" => boxed
+                .byte_value()
+                .map(|value| Value::Int(i32::from(value)))
+                .ok_or_else(|| unboxable(boxed, descriptor)),
+            "S" => boxed
+                .short_value()
+                .map(|value| Value::Int(i32::from(value)))
+                .ok_or_else(|| unboxable(boxed, descriptor)),
+            "I" => boxed
+                .int_value()
+                .map(Value::Int)
+                .ok_or_else(|| unboxable(boxed, descriptor)),
+            "J" => boxed
+                .long_value()
+                .map(Value::Long)
+                .ok_or_else(|| unboxable(boxed, descriptor)),
+            "F" => boxed
+                .float_value()
+                .map(Value::Float)
+                .ok_or_else(|| unboxable(boxed, descriptor)),
+            "D" => boxed
+                .double_value()
+                .map(Value::Double)
+                .ok_or_else(|| unboxable(boxed, descriptor)),
+            _ => unreachable!("the descriptor set is closed above"),
         };
     }
     if is_reference_descriptor(descriptor) {
@@ -215,18 +452,47 @@ pub fn unbox_argument(shared: &Shared, descriptor: &str, value: Value) -> Result
         };
     }
     Err(VmError::Native(format!(
-        "only int and reference values are supported (M2.10): {descriptor}"
+        "unsupported parameter descriptor: {descriptor}"
     )))
+}
+
+fn unboxable(boxed: BoxedPrimitive, descriptor: &str) -> VmError {
+    VmError::Native(format!(
+        "a boxed {} cannot be read as a {descriptor} parameter",
+        boxed.binary_name()
+    ))
+}
+
+/// Whether `boxed`'s primitive widens to the primitive named by `descriptor` (JLS §5.3).
+fn widens_to(boxed: BoxedPrimitive, descriptor: &str) -> bool {
+    use BoxedPrimitive::*;
+    match descriptor {
+        "B" => matches!(boxed, Byte(_)),
+        "S" => matches!(boxed, Byte(_) | Short(_)),
+        "I" => matches!(boxed, Byte(_) | Short(_) | Character(_) | Integer(_)),
+        "J" => matches!(
+            boxed,
+            Byte(_) | Short(_) | Character(_) | Integer(_) | Long(_)
+        ),
+        "F" => matches!(
+            boxed,
+            Byte(_) | Short(_) | Character(_) | Integer(_) | Long(_) | Float(_)
+        ),
+        "D" => matches!(
+            boxed,
+            Byte(_) | Short(_) | Character(_) | Integer(_) | Long(_) | Float(_) | Double(_)
+        ),
+        _ => false,
+    }
 }
 
 /// Convert an invoked method's result back to the reflective `Object` result.
 ///
-/// `boolean`, `byte`, `short`, `char` and `int` are boxed (`byte`/`short` as
-/// `java.lang.Integer`, the only integer box this VM has); a reference passes through
-/// unchanged, which is what keeps a returned string reference-identical; `void` becomes
-/// null, as `Method.invoke` and `Constructor.newInstance` return null for a void method.
-/// Annotation element methods return these primitives, so `Method.invoke` on one must box
-/// them.
+/// Each primitive descriptor becomes its own wrapper (`B` a `Byte`, `S` a `Short`, `J` a
+/// `Long`, and so on); a reference passes through unchanged, which is what keeps a
+/// returned string reference-identical, and `void` becomes null, as `Method.invoke` and
+/// `Constructor.newInstance` return null for a void method. Annotation element methods and
+/// reflected field reads return these primitives, so they must be boxed.
 pub fn box_result(
     shared: &Shared,
     descriptor: &str,
@@ -238,35 +504,40 @@ pub fn box_result(
             Some(value) => Err(VmError::Native(format!("a void method returned {value:?}"))),
         };
     }
-    if descriptor == "I" || descriptor == "B" || descriptor == "S" {
-        return match value {
-            Some(Value::Int(value)) => Ok(Value::Ref(shared.box_int(value))),
-            Some(other) => Err(VmError::Native(format!(
-                "an {descriptor} method returned {other:?}"
+    if matches!(descriptor, "Z" | "B" | "C" | "S" | "I" | "J" | "F" | "D") {
+        let Some(value) = value else {
+            return Err(VmError::Native(format!(
+                "a {descriptor} method returned no value"
+            )));
+        };
+        return match (descriptor, value) {
+            ("Z", Value::Int(value)) => {
+                Ok(Value::Ref(shared.heap().allocate_boxed_boolean(value != 0)))
+            }
+            ("B", Value::Int(value)) => {
+                Ok(Value::Ref(shared.heap().allocate_boxed_byte(value as i8)))
+            }
+            ("S", Value::Int(value)) => {
+                Ok(Value::Ref(shared.heap().allocate_boxed_short(value as i16)))
+            }
+            ("I", Value::Int(value)) => Ok(Value::Ref(shared.box_int(value))),
+            ("J", Value::Long(value)) => Ok(Value::Ref(shared.box_long(value))),
+            ("F", Value::Float(value)) => Ok(Value::Ref(shared.heap().allocate_boxed_float(value))),
+            ("D", Value::Double(value)) => {
+                Ok(Value::Ref(shared.heap().allocate_boxed_double(value)))
+            }
+            ("C", Value::Int(value)) => {
+                let Some(character) = char::from_u32(value as u32) else {
+                    return Err(VmError::Native(format!(
+                        "{value} is not a UTF-16 code unit for a char result"
+                    )));
+                };
+                Ok(Value::Ref(shared.heap().allocate_boxed_char(character)))
+            }
+            (_, other) => Err(VmError::Native(format!(
+                "a {descriptor} method returned {other:?}"
             ))),
-            None => Err(VmError::Native(format!(
-                "an {descriptor} method returned no value"
-            ))),
         };
-    }
-    if descriptor == "Z" || descriptor == "C" {
-        let Some(Value::Int(value)) = value else {
-            return Err(match value {
-                Some(other) => VmError::Native(format!("a {descriptor} method returned {other:?}")),
-                None => VmError::Native(format!("a {descriptor} method returned no value")),
-            });
-        };
-        let boxed_result = if descriptor == "Z" {
-            shared.heap().allocate_boxed_boolean(value != 0)
-        } else {
-            let Some(character) = char::from_u32(value as u32) else {
-                return Err(VmError::Native(format!(
-                    "{value} is not a UTF-16 code unit for a char result"
-                )));
-            };
-            shared.heap().allocate_boxed_char(character)
-        };
-        return Ok(Value::Ref(boxed_result));
     }
     if is_reference_descriptor(descriptor) {
         return match value {
@@ -280,7 +551,7 @@ pub fn box_result(
         };
     }
     Err(VmError::Native(format!(
-        "only int, reference and void results are supported (M2.10): {descriptor}"
+        "unsupported result descriptor: {descriptor}"
     )))
 }
 
@@ -292,6 +563,34 @@ fn int_argument(args: &[Value], position: usize, method: &str) -> Result<i32, Vm
     match args.get(position).copied() {
         Some(Value::Int(value)) => Ok(value),
         Some(_) => Err(VmError::Native(format!("{method} expects an int argument"))),
+        None => Err(VmError::Native(format!("{method} is missing its argument"))),
+    }
+}
+
+fn long_argument(args: &[Value], position: usize, method: &str) -> Result<i64, VmError> {
+    match args.get(position).copied() {
+        Some(Value::Long(value)) => Ok(value),
+        Some(_) => Err(VmError::Native(format!("{method} expects a long argument"))),
+        None => Err(VmError::Native(format!("{method} is missing its argument"))),
+    }
+}
+
+fn float_argument(args: &[Value], position: usize, method: &str) -> Result<f32, VmError> {
+    match args.get(position).copied() {
+        Some(Value::Float(value)) => Ok(value),
+        Some(_) => Err(VmError::Native(format!(
+            "{method} expects a float argument"
+        ))),
+        None => Err(VmError::Native(format!("{method} is missing its argument"))),
+    }
+}
+
+fn double_argument(args: &[Value], position: usize, method: &str) -> Result<f64, VmError> {
+    match args.get(position).copied() {
+        Some(Value::Double(value)) => Ok(value),
+        Some(_) => Err(VmError::Native(format!(
+            "{method} expects a double argument"
+        ))),
         None => Err(VmError::Native(format!("{method} is missing its argument"))),
     }
 }
@@ -320,7 +619,364 @@ fn string_argument(
     Ok(text)
 }
 
-/// `Integer.valueOf(int)`: a fresh box. There is no small-value cache in M2.10.
+/// The box behind a receiver, with the method name for the error message.
+fn boxed_receiver(
+    shared: &Shared,
+    receiver: ObjRef,
+    method: &str,
+) -> Result<BoxedPrimitive, VmError> {
+    shared
+        .boxed(receiver)
+        .map_err(|error| VmError::Native(format!("{method}: {error}")))
+}
+
+/// The box behind a numeric (`java.lang.Number` subclass) receiver.
+fn numeric_receiver(
+    shared: &Shared,
+    receiver: ObjRef,
+    method: &str,
+) -> Result<BoxedPrimitive, VmError> {
+    let boxed = boxed_receiver(shared, receiver, method)?;
+    if boxed.is_numeric() {
+        Ok(boxed)
+    } else {
+        Err(VmError::Native(format!(
+            "{method} receiver is a {}, not a java.lang.Number",
+            boxed.binary_name()
+        )))
+    }
+}
+
+/// The box behind a `compareTo` argument, which must be the same primitive kind.
+fn same_kind_argument(
+    shared: &Shared,
+    receiver: ObjRef,
+    args: &[Value],
+    method: &str,
+) -> Result<(BoxedPrimitive, BoxedPrimitive), VmError> {
+    let left = boxed_receiver(shared, receiver, method)?;
+    let Some(Value::Ref(argument)) = args.first().copied() else {
+        return Err(VmError::Native(format!(
+            "{method} expects a boxed argument"
+        )));
+    };
+    let right = shared
+        .boxed(argument)
+        .map_err(|error| VmError::Native(format!("{method}: {error}")))?;
+    if right.descriptor() != left.descriptor() {
+        return Err(VmError::Native(format!(
+            "{method} expects a {}, found a {}",
+            left.binary_name(),
+            right.binary_name()
+        )));
+    }
+    Ok((left, right))
+}
+
+fn ordering_value(ordering: std::cmp::Ordering) -> i32 {
+    match ordering {
+        std::cmp::Ordering::Less => -1,
+        std::cmp::Ordering::Equal => 0,
+        std::cmp::Ordering::Greater => 1,
+    }
+}
+
+/// `Wrapper.toString()`: the receiver's Java text as a new string.
+fn box_to_string(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    _args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let text = boxed_receiver(shared, receiver, "toString")?.text();
+    Ok(Some(Value::Ref(shared.heap().allocate_string(text))))
+}
+
+/// `Wrapper.equals(Object)`: per-kind value equality; null and other kinds are false.
+fn box_equals(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let left = boxed_receiver(shared, receiver, "equals")?;
+    let Some(Value::Ref(argument)) = args.first().copied() else {
+        return Err(VmError::Native(
+            "equals expects an Object argument".to_owned(),
+        ));
+    };
+    if argument.is_null() {
+        return Ok(Some(Value::Int(0)));
+    }
+    let equal = match shared.boxed(argument) {
+        Ok(right) => left.java_equals(right),
+        // A non-box reference is simply unequal, as the JDK wrappers return false.
+        Err(_) => false,
+    };
+    Ok(Some(Value::Int(i32::from(equal))))
+}
+
+/// `Wrapper.hashCode()`.
+fn box_hash_code(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    _args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    Ok(Some(Value::Int(
+        boxed_receiver(shared, receiver, "hashCode")?.java_hash_code(),
+    )))
+}
+
+/// `Wrapper.compareTo(same box)`: -1, 0 or 1 in the wrapper's Java order.
+fn box_compare_to(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let (left, right) = same_kind_argument(shared, receiver, args, "compareTo")?;
+    let ordering = left.java_compare(right).ok_or_else(|| {
+        VmError::Native(format!(
+            "compareTo has no order for a {} and a {}",
+            left.binary_name(),
+            right.binary_name()
+        ))
+    })?;
+    Ok(Some(Value::Int(ordering_value(ordering))))
+}
+
+/// `Number.byteValue()`.
+fn box_byte_value(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    _args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let value = numeric_receiver(shared, receiver, "byteValue")?
+        .byte_value()
+        .ok_or_else(|| VmError::Native("byteValue is not a Number method".to_owned()))?;
+    Ok(Some(Value::Int(i32::from(value))))
+}
+
+/// `Number.shortValue()`.
+fn box_short_value(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    _args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let value = numeric_receiver(shared, receiver, "shortValue")?
+        .short_value()
+        .ok_or_else(|| VmError::Native("shortValue is not a Number method".to_owned()))?;
+    Ok(Some(Value::Int(i32::from(value))))
+}
+
+/// `Number.intValue()`.
+fn box_int_value(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    _args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let value = numeric_receiver(shared, receiver, "intValue")?
+        .int_value()
+        .ok_or_else(|| VmError::Native("intValue is not a Number method".to_owned()))?;
+    Ok(Some(Value::Int(value)))
+}
+
+/// `Number.longValue()`.
+fn box_long_value(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    _args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let value = numeric_receiver(shared, receiver, "longValue")?
+        .long_value()
+        .ok_or_else(|| VmError::Native("longValue is not a Number method".to_owned()))?;
+    Ok(Some(Value::Long(value)))
+}
+
+/// `Number.floatValue()`.
+fn box_float_value(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    _args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let value = numeric_receiver(shared, receiver, "floatValue")?
+        .float_value()
+        .ok_or_else(|| VmError::Native("floatValue is not a Number method".to_owned()))?;
+    Ok(Some(Value::Float(value)))
+}
+
+/// `Number.doubleValue()`.
+fn box_double_value(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    _args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let value = numeric_receiver(shared, receiver, "doubleValue")?
+        .double_value()
+        .ok_or_else(|| VmError::Native("doubleValue is not a Number method".to_owned()))?;
+    Ok(Some(Value::Double(value)))
+}
+
+/// `Float.isNaN()`/`Double.isNaN()`.
+fn box_is_nan(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    _args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let boxed = boxed_receiver(shared, receiver, "isNaN")?;
+    let result = match boxed {
+        BoxedPrimitive::Float(value) => value.is_nan(),
+        BoxedPrimitive::Double(value) => value.is_nan(),
+        _ => {
+            return Err(VmError::Native(format!(
+                "isNaN is not a {} method",
+                boxed.binary_name()
+            )));
+        }
+    };
+    Ok(Some(Value::Int(i32::from(result))))
+}
+
+/// `Float.isInfinite()`/`Double.isInfinite()`.
+fn box_is_infinite(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    _args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let boxed = boxed_receiver(shared, receiver, "isInfinite")?;
+    let result = match boxed {
+        BoxedPrimitive::Float(value) => value.is_infinite(),
+        BoxedPrimitive::Double(value) => value.is_infinite(),
+        _ => {
+            return Err(VmError::Native(format!(
+                "isInfinite is not a {} method",
+                boxed.binary_name()
+            )));
+        }
+    };
+    Ok(Some(Value::Int(i32::from(result))))
+}
+
+/// `Float.isNaN(float)`.
+fn float_is_nan(
+    _shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let value = float_argument(args, 0, "Float.isNaN")?;
+    Ok(Some(Value::Int(i32::from(value.is_nan()))))
+}
+
+/// `Float.isInfinite(float)`.
+fn float_is_infinite(
+    _shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let value = float_argument(args, 0, "Float.isInfinite")?;
+    Ok(Some(Value::Int(i32::from(value.is_infinite()))))
+}
+
+/// `Float.isFinite(float)`.
+fn float_is_finite(
+    _shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let value = float_argument(args, 0, "Float.isFinite")?;
+    Ok(Some(Value::Int(i32::from(value.is_finite()))))
+}
+
+/// `Double.isNaN(double)`.
+fn double_is_nan(
+    _shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let value = double_argument(args, 0, "Double.isNaN")?;
+    Ok(Some(Value::Int(i32::from(value.is_nan()))))
+}
+
+/// `Double.isInfinite(double)`.
+fn double_is_infinite(
+    _shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let value = double_argument(args, 0, "Double.isInfinite")?;
+    Ok(Some(Value::Int(i32::from(value.is_infinite()))))
+}
+
+/// `Double.isFinite(double)`.
+fn double_is_finite(
+    _shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let value = double_argument(args, 0, "Double.isFinite")?;
+    Ok(Some(Value::Int(i32::from(value.is_finite()))))
+}
+
+/// `Float.floatToIntBits(float)`.
+fn float_to_int_bits(
+    _shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let value = float_argument(args, 0, "Float.floatToIntBits")?;
+    Ok(Some(Value::Int(canonical_float_bits(value) as i32)))
+}
+
+/// `Double.doubleToLongBits(double)`.
+fn double_to_long_bits(
+    _shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let value = double_argument(args, 0, "Double.doubleToLongBits")?;
+    Ok(Some(Value::Long(canonical_double_bits(value) as i64)))
+}
+
+// --- Integer -------------------------------------------------------------------------
+
+/// `Integer.valueOf(int)`: a fresh box. There is no small-value cache.
 fn integer_value_of(
     shared: &Shared,
     _thread: &ThreadState,
@@ -332,29 +988,29 @@ fn integer_value_of(
     Ok(Some(Value::Ref(shared.box_int(value))))
 }
 
-/// `Integer.intValue()`: the primitive inside the receiver's box.
-fn integer_int_value(
+/// `Integer.valueOf(String)`.
+fn integer_value_of_string(
     shared: &Shared,
     _thread: &ThreadState,
     _loader: LoaderId,
-    receiver: ObjRef,
-    _args: &[Value],
+    _receiver: ObjRef,
+    args: &[Value],
 ) -> Result<Option<Value>, VmError> {
-    Ok(Some(Value::Int(shared.unbox_int(receiver)?)))
+    let value = parse_int_argument(shared, args, 10, "Integer.valueOf")?;
+    Ok(Some(Value::Ref(shared.box_int(value))))
 }
 
-/// `Integer.toString()`: the decimal text of the receiver's value.
-fn integer_to_string(
+/// `Integer.valueOf(String, int)`.
+fn integer_value_of_string_radix(
     shared: &Shared,
     _thread: &ThreadState,
     _loader: LoaderId,
-    receiver: ObjRef,
-    _args: &[Value],
+    _receiver: ObjRef,
+    args: &[Value],
 ) -> Result<Option<Value>, VmError> {
-    let value = shared.unbox_int(receiver)?;
-    Ok(Some(Value::Ref(
-        shared.heap().allocate_string(value.to_string()),
-    )))
+    let radix = int_argument(args, 1, "Integer.valueOf")?;
+    let value = parse_int_argument(shared, args, radix, "Integer.valueOf")?;
+    Ok(Some(Value::Ref(shared.box_int(value))))
 }
 
 /// `Integer.toString(int)`: the decimal text of an argument.
@@ -371,75 +1027,31 @@ fn integer_to_string_of(
     )))
 }
 
-/// `Integer.equals(Object)`: value equality against another boxed `Integer`.
-///
-/// Null and any non-`Integer` reference are false, as on the JDK. A reference to a box
-/// of another kind cannot exist in M2.10, so the only matching shape is a boxed `int`.
-fn integer_equals(
-    shared: &Shared,
+/// `Integer.hashCode(int)`.
+fn integer_hash_code_of(
+    _shared: &Shared,
     _thread: &ThreadState,
     _loader: LoaderId,
-    receiver: ObjRef,
+    _receiver: ObjRef,
     args: &[Value],
 ) -> Result<Option<Value>, VmError> {
-    let value = shared.unbox_int(receiver)?;
-    let Some(Value::Ref(argument)) = args.first().copied() else {
-        return Err(VmError::Native(
-            "Integer.equals expects an Object argument".to_owned(),
-        ));
-    };
-    if argument.is_null() {
-        return Ok(Some(Value::Int(0)));
-    }
-    let equal = {
-        let heap = shared.heap();
-        match heap.get(argument).map_err(heap_error)? {
-            HeapObject::Boxed(BoxedPrimitive::Integer(other)) => *other == value,
-            _ => false,
-        }
-    };
-    Ok(Some(Value::Int(i32::from(equal))))
+    Ok(Some(Value::Int(int_argument(args, 0, "Integer.hashCode")?)))
 }
 
-/// `Integer.hashCode()`: the value itself, as the JDK defines it.
-fn integer_hash_code(
-    shared: &Shared,
+/// `Integer.compare(int, int)`.
+fn integer_compare(
+    _shared: &Shared,
     _thread: &ThreadState,
     _loader: LoaderId,
-    receiver: ObjRef,
-    _args: &[Value],
-) -> Result<Option<Value>, VmError> {
-    Ok(Some(Value::Int(shared.unbox_int(receiver)?)))
-}
-
-/// `Integer.compareTo(Integer)`: -1, 0 or 1 by value.
-fn integer_compare_to(
-    shared: &Shared,
-    _thread: &ThreadState,
-    _loader: LoaderId,
-    receiver: ObjRef,
+    _receiver: ObjRef,
     args: &[Value],
 ) -> Result<Option<Value>, VmError> {
-    let value = shared.unbox_int(receiver)?;
-    let Some(Value::Ref(argument)) = args.first().copied() else {
-        return Err(VmError::Native(
-            "Integer.compareTo expects an Integer argument".to_owned(),
-        ));
-    };
-    let other = shared.unbox_int(argument)?;
-    let ordering = match value.cmp(&other) {
-        std::cmp::Ordering::Less => -1,
-        std::cmp::Ordering::Equal => 0,
-        std::cmp::Ordering::Greater => 1,
-    };
-    Ok(Some(Value::Int(ordering)))
+    let left = int_argument(args, 0, "Integer.compare")?;
+    let right = int_argument(args, 1, "Integer.compare")?;
+    Ok(Some(Value::Int(ordering_value(left.cmp(&right)))))
 }
 
-/// `Integer.parseInt(String)`: a decimal `int` in the JDK's accepted syntax.
-///
-/// Rust's integer parser accepts an optional sign and ASCII decimal digits, the same
-/// shape `Integer.parseInt` accepts for the values M2.10 needs. An out-of-range or
-/// malformed value is a typed error, not a synthesized `NumberFormatException`.
+/// `Integer.parseInt(String)`.
 fn integer_parse_int(
     shared: &Shared,
     _thread: &ThreadState,
@@ -447,10 +1059,20 @@ fn integer_parse_int(
     _receiver: ObjRef,
     args: &[Value],
 ) -> Result<Option<Value>, VmError> {
-    let text = string_argument(shared, args, 0, "Integer.parseInt")?;
-    let value = text
-        .parse::<i32>()
-        .map_err(|_| VmError::Native(format!("Integer.parseInt: {text:?} is not a decimal int")))?;
+    let value = parse_int_argument(shared, args, 10, "Integer.parseInt")?;
+    Ok(Some(Value::Int(value)))
+}
+
+/// `Integer.parseInt(String, int)`.
+fn integer_parse_int_radix(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let radix = int_argument(args, 1, "Integer.parseInt")?;
+    let value = parse_int_argument(shared, args, radix, "Integer.parseInt")?;
     Ok(Some(Value::Int(value)))
 }
 
@@ -493,9 +1115,665 @@ fn integer_to_octal_string(
     Ok(Some(Value::Ref(text)))
 }
 
-/// Register the `java.lang.Character` classification surface Spring's string utilities use.
+// --- Byte ----------------------------------------------------------------------------
+
+/// `Byte.valueOf(byte)`.
+fn byte_value_of(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let value = int_argument(args, 0, "Byte.valueOf")?;
+    Ok(Some(Value::Ref(
+        shared.heap().allocate_boxed_byte(value as i8),
+    )))
+}
+
+/// `Byte.valueOf(String)`.
+fn byte_value_of_string(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let value = parse_int_argument(shared, args, 10, "Byte.valueOf")?;
+    Ok(Some(Value::Ref(
+        shared.heap().allocate_boxed_byte(value as i8),
+    )))
+}
+
+/// `Byte.valueOf(String, int)`.
+fn byte_value_of_string_radix(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let radix = int_argument(args, 1, "Byte.valueOf")?;
+    let value = parse_int_argument(shared, args, radix, "Byte.valueOf")?;
+    Ok(Some(Value::Ref(
+        shared.heap().allocate_boxed_byte(value as i8),
+    )))
+}
+
+/// `Byte.parseByte(String)`.
+fn byte_parse(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let value = parse_int_argument(shared, args, 10, "Byte.parseByte")?;
+    Ok(Some(Value::Int(value)))
+}
+
+/// `Byte.parseByte(String, int)`.
+fn byte_parse_radix(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let radix = int_argument(args, 1, "Byte.parseByte")?;
+    let value = parse_int_argument(shared, args, radix, "Byte.parseByte")?;
+    Ok(Some(Value::Int(value)))
+}
+
+/// `Byte.toString(byte)`.
+fn byte_to_string_of(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let value = int_argument(args, 0, "Byte.toString")? as i8;
+    Ok(Some(Value::Ref(
+        shared.heap().allocate_string(value.to_string()),
+    )))
+}
+
+/// `Byte.hashCode(byte)`.
+fn byte_hash_code_of(
+    _shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    Ok(Some(Value::Int(
+        int_argument(args, 0, "Byte.hashCode")? as i8 as i32,
+    )))
+}
+
+/// `Byte.compare(byte, byte)`.
+fn byte_compare(
+    _shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let left = int_argument(args, 0, "Byte.compare")? as i8;
+    let right = int_argument(args, 1, "Byte.compare")? as i8;
+    Ok(Some(Value::Int(ordering_value(left.cmp(&right)))))
+}
+
+// --- Short ---------------------------------------------------------------------------
+
+/// `Short.valueOf(short)`.
+fn short_value_of(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let value = int_argument(args, 0, "Short.valueOf")?;
+    Ok(Some(Value::Ref(
+        shared.heap().allocate_boxed_short(value as i16),
+    )))
+}
+
+/// `Short.valueOf(String)`.
+fn short_value_of_string(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let value = parse_int_argument(shared, args, 10, "Short.valueOf")?;
+    Ok(Some(Value::Ref(
+        shared.heap().allocate_boxed_short(value as i16),
+    )))
+}
+
+/// `Short.valueOf(String, int)`.
+fn short_value_of_string_radix(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let radix = int_argument(args, 1, "Short.valueOf")?;
+    let value = parse_int_argument(shared, args, radix, "Short.valueOf")?;
+    Ok(Some(Value::Ref(
+        shared.heap().allocate_boxed_short(value as i16),
+    )))
+}
+
+/// `Short.parseShort(String)`.
+fn short_parse(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let value = parse_int_argument(shared, args, 10, "Short.parseShort")?;
+    Ok(Some(Value::Int(value)))
+}
+
+/// `Short.parseShort(String, int)`.
+fn short_parse_radix(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let radix = int_argument(args, 1, "Short.parseShort")?;
+    let value = parse_int_argument(shared, args, radix, "Short.parseShort")?;
+    Ok(Some(Value::Int(value)))
+}
+
+/// `Short.toString(short)`.
+fn short_to_string_of(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let value = int_argument(args, 0, "Short.toString")? as i16;
+    Ok(Some(Value::Ref(
+        shared.heap().allocate_string(value.to_string()),
+    )))
+}
+
+/// `Short.hashCode(short)`.
+fn short_hash_code_of(
+    _shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    Ok(Some(Value::Int(
+        int_argument(args, 0, "Short.hashCode")? as i16 as i32,
+    )))
+}
+
+/// `Short.compare(short, short)`.
+fn short_compare(
+    _shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let left = int_argument(args, 0, "Short.compare")? as i16;
+    let right = int_argument(args, 1, "Short.compare")? as i16;
+    Ok(Some(Value::Int(ordering_value(left.cmp(&right)))))
+}
+
+// --- Long ----------------------------------------------------------------------------
+
+/// `Long.valueOf(long)`.
+fn long_value_of(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let value = long_argument(args, 0, "Long.valueOf")?;
+    Ok(Some(Value::Ref(shared.box_long(value))))
+}
+
+/// `Long.valueOf(String)`.
+fn long_value_of_string(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let value = parse_long_argument(shared, args, 10, "Long.valueOf")?;
+    Ok(Some(Value::Ref(shared.box_long(value))))
+}
+
+/// `Long.valueOf(String, int)`.
+fn long_value_of_string_radix(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let radix = int_argument(args, 1, "Long.valueOf")?;
+    let value = parse_long_argument(shared, args, radix, "Long.valueOf")?;
+    Ok(Some(Value::Ref(shared.box_long(value))))
+}
+
+/// `Long.parseLong(String)`.
+fn long_parse(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let value = parse_long_argument(shared, args, 10, "Long.parseLong")?;
+    Ok(Some(Value::Long(value)))
+}
+
+/// `Long.parseLong(String, int)`.
+fn long_parse_radix(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let radix = int_argument(args, 1, "Long.parseLong")?;
+    let value = parse_long_argument(shared, args, radix, "Long.parseLong")?;
+    Ok(Some(Value::Long(value)))
+}
+
+/// `Long.toString(long)`.
+fn long_to_string_of(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let value = long_argument(args, 0, "Long.toString")?;
+    Ok(Some(Value::Ref(
+        shared.heap().allocate_string(value.to_string()),
+    )))
+}
+
+/// `Long.hashCode(long)`.
+fn long_hash_code_of(
+    _shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let value = long_argument(args, 0, "Long.hashCode")?;
+    let bits = value as u64;
+    Ok(Some(Value::Int((value ^ ((bits >> 32) as i64)) as i32)))
+}
+
+/// `Long.compare(long, long)`.
+fn long_compare(
+    _shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let left = long_argument(args, 0, "Long.compare")?;
+    let right = long_argument(args, 1, "Long.compare")?;
+    Ok(Some(Value::Int(ordering_value(left.cmp(&right)))))
+}
+
+/// `Long.toHexString(long)`.
+fn long_to_hex_string(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let value = long_argument(args, 0, "Long.toHexString")?;
+    let text = shared.intern_string(&format!("{:x}", value as u64));
+    Ok(Some(Value::Ref(text)))
+}
+
+// --- Float ---------------------------------------------------------------------------
+
+/// `Float.valueOf(float)`.
+fn float_value_of(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let value = float_argument(args, 0, "Float.valueOf")?;
+    Ok(Some(Value::Ref(shared.heap().allocate_boxed_float(value))))
+}
+
+/// `Float.valueOf(String)`.
+fn float_value_of_string(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let text = string_argument(shared, args, 0, "Float.valueOf")?;
+    let value = parse_float_text(&text, "Float.valueOf")?;
+    Ok(Some(Value::Ref(shared.heap().allocate_boxed_float(value))))
+}
+
+/// `Float.toString(float)`.
+fn float_to_string_of(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let value = float_argument(args, 0, "Float.toString")?;
+    let text = shared.intern_string(&crate::string::float_text(value));
+    Ok(Some(Value::Ref(text)))
+}
+
+/// `Float.hashCode(float)`.
+fn float_hash_code_of(
+    _shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let value = float_argument(args, 0, "Float.hashCode")?;
+    Ok(Some(Value::Int(canonical_float_bits(value) as i32)))
+}
+
+/// `Float.compare(float, float)`.
+fn float_compare(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let left = float_argument(args, 0, "Float.compare")?;
+    let right = float_argument(args, 1, "Float.compare")?;
+    let ordering = BoxedPrimitive::Float(left)
+        .java_compare(BoxedPrimitive::Float(right))
+        .ok_or_else(|| VmError::Native("Float.compare has no order".to_owned()))?;
+    let _ = shared;
+    Ok(Some(Value::Int(ordering_value(ordering))))
+}
+
+/// `Float.parseFloat(String)`.
+fn float_parse(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let text = string_argument(shared, args, 0, "Float.parseFloat")?;
+    Ok(Some(Value::Float(parse_float_text(
+        &text,
+        "Float.parseFloat",
+    )?)))
+}
+
+// --- Double --------------------------------------------------------------------------
+
+/// `Double.valueOf(double)`.
+fn double_value_of(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let value = double_argument(args, 0, "Double.valueOf")?;
+    Ok(Some(Value::Ref(shared.box_double(value))))
+}
+
+/// `Double.valueOf(String)`.
+fn double_value_of_string(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let text = string_argument(shared, args, 0, "Double.valueOf")?;
+    let value = parse_double_text(&text, "Double.valueOf")?;
+    Ok(Some(Value::Ref(shared.box_double(value))))
+}
+
+/// `Double.toString(double)`.
+fn double_to_string_of(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let value = double_argument(args, 0, "Double.toString")?;
+    let text = shared.intern_string(&crate::string::double_text(value));
+    Ok(Some(Value::Ref(text)))
+}
+
+/// `Double.hashCode(double)`.
+fn double_hash_code_of(
+    _shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let value = double_argument(args, 0, "Double.hashCode")?;
+    let bits = canonical_double_bits(value);
+    Ok(Some(Value::Int((bits ^ (bits >> 32)) as i32)))
+}
+
+/// `Double.compare(double, double)`.
+fn double_compare(
+    _shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let left = double_argument(args, 0, "Double.compare")?;
+    let right = double_argument(args, 1, "Double.compare")?;
+    let ordering = BoxedPrimitive::Double(left)
+        .java_compare(BoxedPrimitive::Double(right))
+        .ok_or_else(|| VmError::Native("Double.compare has no order".to_owned()))?;
+    Ok(Some(Value::Int(ordering_value(ordering))))
+}
+
+/// `Double.parseDouble(String)`.
+fn double_parse(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let text = string_argument(shared, args, 0, "Double.parseDouble")?;
+    Ok(Some(Value::Double(parse_double_text(
+        &text,
+        "Double.parseDouble",
+    )?)))
+}
+
+// --- Parsing -------------------------------------------------------------------------
+
+/// Parse a `String` argument as a radix integer in the range of one wrapper.
+///
+/// The JDK's syntax is an optional `+`/`-` followed by digits of `radix` (2..=36); a
+/// malformed value or one outside the wrapper's range is a typed error rather than a
+/// synthesized `NumberFormatException`. `Integer.parseInt(String)` and the `valueOf`
+/// forms use the same parser, so their errors agree.
+fn parse_int_argument(
+    shared: &Shared,
+    args: &[Value],
+    radix: i32,
+    method: &str,
+) -> Result<i32, VmError> {
+    let text = string_argument(shared, args, 0, method)?;
+    let (min, max) = match method.split('.').next().unwrap_or_default() {
+        "Byte" => (i128::from(i8::MIN), i128::from(i8::MAX)),
+        "Short" => (i128::from(i16::MIN), i128::from(i16::MAX)),
+        _ => (i128::from(i32::MIN), i128::from(i32::MAX)),
+    };
+    let value = parse_radix_integer(&text, radix, min, max, method)?;
+    Ok(value as i32)
+}
+
+/// Parse a `String` argument as a radix `long`.
+fn parse_long_argument(
+    shared: &Shared,
+    args: &[Value],
+    radix: i32,
+    method: &str,
+) -> Result<i64, VmError> {
+    let text = string_argument(shared, args, 0, method)?;
+    let value = parse_radix_integer(
+        &text,
+        radix,
+        i128::from(i64::MIN),
+        i128::from(i64::MAX),
+        method,
+    )?;
+    Ok(value as i64)
+}
+
+/// Parse an optional-sign radix integer and check it against `[min, max]`.
+fn parse_radix_integer(
+    text: &str,
+    radix: i32,
+    min: i128,
+    max: i128,
+    method: &str,
+) -> Result<i128, VmError> {
+    if !(2..=36).contains(&radix) {
+        return Err(VmError::Native(format!(
+            "{method}: radix {radix} is outside 2..=36"
+        )));
+    }
+    let radix = radix as u32;
+    let (negative, digits) = match text.as_bytes().first() {
+        Some(b'+') => (false, &text[1..]),
+        Some(b'-') => (true, &text[1..]),
+        _ => (false, text),
+    };
+    if digits.is_empty() {
+        return Err(VmError::Native(format!(
+            "{method}: {text:?} is not a radix {radix} integer"
+        )));
+    }
+    let mut magnitude: i128 = 0;
+    for character in digits.chars() {
+        let Some(digit) = character.to_digit(radix) else {
+            return Err(VmError::Native(format!(
+                "{method}: {text:?} is not a radix {radix} integer"
+            )));
+        };
+        magnitude = magnitude
+            .checked_mul(i128::from(radix))
+            .and_then(|value| value.checked_add(i128::from(digit)))
+            .ok_or_else(|| {
+                VmError::Native(format!(
+                    "{method}: {text:?} is out of range for this wrapper"
+                ))
+            })?;
+    }
+    let value = if negative { -magnitude } else { magnitude };
+    if value < min || value > max {
+        return Err(VmError::Native(format!(
+            "{method}: {text:?} is out of range for this wrapper"
+        )));
+    }
+    Ok(value)
+}
+
+/// `Float.parseFloat` syntax: optional `f`/`F` suffix, `NaN`, both infinities.
+///
+/// Java also accepts a hex float literal; Rust's parser does not, so a hex literal is the
+/// typed error this slice documents. Rust accepts `inf`/`infinity`/`nan` in any case,
+/// which is wider than Java's exact `Infinity`/`NaN` spelling.
+fn parse_float_text(text: &str, method: &str) -> Result<f32, VmError> {
+    let trimmed = trim_float_text(text);
+    let trimmed = strip_float_suffix(trimmed);
+    match trimmed {
+        "NaN" | "+NaN" => Ok(f32::NAN),
+        "Infinity" | "+Infinity" => Ok(f32::INFINITY),
+        "-Infinity" => Ok(f32::NEG_INFINITY),
+        _ => trimmed
+            .parse::<f32>()
+            .map_err(|_| VmError::Native(format!("{method}: {text:?} is not a float literal"))),
+    }
+}
+
+/// `Double.parseDouble` syntax, with the same normalization as [`parse_float_text`].
+fn parse_double_text(text: &str, method: &str) -> Result<f64, VmError> {
+    let trimmed = trim_float_text(text);
+    let trimmed = strip_float_suffix(trimmed);
+    match trimmed {
+        "NaN" | "+NaN" => Ok(f64::NAN),
+        "Infinity" | "+Infinity" => Ok(f64::INFINITY),
+        "-Infinity" => Ok(f64::NEG_INFINITY),
+        _ => trimmed
+            .parse::<f64>()
+            .map_err(|_| VmError::Native(format!("{method}: {text:?} is not a double literal"))),
+    }
+}
+
+/// `String.trim`'s predicate: strip leading and trailing units `<= ' '`.
+fn trim_float_text(text: &str) -> &str {
+    text.trim_matches(|character: char| character <= ' ')
+}
+
+/// Strip the type suffix Java allows on a floating literal (`1.5f`, `2d`).
+fn strip_float_suffix(text: &str) -> &str {
+    match text.as_bytes().last() {
+        Some(b'f' | b'F' | b'd' | b'D') => &text[..text.len() - 1],
+        _ => text,
+    }
+}
+
+/// Register the `java.lang.Character` boxing and classification surface.
 fn register_character_natives(shared: &Shared) {
     let class = "java/lang/Character";
+    shared.register_native(
+        class,
+        "valueOf",
+        "(C)Ljava/lang/Character;",
+        character_value_of,
+    );
+    shared.register_native(class, "charValue", "()C", character_char_value);
+    shared.register_native(
+        class,
+        "toString",
+        "()Ljava/lang/String;",
+        character_box_to_string,
+    );
+    shared.register_native(class, "hashCode", "()I", character_hash_code);
+    shared.register_native(class, "equals", "(Ljava/lang/Object;)Z", character_equals);
     for (name, function) in [
         ("isUpperCase", character_is_upper as crate::NativeFn),
         ("isLowerCase", character_is_lower),
@@ -521,6 +1799,14 @@ fn register_character_natives(shared: &Shared) {
     );
     shared.register_native(class, "digit", "(CI)I", character_digit);
     shared.register_native(class, "forDigit", "(II)C", character_for_digit);
+    shared.register_native(class, "hashCode", "(C)I", character_hash_code_of);
+    shared.register_native(class, "compare", "(CC)I", character_compare);
+    shared.register_native(
+        class,
+        "compareTo",
+        "(Ljava/lang/Character;)I",
+        character_compare_to,
+    );
 }
 
 fn character_unit(args: &[Value], position: usize, method: &'static str) -> Result<u16, VmError> {
@@ -867,6 +2153,46 @@ fn character_equals(
     Ok(Some(Value::Int(i32::from(equal))))
 }
 
+/// `Character.hashCode(char)`.
+fn character_hash_code_of(
+    _shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let unit = character_unit(args, 0, "Character.hashCode")?;
+    Ok(Some(Value::Int(i32::from(unit))))
+}
+
+/// `Character.compare(char, char)`.
+fn character_compare(
+    _shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let left = character_unit(args, 0, "Character.compare")?;
+    let right = character_unit(args, 1, "Character.compare")?;
+    Ok(Some(Value::Int(ordering_value(left.cmp(&right)))))
+}
+
+/// `Character.compareTo(Character)`.
+fn character_compare_to(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let (left, right) = same_kind_argument(shared, receiver, args, "Character.compareTo")?;
+    let ordering = left
+        .java_compare(right)
+        .ok_or_else(|| VmError::Native("Character.compareTo has no order".to_owned()))?;
+    Ok(Some(Value::Int(ordering_value(ordering))))
+}
+
 fn bool_argument(args: &[Value], position: usize, method: &'static str) -> Result<bool, VmError> {
     match args.get(position).copied() {
         Some(Value::Int(value)) => Ok(value != 0),
@@ -1020,6 +2346,83 @@ fn boolean_equals(
         }
     };
     Ok(Some(Value::Int(i32::from(equal))))
+}
+
+/// `Boolean.valueOf(String)`: `true` only for a string equal to `"true"`, ignoring case.
+fn boolean_value_of_string(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let value = match args.first().copied() {
+        Some(Value::Ref(reference)) if !reference.is_null() => shared
+            .heap()
+            .string(reference)
+            .map_err(|error| VmError::Native(error.to_string()))?
+            .eq_ignore_ascii_case("true"),
+        _ => false,
+    };
+    Ok(Some(Value::Ref(
+        shared.heap().allocate_boxed_boolean(value),
+    )))
+}
+
+/// `Boolean.hashCode(boolean)`.
+fn boolean_hash_code_of(
+    _shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let value = bool_argument(args, 0, "Boolean.hashCode")?;
+    Ok(Some(Value::Int(if value { 1231 } else { 1237 })))
+}
+
+/// `Boolean.compareTo(Boolean)`.
+fn boolean_compare_to(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let (left, right) = same_kind_argument(shared, receiver, args, "Boolean.compareTo")?;
+    let ordering = left
+        .java_compare(right)
+        .ok_or_else(|| VmError::Native("Boolean.compareTo has no order".to_owned()))?;
+    Ok(Some(Value::Int(ordering_value(ordering))))
+}
+
+/// `Boolean.compare(boolean, boolean)`.
+fn boolean_compare(
+    _shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let left = bool_argument(args, 0, "Boolean.compare")?;
+    let right = bool_argument(args, 1, "Boolean.compare")?;
+    Ok(Some(Value::Int(ordering_value(left.cmp(&right)))))
+}
+
+/// `Boolean.getBoolean(String)`: whether the named system property is `"true"`.
+fn boolean_get_boolean(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let name = string_argument(shared, args, 0, "Boolean.getBoolean")?;
+    let value = shared
+        .property(&name)
+        .map(|value| value.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    Ok(Some(Value::Int(i32::from(value))))
 }
 
 /// Install `Boolean.TRUE`/`Boolean.FALSE`, which the C1 stub cannot initialize itself.

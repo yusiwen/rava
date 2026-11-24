@@ -162,10 +162,7 @@ fn objects_equals(
                 .map_err(|error| VmError::Native(error.to_string()))?,
         ) {
             (HeapObject::Str(left), HeapObject::Str(right)) => left == right,
-            (
-                HeapObject::Boxed(crate::heap::BoxedPrimitive::Integer(left)),
-                HeapObject::Boxed(crate::heap::BoxedPrimitive::Integer(right)),
-            ) => left == right,
+            (HeapObject::Boxed(left), HeapObject::Boxed(right)) => left.java_equals(*right),
             _ => left_ref == right_ref,
         }
     };
@@ -196,7 +193,7 @@ fn objects_hash_code(
                         }
                         hash
                     }
-                    HeapObject::Boxed(crate::heap::BoxedPrimitive::Integer(value)) => *value,
+                    HeapObject::Boxed(boxed) => boxed.java_hash_code(),
                     _ => reference.identity_hash(),
                 }
             };

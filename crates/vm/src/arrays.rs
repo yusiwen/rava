@@ -11,7 +11,7 @@
 //! because it needs the interpreter's callback bridge.
 
 use crate::VmError;
-use crate::heap::{BoxedPrimitive, HeapObject, ObjRef};
+use crate::heap::{HeapObject, ObjRef};
 use crate::loader::LoaderId;
 use crate::shared::Shared;
 use crate::thread::ThreadState;
@@ -102,10 +102,9 @@ fn natural_compare(heap: &crate::Heap, left: Value, right: Value) -> std::cmp::O
         {
             match (heap.get(left_ref), heap.get(right_ref)) {
                 (Ok(HeapObject::Str(left)), Ok(HeapObject::Str(right))) => left.cmp(right),
-                (
-                    Ok(HeapObject::Boxed(BoxedPrimitive::Integer(left))),
-                    Ok(HeapObject::Boxed(BoxedPrimitive::Integer(right))),
-                ) => left.cmp(right),
+                (Ok(HeapObject::Boxed(left)), Ok(HeapObject::Boxed(right))) => left
+                    .java_compare(*right)
+                    .unwrap_or(std::cmp::Ordering::Equal),
                 _ => std::cmp::Ordering::Equal,
             }
         }
@@ -264,15 +263,15 @@ fn element_hash(shared: &Shared, value: Value) -> Result<i32, VmError> {
                     }
                     hash
                 }
-                HeapObject::Boxed(BoxedPrimitive::Integer(value)) => *value,
+                HeapObject::Boxed(boxed) => boxed.java_hash_code(),
                 _ => reference.identity_hash(),
             })
         }
         Value::Int(value) => Ok(value),
         Value::Long(value) => Ok((value as i32) ^ ((value >> 32) as i32)),
-        Value::Float(value) => Ok(value.to_bits() as i32),
+        Value::Float(value) => Ok(crate::heap::canonical_float_bits(value) as i32),
         Value::Double(value) => {
-            let bits = value.to_bits();
+            let bits = crate::heap::canonical_double_bits(value);
             Ok((bits as i32) ^ ((bits >> 32) as i32))
         }
     }

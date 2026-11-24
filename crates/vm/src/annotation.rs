@@ -529,15 +529,19 @@ fn method_get_default_value(
         .unwrap_or("Ljava/lang/Object;");
     let value = element_to_value(shared, entry.loader, return_descriptor, default)?;
     // `Method.getDefaultValue` returns `Object`, so a primitive default is boxed exactly
-    // as the JDK boxes it. `long`/`float`/`double` have no box representation in this
-    // slice yet and are returned as their unboxed value.
+    // as the JDK boxes it: each primitive kind gets its own wrapper.
     let value = match (return_descriptor, value) {
         ("Z", Value::Int(raw)) => Value::Ref(shared.heap().allocate_boxed_boolean(raw != 0)),
         ("C", Value::Int(raw)) => {
             let character = char::from_u32(raw as u32).unwrap_or('\0');
             Value::Ref(shared.heap().allocate_boxed_char(character))
         }
-        ("B" | "S" | "I", Value::Int(raw)) => Value::Ref(shared.box_int(raw)),
+        ("B", Value::Int(raw)) => Value::Ref(shared.heap().allocate_boxed_byte(raw as i8)),
+        ("S", Value::Int(raw)) => Value::Ref(shared.heap().allocate_boxed_short(raw as i16)),
+        ("I", Value::Int(raw)) => Value::Ref(shared.box_int(raw)),
+        ("J", Value::Long(raw)) => Value::Ref(shared.box_long(raw)),
+        ("F", Value::Float(raw)) => Value::Ref(shared.heap().allocate_boxed_float(raw)),
+        ("D", Value::Double(raw)) => Value::Ref(shared.heap().allocate_boxed_double(raw)),
         (_, value) => value,
     };
     Ok(Some(value))

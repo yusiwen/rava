@@ -7,8 +7,8 @@
 
 > Ledger. P0 and P1 were accepted on 2026-11-23. M1 is complete; M2 is in progress
 > (M2.1, M2.2, M2.3, M2.4, M2.5, M2.6, M2.7, M2.8, M2.9, M2.10, M2.11, M2.12,
-> M2.13, M2.14, M2.15, M2.16, M2.17, M2.18, M2.19, M2.20, M2.21, M2.22 and M2.24
-> done; M2.23 is blocked on the primitive-boxing step of its annotation-metadata path).
+> M2.13, M2.14, M2.15, M2.16, M2.17, M2.18, M2.19, M2.20, M2.21, M2.22, M2.24 and
+> M2.25 done; M2.23 is blocked on `instanceof` of null in the Spring startup path).
 > Keep this file honest and terse.
 
 ## Phase status
@@ -30,7 +30,8 @@ release process, if wanted, becomes its own phase.
 > Gates are defined in `docs/requirements.md` § Milestones. P0 and P1 are accepted;
 > M0 and M1 are complete, and both gate reviews have passed. M2 is in progress, with
 > M2.1, M2.2, M2.3, M2.4, M2.5, M2.6, M2.7, M2.8, M2.9, M2.10, M2.11, M2.12, M2.13,
-> M2.14, M2.15, M2.16, M2.17, M2.18, M2.19, M2.20, M2.21, M2.22 and M2.24 done.
+> M2.14, M2.15, M2.16, M2.17, M2.18, M2.19, M2.20, M2.21, M2.22, M2.24 and M2.25
+> done.
 
 | Milestone | Delivers | Gate | Status |
 | :--- | :--- | :--- | :--- |
@@ -85,13 +86,13 @@ release process, if wanted, becomes its own phase.
 | M2.22 | Generic `Type` graph and generic reflection | R3 | `cargo test -p rava-interp --test generic_types` exits 0 | done |
 | M2.23 | Spring `AnnotationConfigApplicationContext` bean graph | R3 | `RAVA_SPRING_ACCEPTANCE=1 cargo test -p rava-cli --test spring_context` exits 0 | blocked |
 | M2.24 | `java.util.stream` pipeline for Spring's annotation metadata | R3 | `cargo test -p rava-interp --test streams` exits 0 | done |
-| M2.25 | Full primitive-box family and Number accessors | R3 | `cargo test -p rava-interp --test primitive_boxes` exits 0 | todo |
+| M2.25 | Full primitive-box family and Number accessors | R3 | `cargo test -p rava-interp --test primitive_boxes` exits 0 | done |
 
 P0 and P1 are accepted; P2 is done because the M2 increments are sliced. All M0 and
 M1 slices are done, and both gate reviews passed. M2.1, M2.2, M2.3, M2.4, M2.5,
 M2.6, M2.7, M2.8, M2.9, M2.10, M2.11, M2.12, M2.13, M2.14, M2.15, M2.16, M2.17,
-M2.18, M2.19, M2.20, M2.21, M2.22 and M2.24 are done; M2.23 is blocked on the
-primitive-boxing step of its annotation-metadata path (see the M2.23 boundary). The M2
+M2.18, M2.19, M2.20, M2.21, M2.22, M2.24 and M2.25 are done; M2.23 is blocked on the
+`instanceof`-of-null step of its Spring startup path (see the M2.23 boundary). The M2
 gate is not claimed.
 
 ## Slice log
@@ -133,6 +134,7 @@ gate is not claimed.
 | M2.21 | `cargo test -p rava-interp --test bytecode_surface` | 0 | 2026-11-24 | `putstatic` writes `ClassEntry.statics` keyed by `(name, descriptor)` after resolving the declaring class through the executing loader, with typed static/instance, missing-field, descriptor and value-kind errors; `checkcast`/`instanceof` resolve named/primitive/array operands and cover superclass, interface, array-covariance and `Object`/`Cloneable`/`Serializable` assignability, with a typed `ClassCast` on failure; `tableswitch`/`lookupswitch` map default and case targets through the two-pass boundary map and reject non-zero padding, non-boundary targets, inverted/truncated tables and unsorted/duplicate lookup keys; `ldc`/`ldc_w` decode Integer/Float and `ldc2_w` Long/Double, with `lcmp`/`fcmp<op>`/`dcmp<op>` and `lreturn`/`freturn`/`dreturn`; assembler helpers cover each new form; 15 tests; `cargo test -p rava-interp` 171, `rava-vm` 50, `rava-classfile` 50 and `rava-cli` 77 pass, workspace 348; `cargo xtask ci` exits 0 |
 | M2.22 | `cargo test -p rava-interp --test generic_types` | 0 | 2026-11-24 | `rava-classfile`'s `metadata::signature` module parses class, method and field JVMS signatures into `ClassSignature`/`MethodSignature`/`TypeSignature`, preserving class and member type-parameter names with their class and interface bounds, nested `Outer<T>.Inner<U>` owners, `+`/`-`/`*` type arguments, arrays and `^` throws; malformed input, `V` outside a method result, trailing bytes and nesting past 256 are typed `SignatureError`s. `rava-vm`'s `generic` module resolves those names through the declaring class's loader: a raw type is the existing `Class`/primitive/array class object, while `ParameterizedType`, `TypeVariable`, `WildcardType` and `GenericArrayType` are `HeapObject::Type` objects cached structurally by `Shared::type_object` and enumerated as roots; `getClass` reports the public `java.lang.reflect` interface, and `Object.toString`/`Type.getTypeName` render a deterministic type name. The natives cover `Class.getGenericSuperclass`/`getGenericInterfaces`/`getTypeParameters`, `Field.getGenericType`, `Method.getGenericReturnType`/`getGenericParameterTypes`/`getTypeParameters`, `Constructor.getGenericParameterTypes`/`getTypeParameters`, `ParameterizedType.getActualTypeArguments`/`getRawType`/`getOwnerType`, `TypeVariable.getName`/`getBounds`/`getGenericDeclaration`, `WildcardType.getUpperBounds`/`getLowerBounds` and `GenericArrayType.getGenericComponentType`; the committed release-17 fixture (`demo.Box`, `StringBox`, `Plain`, `Nest`, `GenericProbe`) covers the parameterized superinterface, `List<String>`, `T[]`, `? extends Number`, `? super Integer`, a `Map$Entry` owner, a `Nest<String>.Inner<Integer>` owner, the generic method and both generic constructors; 7 tests; `cargo test -p rava-interp` 178, `rava-vm` 50, `rava-classfile` 56 and `rava-cli` 77 pass, workspace 361; `cargo xtask ci` exits 0 |
 | M2.24 | `cargo test -p rava-interp --test streams` | 0 | 2026-11-24 | `rava-vm` gains `HeapObject::Stream(StreamObject)`, `Spliterator(SpliteratorObject)`, `Collector(CollectorObject)` with a `CollectorKind`, `Optional(Option<Value>)` and the internal `Sink(SinkObject)` consumer; each allocator/accessor is ordinary heap state and `Shared::roots` enumerates stream and spliterator elements, a collector's supplier/key/value/accumulator/combiner/finisher callbacks, an optional's value and a sink's destination, while `Shared::get_class`/`Object.toString` report `java.util.stream.Stream`, `java.util.Spliterator`, `java.util.stream.Collector`, `java.util.Optional` and `java.util.function.Consumer`. `rava-interp::streams` is the eager pipeline: `StreamSupport.stream` drains a VM spliterator directly and a Java spliterator through its own `tryAdvance` with a native consumer that appends to the stream, so Spring's `AnnotationsSpliterator` runs unmodified; `Stream.empty/of/ofNullable/concat`, `filter`, `map`, `flatMap`, `distinct`, `sorted()` (natural order over `Integer`/`Long`/`Float`/`Double`/`String`) and `sorted(Comparator)`, `peek`, `limit`, `skip`, `forEach`, `forEachOrdered`, `toArray` (both forms), `collect(Collector)` and `collect(Supplier,BiConsumer,BiConsumer)`, `count`, `anyMatch`/`allMatch`/`noneMatch`, `findFirst`/`findAny`, `min`/`max`, `reduce`, `toList` and `iterator`; `BaseStream.isParallel`/`sequential`/`parallel`/`unordered`/`onClose`/`close`; `Collection.stream`/`parallelStream`/`spliterator`/`removeIf`; `Spliterator.tryAdvance`/`forEachRemaining`/`trySplit`/`estimateSize`/`getExactSizeIfKnown`/`characteristics`/`hasCharacteristics`/`getComparator`; `Spliterators.emptySpliterator`/`spliterator(Object[],...)`/`spliterator(Collection,int)`/`iterator`; `Collectors.toList`/`toSet`/`toUnmodifiableList`/`toUnmodifiableSet`/`toCollection`/`joining()`/`joining(CharSequence)`/`joining(delim,prefix,suffix)`/`counting`/`toMap` and `Collector.of` in its four- and five-argument forms; `Optional.empty/of/ofNullable/get/isPresent/isEmpty/orElse/orElseGet/orElseThrow/ifPresent/map/filter/toString`; and `Map.forEach(BiConsumer)`. Every callback is invoked the way the rest of the interpreter invokes one — a `LambdaObject` through `lambda::invoke_sam`, any other object through its own SAM on the receiver's superclass chain — and a throwable raised by a callback crosses the native ABI as `VmError::Thrown` rather than being swallowed. An instance-target method reference now dispatches on the receiver's runtime class (then the target owner's interfaces), which is what Spring's `MergedAnnotation::isDirectlyPresent` predicate needs. The chain also exposed and fixed: `Map.of` up to ten pairs, the full map surface on `LinkedHashMap` and `Properties`, concrete `toArray` overrides, `Collections.newSetFromMap`/`emptyIterator`, `Enum.equals`/`hashCode`/`getDeclaringClass`, `Objects.requireNonNull`/`isNull`/`nonNull`/`equals`/`hashCode`/`toString`, `boolean`/`char` (and `byte`/`short` as `Integer`) results in reflective boxing, and superclass walks that now use `Shared::resolution_superclass` so the library's deliberate `AbstractStringBuilder`/`Dictionary` omissions do not break assignability. The committed `crates/interp/tests/fixtures/streams/` fixture (`demo.StreamProbe` plus a real Java `WordSpliterator`, `javac --release 17`) drives filter/map/collect toList and toSet, joining, sorted/limit, a capturing lambda, the VM spliterator surface, a Java spliterator, `Collector.of` with identity and real finishers, and a caught and an uncaught throwing callback; 13 tests; `cargo test -p rava-interp` 191, `rava-vm` 50 and `rava-cli` 78 pass, workspace 375; `cargo xtask ci` exits 0. The Spring rerun now passes the stream calls and stops at `java/lang/Byte.valueOf(B)Ljava/lang/Byte;`, the primitive-box expansion the startup path needs; M2.23 stays blocked. |
+| M2.25 | `cargo test -p rava-interp --test primitive_boxes` | 0 | 2026-11-24 | `HeapObject::Boxed(BoxedPrimitive)` now carries all eight primitives, and `BoxedPrimitive` implements the Java conversion rules: `byteValue`/`shortValue`/`intValue` narrow through the low bits (a `float`/`double` saturates through `int`, NaN becomes 0), `longValue`/`floatValue`/`doubleValue` widen (a `long` to `float` rounds), `equals`/`hashCode` use canonical `Float`/`Double` bits, and `compareTo` is the JDK total order. `Shared` gains `boxed_value`/`boxed`/`box_long`/`box_double`, and `Heap` gains one boxed allocator per kind. The wrapper registry covers `valueOf` (primitive, `String`, `String`+radix), the six `Number` accessors, `parseXxx` (decimal and radix), both `toString` forms, `equals`, `hashCode` (instance and static), `compareTo`/`compare`, the `Float`/`Double` `isNaN`/`isInfinite`/`isFinite`/bit methods, `Long.toHexString`, the `Character` comparison surface and `Boolean.valueOf(String)`/`hashCode`/`compare`/`getBoolean`; the `Number` accessors are also registered on `java.lang.Number`, so a call that resolves to the abstract superclass still converts. A malformed or out-of-range `parseXxx` is a typed `VmError::Native`; the documented syntax gaps are a rejected hex floating literal and an accepted case-insensitive `inf`/`nan` spelling, and the float/double text keeps the M2.9 plain-decimal boundary. `String.valueOf`, `Object.toString`, `StringBuilder.append`, stream `joining` and `Arrays.toString` render every box through `BoxedPrimitive::text`; boxed equality/hashing is shared by `Objects`, maps, callbacks, arrays and streams, and `Collectors.counting()` now boxes a `Long`. Reflective adaptation covers every descriptor: `box_result` returns each primitive's own wrapper, `unbox_argument` applies the JLS §5.3 widening rule (a `Character` widens as its code unit, a wrong or wider box is typed), so `Field.get`/`set`, `Method.invoke`, `Constructor.newInstance` and `Method.getDefaultValue` work for all primitives. The assembled `BoxProbe` fixture covers valueOf, the accessors, parse, text, equals/hash/compare, field get/set, method invoke, constructor arguments and `String.valueOf` for all eight kinds; 11 tests; `cargo test -p rava-interp` 202, `rava-vm` 50, `rava-cli` 78 and `rava-classfile` 56 pass, workspace 386; `cargo xtask ci` exits 0 |
 M0.6 boundary: the reference and class-unloading hooks are registration points only.
 M0 has no collector, so no weak/soft/phantom reference is cleared and no class is
 unloaded; M5 (ADR-0008) implements them on this seam. `MemoryRegion` is a VM-owned
@@ -771,14 +773,55 @@ classpath omits the optional SLF4J/Log4j/Logback adapters), reflective `Array`, 
 missing C1 annotation type (`java.lang.annotation.Documented`) is skipped rather than
 failing annotation reflection. M2.24 landed the eager `java.util.stream` pipeline, so the
 acceptance now runs through `StreamSupport.stream`, `filter`, `map`, `sorted`, `collect` and
-the `Collector`/`Spliterator` callbacks. It still **fails**, now at
-`java/lang/Byte.valueOf(B)Ljava/lang/Byte;`: `org.springframework.beans.BeanUtils`'s
-static initializer boxes every primitive type for its default-editor table, and the VM
-models only `Integer`, `Character` and `Boolean` boxes. The next slice is the full primitive-box family
-(`Byte`/`Short`/`Long`/`Float`/`Double` boxes and the `Number` accessors); until then M2.23
-stays blocked. The test and fixture are committed and must not be weakened.
+the `Collector`/`Spliterator` callbacks. M2.25 landed the primitive-box family, so
+`BeanUtils`'s static initializer now boxes every primitive type and the context gets past
+that step. It still **fails**, now at
+`org/springframework/core/type/classreading/CachingMetadataReaderFactory.setCacheLimit(I)V`
+with `operand has the wrong type`: the interpreter's `instanceof` pushes 1 for a null
+operand, but JVMS §6.5 requires 0, so `null instanceof LocalResourceCache` takes the true
+branch and the following `checkcast`/`invokevirtual` is handed the null. A local probe that
+made `instanceof` of null push 0 reached the next blocker,
+`java/util/LinkedHashMap.<init>(IFZ)V has no bytecode`. M2.23 stays blocked on that pair;
+the `instanceof` fix is M2.21 semantics, not a boxing change, and is not part of this
+slice: the committed `instanceof_handles_null_and_primitive_operands` test asserts
+the same wrong result, so the fix must correct that test as well. The test and fixture
+are committed and must not be weakened.
 
-M2.24 boundary: the stream pipeline is **eager**. A `Stream` holds its whole element list, and `filter`/`map`/`flatMap`/`distinct`/`sorted`/`peek`/`limit`/`skip`/`sequential`/`parallel`/`unordered` each allocate a new stream with a computed vector; there is no lazy stage graph, no short-circuiting until a terminal operation, no `Spliterator`-backed stream after construction, no parallel execution (the `boolean` of `StreamSupport.stream` is recorded and `isParallel` reports it) and no close action (`onClose` returns the stream, `close` does nothing). `sorted()` compares `Integer`/`Long`/`Float`/`Double` numerically and `String` by UTF-16 code unit; any other element or a null is a typed error rather than a synthesized `ClassCastException`/`NullPointerException`. `distinct` and `toSet` compare strings by content, boxed `Integer`s by value and everything else by reference identity; `Collectors.toMap` appends without the JDK's duplicate-key `IllegalStateException`, `toList`/`toUnmodifiableList` return an ordinary modifiable heap list (there is no unmodifiable wrapper), `toUnmodifiableSet` is the ordinary linked set, and `Collectors.counting()` boxes a `Long` only after the primitive-box family exists — until then it boxes an `Integer`, so a caller that expects `java.lang.Long` sees the wrong class. `joining` renders a non-null element through the VM's `String.valueOf` shape, so a non-`CharSequence` is accepted where the JDK would reject it. A VM `Spliterator` is a snapshot plus a cursor with `ORDERED|SIZED|SUBSIZED` (`DISTINCT` added for a set); `trySplit` returns null and `getComparator` null. A Java object implementing `Spliterator` is drained through its own `tryAdvance` and a native `Consumer` sink, so a Java default `forEachRemaining` is not executed by the VM; Spring's and the fixture's spliterators implement the abstract `tryAdvance`, which is the shape this slice supports. `Optional.empty()` allocates a fresh object rather than the JDK singleton, and a present value is a `Value`, so `Optional` identity is not the JDK's. `Collection.stream`/`spliterator` snapshot the collection, so a later mutation is not observed. `removeIf` and `Map.forEach` are the two callback-taking collection operations added here; `compute`/`merge`/`removeIf`'s concurrent variants and the primitive `IntStream`/`LongStream`/`DoubleStream` pipelines are out of scope. `java.util.stream` `gather`, `mapMulti`, `takeWhile`/`dropWhile`, `reduce` with three arguments, `Collectors.groupingBy`/`partitioningBy`/`teeing`/`summarizing*` and `Spliterator.OfInt`/`OfLong`/`OfDouble` are not implemented and fail loudly. No Spring behavior is faked: the acceptance fixture and test are unchanged, and the remaining blocker is recorded above.
+M2.24 boundary: the stream pipeline is **eager**. A `Stream` holds its whole element list, and `filter`/`map`/`flatMap`/`distinct`/`sorted`/`peek`/`limit`/`skip`/`sequential`/`parallel`/`unordered` each allocate a new stream with a computed vector; there is no lazy stage graph, no short-circuiting until a terminal operation, no `Spliterator`-backed stream after construction, no parallel execution (the `boolean` of `StreamSupport.stream` is recorded and `isParallel` reports it) and no close action (`onClose` returns the stream, `close` does nothing). `sorted()` compares `Integer`/`Long`/`Float`/`Double` numerically and `String` by UTF-16 code unit; any other element or a null is a typed error rather than a synthesized `ClassCastException`/`NullPointerException`. `distinct` and `toSet` compare strings by content, boxed primitives by per-kind value equality and everything else by reference identity; `Collectors.toMap` appends without the JDK's duplicate-key `IllegalStateException`, `toList`/`toUnmodifiableList` return an ordinary modifiable heap list (there is no unmodifiable wrapper), `toUnmodifiableSet` is the ordinary linked set, and `Collectors.counting()` boxes a `Long` (M2.25 replaced the temporary `Integer` count that stood in before the primitive-box family existed). `joining` renders a non-null element through the VM's `String.valueOf` shape, so a non-`CharSequence` is accepted where the JDK would reject it. A VM `Spliterator` is a snapshot plus a cursor with `ORDERED|SIZED|SUBSIZED` (`DISTINCT` added for a set); `trySplit` returns null and `getComparator` null. A Java object implementing `Spliterator` is drained through its own `tryAdvance` and a native `Consumer` sink, so a Java default `forEachRemaining` is not executed by the VM; Spring's and the fixture's spliterators implement the abstract `tryAdvance`, which is the shape this slice supports. `Optional.empty()` allocates a fresh object rather than the JDK singleton, and a present value is a `Value`, so `Optional` identity is not the JDK's. `Collection.stream`/`spliterator` snapshot the collection, so a later mutation is not observed. `removeIf` and `Map.forEach` are the two callback-taking collection operations added here; `compute`/`merge`/`removeIf`'s concurrent variants and the primitive `IntStream`/`LongStream`/`DoubleStream` pipelines are out of scope. `java.util.stream` `gather`, `mapMulti`, `takeWhile`/`dropWhile`, `reduce` with three arguments, `Collectors.groupingBy`/`partitioningBy`/`teeing`/`summarizing*` and `Spliterator.OfInt`/`OfLong`/`OfDouble` are not implemented and fail loudly. No Spring behavior is faked: the acceptance fixture and test are unchanged, and the remaining blocker is recorded above.
+
+M2.25 boundary: every primitive wrapper is a `BoxedPrimitive` variant, so all eight
+primitives can live in an `Object` slot and `getClass`/`Object.toString` report the boxed
+class. Each `valueOf` allocates a fresh object: there is still no `Byte`/`Short`/`Integer`/
+`Long` small-value cache, so `==` on two equal boxes is false where the JDK caches small
+values. The wrapper registry covers `valueOf` (primitive, `String` and `String`+radix), the
+six `Number` accessors, `parseXxx` (decimal and radix), both `toString` forms, `equals`,
+`hashCode` (instance and static), `compareTo`/`compare`, the `Float`/`Double`
+classification and bit methods, `Long.toHexString`, and the `Character` comparison
+surface; the `Number` accessors are also registered on `java.lang.Number` for a call that
+resolves to the abstract superclass. The conversion rules are the JDK's: `byteValue`/
+`shortValue`/`intValue` narrow through the low bits (a `float`/`double` saturates through
+`int`, NaN becomes 0), `longValue`/`floatValue`/`doubleValue` widen (a `long` to `float`
+rounds), `Float`/`Double` `equals`/`hashCode` use canonical `floatToIntBits`/
+`doubleToLongBits` (NaN equals NaN, `0.0` does not equal `-0.0`) and `compareTo` is the
+JDK's total order (NaN above every value, `0.0` above `-0.0`, signed-bit tie-break).
+Boxed text is `BoxedPrimitive::text`, shared by `String.valueOf`, `Object.toString`,
+`StringBuilder.append`, stream `joining` and `Arrays.toString`; boxed equality and hashing
+are shared by `Objects`, map keys, collection membership, callbacks, arrays and streams,
+and a `Byte`/`Short`/`Long`/`Float`/`Double` key is equal only to the same wrapper kind
+(where M2.13 accepted an `Integer` key only). `parseXxx` failures are the typed
+`VmError::Native`, never a synthesized `NumberFormatException`; the integer parsers accept
+ASCII digits only, the float parsers reject a hex literal but also accept the
+case-insensitive `inf`/`infinity`/`nan` spellings that Java's grammar does not, and
+`float_text`/`double_text` keep the M2.9 plain-decimal rendering where the JDK would
+print an exponent form. The reflective
+adaptation covers every primitive descriptor: `box_result` returns each primitive's own
+wrapper, `unbox_argument` accepts any wrapper that widens to the target (JLS §5.3, so a
+`Character` widens as its code unit), and a box of the wrong or wider kind is a typed
+error. `Field.get`/`set`, `Method.invoke`, `Constructor.newInstance` and
+`Method.getDefaultValue` therefore work for all primitives. Boundaries not in this slice:
+`decode`, the unsigned/radix `toString` families beyond `Integer`'s hex/binary/octal and
+`Long.toHexString`, `Character.toString(int)`, the small-value caches, and the
+`instanceof`-of-null bug recorded on the M2.23 boundary.
 
 ## Decision log
 
@@ -898,13 +941,20 @@ A fresh session should:
     `Spliterator`/`Spliterators`, `Optional` and `Map.forEach`, the Java-spliterator drain
     through its own `tryAdvance`, the receiver-dispatched instance method reference, and
     the committed `demo.StreamProbe` fixture
-    (`cargo test -p rava-interp --test streams`). M2.23 is **blocked**: the Spring
-    startup path now runs through class loading, logging, annotation reflection,
-    concurrent collections and the stream pipeline, and the first remaining blocker is
-    `java/lang/Byte.valueOf(B)Ljava/lang/Byte;` in `BeanUtils`'s static initializer, which
-    boxes every primitive type. The VM models only `Integer`, `Character` and `Boolean`
-    boxes, so the next slice is the full primitive-box family. `cargo test -p rava-cli --test spring_context`
-    exits 1 with that message; the M2 gate is not claimed.
+    (`cargo test -p rava-interp --test streams`). M2.25 landed the full primitive-box
+    family and the `Number` accessors (`cargo test -p rava-interp --test
+    primitive_boxes`). M2.23 is **blocked**: the Spring startup path now runs through
+    class loading, logging, annotation reflection, the primitive-box and `BeanUtils`
+    static-initializer step, concurrent collections and the stream pipeline, and the first
+    remaining blocker is the interpreter's `instanceof` of a null operand (JVMS §6.5 says
+    the result is 0; the VM pushes 1), which sends
+    `CachingMetadataReaderFactory.setCacheLimit` down the `null instanceof
+    LocalResourceCache` true branch and fails with `operand has the wrong type`. The
+    M2.21 test `instanceof_handles_null_and_primitive_operands` currently asserts that
+    wrong result and has to be corrected with it. With that corrected locally the next
+    blocker is `java/util/LinkedHashMap.<init>(IFZ)V has no
+    bytecode`. `cargo test -p rava-cli --test spring_context` exits 1 with the
+    `instanceof` message; the M2 gate is not claimed.
 4. Do not write runtime code outside a defined slice.
 
 ## Open decisions

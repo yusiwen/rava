@@ -429,14 +429,29 @@ impl MemberKind {
 
 /// A boxed primitive value (`java.lang.Integer.valueOf(int)`).
 ///
-/// M2.10 models one box: `java.lang.Integer` holding its primitive `int`. A box is an
-/// ordinary heap object rather than a second [`crate::Value`] variant, so it can live in
-/// an `Object`-typed slot and `getClass` reports `java.lang.Integer`. There is no
-/// `Boolean` or `Long` box yet and no small-value cache: every `valueOf` allocates a new
-/// object.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Every one of the eight primitive wrappers is modelled as one variant holding its
+/// primitive: `Byte`/`Short`/`Integer`/`Long`/`Float`/`Double` are `java.lang.Number`
+/// subclasses, `Character` and `Boolean` are not. A box is an ordinary heap object rather
+/// than a second [`crate::Value`] variant, so it can live in an `Object`-typed slot and
+/// `getClass` reports its boxed class. There is no small-value cache: every `valueOf`
+/// allocates a new object, so `==` on two equal boxes is false where the JDK caches
+/// small values.
+///
+/// The accessors here implement the Java conversion rules the wrappers define:
+/// `byteValue`/`shortValue`/`intValue`/`longValue` follow the JDK's narrowing (a
+/// `long` keeps its low bits, a `float`/`double` narrows through `int` exactly as
+/// `(byte)`/`(short)`/`(int)` do, so a huge or NaN value saturates and then truncates),
+/// `floatValue`/`doubleValue` widen (a `long` to `float` rounds), `equals` is per-box
+/// value equality with `Float`/`Double` bit semantics, and `compareTo` orders a `NaN`
+/// above every value and `0.0` above `-0.0`.
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum BoxedPrimitive {
+    Byte(i8),
+    Short(i16),
     Integer(i32),
+    Long(i64),
+    Float(f32),
+    Double(f64),
     Character(char),
     Boolean(bool),
 }
@@ -445,7 +460,12 @@ impl BoxedPrimitive {
     /// The internal class name of the box's runtime class.
     pub fn class_name(self) -> &'static str {
         match self {
+            Self::Byte(_) => "java/lang/Byte",
+            Self::Short(_) => "java/lang/Short",
             Self::Integer(_) => "java/lang/Integer",
+            Self::Long(_) => "java/lang/Long",
+            Self::Float(_) => "java/lang/Float",
+            Self::Double(_) => "java/lang/Double",
             Self::Character(_) => "java/lang/Character",
             Self::Boolean(_) => "java/lang/Boolean",
         }
@@ -454,20 +474,249 @@ impl BoxedPrimitive {
     /// The dotted binary name of the box's runtime class.
     pub fn binary_name(self) -> &'static str {
         match self {
+            Self::Byte(_) => "java.lang.Byte",
+            Self::Short(_) => "java.lang.Short",
             Self::Integer(_) => "java.lang.Integer",
+            Self::Long(_) => "java.lang.Long",
+            Self::Float(_) => "java.lang.Float",
+            Self::Double(_) => "java.lang.Double",
             Self::Character(_) => "java.lang.Character",
             Self::Boolean(_) => "java.lang.Boolean",
         }
     }
 
-    /// The primitive `int` this box holds.
+    /// The one-character JVM field descriptor of this box's primitive.
+    pub fn descriptor(self) -> &'static str {
+        match self {
+            Self::Byte(_) => "B",
+            Self::Short(_) => "S",
+            Self::Integer(_) => "I",
+            Self::Long(_) => "J",
+            Self::Float(_) => "F",
+            Self::Double(_) => "D",
+            Self::Character(_) => "C",
+            Self::Boolean(_) => "Z",
+        }
+    }
+
+    /// Whether this box is a `java.lang.Number` subclass.
+    pub fn is_numeric(self) -> bool {
+        !matches!(self, Self::Character(_) | Self::Boolean(_))
+    }
+
+    /// The `int` this box holds when it is an `Integer`; other kinds are `None`.
     pub fn as_int(self) -> Option<i32> {
         match self {
             Self::Integer(value) => Some(value),
-            Self::Character(_) => None,
-            Self::Boolean(_) => None,
+            _ => None,
         }
     }
+
+    /// `Number.byteValue()`: `(byte)` of the value.
+    pub fn byte_value(self) -> Option<i8> {
+        Some(match self {
+            Self::Byte(value) => value,
+            Self::Short(value) => value as i8,
+            Self::Integer(value) => value as i8,
+            Self::Long(value) => value as i8,
+            // `(byte)` of a floating value is `(byte) intValue()` in the JDK: the `int`
+            // conversion saturates and NaN becomes 0, then the low 8 bits are kept.
+            Self::Float(value) => value as i32 as i8,
+            Self::Double(value) => value as i32 as i8,
+            Self::Character(_) | Self::Boolean(_) => return None,
+        })
+    }
+
+    /// `Number.shortValue()`: `(short)` of the value.
+    pub fn short_value(self) -> Option<i16> {
+        Some(match self {
+            Self::Byte(value) => i16::from(value),
+            Self::Short(value) => value,
+            Self::Integer(value) => value as i16,
+            Self::Long(value) => value as i16,
+            Self::Float(value) => value as i32 as i16,
+            Self::Double(value) => value as i32 as i16,
+            Self::Character(_) | Self::Boolean(_) => return None,
+        })
+    }
+
+    /// `Number.intValue()`: `(int)` of the value.
+    pub fn int_value(self) -> Option<i32> {
+        Some(match self {
+            Self::Byte(value) => i32::from(value),
+            Self::Short(value) => i32::from(value),
+            Self::Integer(value) => value,
+            Self::Long(value) => value as i32,
+            // Rust's float-to-int cast saturates and maps NaN to 0, the JDK's `(int)`.
+            Self::Float(value) => value as i32,
+            Self::Double(value) => value as i32,
+            Self::Character(_) | Self::Boolean(_) => return None,
+        })
+    }
+
+    /// `Number.longValue()`: `(long)` of the value.
+    pub fn long_value(self) -> Option<i64> {
+        Some(match self {
+            Self::Byte(value) => i64::from(value),
+            Self::Short(value) => i64::from(value),
+            Self::Integer(value) => i64::from(value),
+            Self::Long(value) => value,
+            Self::Float(value) => value as i64,
+            Self::Double(value) => value as i64,
+            Self::Character(_) | Self::Boolean(_) => return None,
+        })
+    }
+
+    /// `Number.floatValue()`: `(float)` of the value.
+    pub fn float_value(self) -> Option<f32> {
+        Some(match self {
+            Self::Byte(value) => f32::from(value),
+            Self::Short(value) => f32::from(value),
+            Self::Integer(value) => value as f32,
+            Self::Long(value) => value as f32,
+            Self::Float(value) => value,
+            Self::Double(value) => value as f32,
+            Self::Character(_) | Self::Boolean(_) => return None,
+        })
+    }
+
+    /// `Number.doubleValue()`: `(double)` of the value.
+    pub fn double_value(self) -> Option<f64> {
+        Some(match self {
+            Self::Byte(value) => f64::from(value),
+            Self::Short(value) => f64::from(value),
+            Self::Integer(value) => f64::from(value),
+            Self::Long(value) => value as f64,
+            Self::Float(value) => f64::from(value),
+            Self::Double(value) => value,
+            Self::Character(_) | Self::Boolean(_) => return None,
+        })
+    }
+
+    /// The `toString`/`String.valueOf` text of the boxed value.
+    pub fn text(self) -> String {
+        match self {
+            Self::Byte(value) => value.to_string(),
+            Self::Short(value) => value.to_string(),
+            Self::Integer(value) => value.to_string(),
+            Self::Long(value) => value.to_string(),
+            Self::Float(value) => crate::string::float_text(value),
+            Self::Double(value) => crate::string::double_text(value),
+            Self::Character(value) => value.to_string(),
+            Self::Boolean(value) => value.to_string(),
+        }
+    }
+
+    /// `Wrapper.equals(Object)` between two boxes: same kind and Java value equality.
+    ///
+    /// `Float`/`Double` compare their canonical bits, so `NaN` equals `NaN` and `0.0`
+    /// does not equal `-0.0`, exactly as `Float.equals`/`Double.equals` define.
+    pub fn java_equals(self, other: Self) -> bool {
+        match (self, other) {
+            (Self::Byte(left), Self::Byte(right)) => left == right,
+            (Self::Short(left), Self::Short(right)) => left == right,
+            (Self::Integer(left), Self::Integer(right)) => left == right,
+            (Self::Long(left), Self::Long(right)) => left == right,
+            (Self::Float(left), Self::Float(right)) => {
+                canonical_float_bits(left) == canonical_float_bits(right)
+            }
+            (Self::Double(left), Self::Double(right)) => {
+                canonical_double_bits(left) == canonical_double_bits(right)
+            }
+            (Self::Character(left), Self::Character(right)) => left == right,
+            (Self::Boolean(left), Self::Boolean(right)) => left == right,
+            _ => false,
+        }
+    }
+
+    /// `Wrapper.hashCode()` for the boxed value.
+    pub fn java_hash_code(self) -> i32 {
+        match self {
+            Self::Byte(value) => i32::from(value),
+            Self::Short(value) => i32::from(value),
+            Self::Integer(value) => value,
+            Self::Long(value) => {
+                let bits = value as u64;
+                (value ^ ((bits >> 32) as i64)) as i32
+            }
+            Self::Float(value) => canonical_float_bits(value) as i32,
+            Self::Double(value) => {
+                let bits = canonical_double_bits(value);
+                (bits ^ (bits >> 32)) as i32
+            }
+            Self::Character(value) => i32::from(value as u16),
+            Self::Boolean(value) => {
+                if value {
+                    1231
+                } else {
+                    1237
+                }
+            }
+        }
+    }
+
+    /// `Wrapper.compareTo(same box)`: `None` for two different primitive kinds.
+    ///
+    /// `Float`/`Double` use the JDK's total order: a `NaN` compares greater than every
+    /// value and equal to itself, and `0.0` compares greater than `-0.0`.
+    pub fn java_compare(self, other: Self) -> Option<std::cmp::Ordering> {
+        Some(match (self, other) {
+            (Self::Byte(left), Self::Byte(right)) => left.cmp(&right),
+            (Self::Short(left), Self::Short(right)) => left.cmp(&right),
+            (Self::Integer(left), Self::Integer(right)) => left.cmp(&right),
+            (Self::Long(left), Self::Long(right)) => left.cmp(&right),
+            (Self::Float(left), Self::Float(right)) => float_order(left, right)?,
+            (Self::Double(left), Self::Double(right)) => double_order(left, right)?,
+            (Self::Character(left), Self::Character(right)) => left.cmp(&right),
+            (Self::Boolean(left), Self::Boolean(right)) => left.cmp(&right),
+            _ => return None,
+        })
+    }
+}
+
+/// `Float.floatToIntBits`: every `NaN` is the one canonical quiet-NaN bit pattern.
+pub fn canonical_float_bits(value: f32) -> u32 {
+    if value.is_nan() {
+        0x7fc0_0000
+    } else {
+        value.to_bits()
+    }
+}
+
+/// `Double.doubleToLongBits`: every `NaN` is the one canonical quiet-NaN bit pattern.
+pub fn canonical_double_bits(value: f64) -> u64 {
+    if value.is_nan() {
+        0x7ff8_0000_0000_0000
+    } else {
+        value.to_bits()
+    }
+}
+
+/// `Float.compare`: numeric order, then the canonical bit pattern for `NaN`/zeroes.
+fn float_order(left: f32, right: f32) -> Option<std::cmp::Ordering> {
+    use std::cmp::Ordering;
+    if left < right {
+        return Some(Ordering::Less);
+    }
+    if left > right {
+        return Some(Ordering::Greater);
+    }
+    // `Float.compare` compares `floatToIntBits` as signed `int`s, so `0.0` (bits 0)
+    // sorts above `-0.0` (bits `i32::MIN`) and every `NaN` above both.
+    Some((canonical_float_bits(left) as i32).cmp(&(canonical_float_bits(right) as i32)))
+}
+
+/// `Double.compare`: numeric order, then the canonical bit pattern for `NaN`/zeroes.
+fn double_order(left: f64, right: f64) -> Option<std::cmp::Ordering> {
+    use std::cmp::Ordering;
+    if left < right {
+        return Some(Ordering::Less);
+    }
+    if left > right {
+        return Some(Ordering::Greater);
+    }
+    // `Double.compare` compares `doubleToLongBits` as signed `long`s.
+    Some((canonical_double_bits(left) as i64).cmp(&(canonical_double_bits(right) as i64)))
 }
 
 /// A reflected field, method or constructor (`java.lang.reflect.Member`).
@@ -1212,20 +1461,51 @@ impl Heap {
         self.allocate(HeapObject::Reflect(member))
     }
 
-    /// Allocate a boxed `int`. Callers go through [`crate::Shared::box_int`], which is
-    /// the one boxing entry point the reflection natives use.
+    /// Allocate a boxed primitive. Callers go through [`crate::Shared::boxed_value`] or the
+    /// wrappers' `valueOf` natives, which are the one boxing entry point the reflective
+    /// invocation path uses.
+    pub fn allocate_boxed(&mut self, boxed: BoxedPrimitive) -> ObjRef {
+        self.allocate(HeapObject::Boxed(boxed))
+    }
+
+    /// Allocate a boxed `byte`.
+    pub fn allocate_boxed_byte(&mut self, value: i8) -> ObjRef {
+        self.allocate_boxed(BoxedPrimitive::Byte(value))
+    }
+
+    /// Allocate a boxed `short`.
+    pub fn allocate_boxed_short(&mut self, value: i16) -> ObjRef {
+        self.allocate_boxed(BoxedPrimitive::Short(value))
+    }
+
+    /// Allocate a boxed `int`.
     pub fn allocate_boxed_int(&mut self, value: i32) -> ObjRef {
-        self.allocate(HeapObject::Boxed(BoxedPrimitive::Integer(value)))
+        self.allocate_boxed(BoxedPrimitive::Integer(value))
+    }
+
+    /// Allocate a boxed `long`.
+    pub fn allocate_boxed_long(&mut self, value: i64) -> ObjRef {
+        self.allocate_boxed(BoxedPrimitive::Long(value))
+    }
+
+    /// Allocate a boxed `float`.
+    pub fn allocate_boxed_float(&mut self, value: f32) -> ObjRef {
+        self.allocate_boxed(BoxedPrimitive::Float(value))
+    }
+
+    /// Allocate a boxed `double`.
+    pub fn allocate_boxed_double(&mut self, value: f64) -> ObjRef {
+        self.allocate_boxed(BoxedPrimitive::Double(value))
     }
 
     /// Allocate a boxed `char`.
     pub fn allocate_boxed_char(&mut self, value: char) -> ObjRef {
-        self.allocate(HeapObject::Boxed(BoxedPrimitive::Character(value)))
+        self.allocate_boxed(BoxedPrimitive::Character(value))
     }
 
     /// Allocate a boxed `boolean`.
     pub fn allocate_boxed_boolean(&mut self, value: bool) -> ObjRef {
-        self.allocate(HeapObject::Boxed(BoxedPrimitive::Boolean(value)))
+        self.allocate_boxed(BoxedPrimitive::Boolean(value))
     }
 
     /// Allocate an annotation instance. Callers go through

@@ -22,7 +22,7 @@
 //! declaration with no `Code` and fail loudly instead of guessing.
 
 use crate::VmError;
-use crate::heap::{BoxedPrimitive, Heap, HeapError, HeapObject, ObjRef};
+use crate::heap::{Heap, HeapError, HeapObject, ObjRef};
 use crate::loader::LoaderId;
 use crate::shared::Shared;
 use crate::thread::ThreadState;
@@ -273,7 +273,8 @@ fn entries_mut(heap: &mut Heap, receiver: ObjRef) -> Result<&mut Vec<(Value, Val
 
 /// Equality of two map keys or values.
 ///
-/// A string compares by content and a boxed `Integer` by value; any other pair of
+/// A string compares by content and a boxed primitive by per-kind Java value equality;
+/// any other pair of
 /// references compares by identity, and null equals only null. The non-reference arm is
 /// unreachable through the `Object`-typed signatures this slice registers, but the map
 /// stores [`Value`]s, so it is defined rather than left to panic.
@@ -286,10 +287,7 @@ pub(crate) fn values_equal(heap: &Heap, left: Value, right: Value) -> Result<boo
     }
     match (heap.get(left_ref)?, heap.get(right_ref)?) {
         (HeapObject::Str(left), HeapObject::Str(right)) => Ok(left == right),
-        (
-            HeapObject::Boxed(BoxedPrimitive::Integer(left)),
-            HeapObject::Boxed(BoxedPrimitive::Integer(right)),
-        ) => Ok(left == right),
+        (HeapObject::Boxed(left), HeapObject::Boxed(right)) => Ok(left.java_equals(*right)),
         _ => Ok(left_ref == right_ref),
     }
 }

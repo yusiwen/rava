@@ -234,16 +234,32 @@ raised by one crosses the native ABI as a thrown object. The pipeline is eager, 
 are no lazy stages, no parallel execution, no short-circuiting source and no close action.
 A committed `javac --release 17` fixture (`demo.StreamProbe` plus a real Java
 `WordSpliterator`) covers the operations, a capturing lambda and a caught and an uncaught
-throwing callback. **M2.23 is blocked (2026-11-24):** the committed `demo.SpringSmoke`
-fixture and `crates/cli/tests/spring_context.rs` start a real Spring
+throwing callback. **M2.25 is done (2026-11-24):** all eight primitive wrappers are heap
+boxes with the JDK conversion rules. `Byte`, `Short`, `Long`, `Float` and `Double` join
+`Integer`/`Character`/`Boolean`, each with `valueOf`, its `Number` accessors, `parseXxx`,
+both `toString` forms, `equals`, `hashCode` and `compareTo`/`compare`; `Float`/`Double`
+use canonical-bit equality and the JDK total order (`NaN` equals `NaN`, `0.0` sorts above
+`-0.0`). Boxed text is shared by `String.valueOf`, `Object.toString`,
+`StringBuilder.append` and `Arrays.toString`, boxed keys compare per wrapper kind, and
+`Collectors.counting()` now boxes a `Long`. Reflective `Field.get`/`set`,
+`Method.invoke` and `Constructor.newInstance` box and unbox every primitive descriptor
+with the JLS widening rule. A malformed `parseXxx` is a typed error; a hex float literal is
+rejected and the case-insensitive `inf`/`nan` spellings are accepted where Java's grammar
+is not, which are the documented parser gaps. A committed `BoxProbe` fixture
+covers all eight kinds (`cargo test -p rava-interp --test primitive_boxes`). **M2.23 is
+blocked (2026-11-24):** the committed `demo.SpringSmoke` fixture and
+`crates/cli/tests/spring_context.rs` start a real Spring
 `AnnotationConfigApplicationContext` and assert the `hello` bean, but the local test still
-fails — now at `java.lang.Byte.valueOf(byte)` in `BeanUtils`'s static initializer, which
-boxes every primitive type for its default-editor table; the VM models only `Integer`,
-`Character` and `Boolean` boxes. The
-startup chain before that point is in place: monitors, the missing numeric instructions,
-collections, iterators, logging, concurrency natives, exception construction, reflection
-and the stream pipeline. The remaining work is the full primitive-box family. The M2 gate
-is not claimed.
+fails — now because the interpreter pushes 1 for `null instanceof LocalResourceCache`
+where JVMS §6.5 requires 0, so `CachingMetadataReaderFactory.setCacheLimit(int)` takes
+the wrong branch and hands a null to `checkcast`/`invokevirtual`, failing with `operand
+has the wrong type`. With that corrected locally the next blocker is
+`java.util.LinkedHashMap(int, float, boolean)`, whose C1 stub has neither code nor a
+native. The committed M2.21 test `instanceof_handles_null_and_primitive_operands`
+asserts the same wrong `instanceof` result and has to be corrected with the fix. The startup chain before that point is in place: monitors, the missing numeric
+instructions, collections, iterators, logging, concurrency natives, exception
+construction, reflection, the primitive-box step and the stream pipeline. The M2 gate is
+not claimed.
 
 ## What this project is
 

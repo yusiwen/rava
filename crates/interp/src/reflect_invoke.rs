@@ -7,11 +7,11 @@
 //! and then runs `<init>` through [`crate::run_instance_method`]. There is no second
 //! execution path and no second frame model.
 //!
-//! The public surface is intentionally narrow: one `int`/reference argument conversion in
+//! The public surface is intentionally narrow: one per-primitive argument conversion in
 //! each direction ([`rava_vm::boxed::unbox_argument`] and
-//! [`rava_vm::boxed::box_result`]), no overload resolution, no varargs, no access checks
-//! and no `setAccessible`. A `Method` object is invoked exactly by the name and descriptor
-//! it was reflected with.
+//! [`rava_vm::boxed::box_result`], covering every primitive wrapper and Java's widening
+//! rule), no overload resolution, no varargs, no access checks and no `setAccessible`. A
+//! `Method` object is invoked exactly by the name and descriptor it was reflected with.
 //!
 //! `java.lang.reflect.InvocationTargetException` is deferred. A Java throwable raised by
 //! the invoked method is not swallowed: it crosses the native ABI as
@@ -152,7 +152,7 @@ fn unbox_arguments(
 ///
 /// For a static method the `Object` receiver is ignored, as on the JDK. For an instance
 /// method it must be a non-null instance assignable to the declaring class. The result is
-/// boxed by [`boxed::box_result`], so an `int` return becomes a `java.lang.Integer` and a
+/// boxed by [`boxed::box_result`], so each primitive return becomes its own wrapper and a
 /// reference return keeps its handle.
 fn method_invoke(
     shared: &Shared,
@@ -220,7 +220,7 @@ fn method_invoke(
             values,
         )
     };
-    let result = result.map_err(invocation_error)?;
+    let result = result.map_err(|error| invocation_error_for(shared, &member, error))?;
     let return_type = reflection::return_descriptor(&member.descriptor)?;
     Ok(Some(boxed::box_result(shared, return_type, result)?))
 }
@@ -256,7 +256,7 @@ fn constructor_new_instance(
     );
     match result {
         Ok(_) => Ok(Some(Value::Ref(instance))),
-        Err(error) => Err(invocation_error(error)),
+        Err(error) => Err(invocation_error_for(shared, &member, error)),
     }
 }
 
@@ -309,6 +309,27 @@ fn invocation_error(error: InterpError) -> VmError {
     match error {
         InterpError::Thrown(throwable) => VmError::Thrown(throwable),
         other => VmError::Native(format!("reflective invocation failed: {other}")),
+    }
+}
+
+/// Add the reflected member's identity to a native invocation failure.
+///
+/// A `Thrown` keeps its identity; only a native error gains the context, so the next
+/// blocker in a long reflective chain names the method that failed.
+fn invocation_error_for(shared: &Shared, member: &ReflectMember, error: InterpError) -> VmError {
+    match invocation_error(error) {
+        VmError::Native(detail) => VmError::Native(format!(
+            "{} {}.{}{}: {detail}",
+            if member.kind == MemberKind::Constructor {
+                "constructor"
+            } else {
+                "method"
+            },
+            class_name(shared, member.class),
+            member.name,
+            member.descriptor
+        )),
+        other => other,
     }
 }
 

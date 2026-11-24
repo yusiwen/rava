@@ -724,8 +724,8 @@ fn string_intern(
 
 /// The `String.valueOf(Object)`-shaped text of a reference.
 ///
-/// A string and a builder contribute their content, a boxed `Integer` its decimal value,
-/// and null the text `"null"`. Any other object uses the VM's `Object.toString` shape
+/// A string and a builder contribute their content, every wrapper its `toString` text
+/// (so a boxed `Double` renders as a Java double), and null the text `"null"`. Any other object uses the VM's `Object.toString` shape
 /// (`ClassName@hexIdentityHash`) instead of dispatching a Java `toString` override: a VM
 /// native cannot re-enter the interpreter. The shape is the one
 /// [`crate::object::runtime_binary_name`] and `ObjRef::identity_hash` produce for
@@ -754,15 +754,10 @@ pub(crate) fn object_text(
         {
             HeapObject::Str(text) => Text::Known(text.clone()),
             HeapObject::StringBuilder(text) => Text::Known(text.clone()),
-            HeapObject::Boxed(crate::heap::BoxedPrimitive::Integer(value)) => {
-                Text::Known(value.to_string())
-            }
-            HeapObject::Boxed(crate::heap::BoxedPrimitive::Character(value)) => {
-                Text::Known(value.to_string())
-            }
-            HeapObject::Boxed(crate::heap::BoxedPrimitive::Boolean(value)) => {
-                Text::Known(value.to_string())
-            }
+            // Every wrapper renders through its own `toString`, so a boxed `Long`,
+            // `Float` or `Double` uses the decimal/Java-float text rather than the
+            // default `ClassName@hex` shape.
+            HeapObject::Boxed(boxed) => Text::Known(boxed.text()),
             _ => Text::Other,
         }
     };
@@ -822,8 +817,8 @@ pub fn double_text(value: f64) -> String {
 ///
 /// A null argument is the interned text `"null"`, as on the JDK. A `String` argument is
 /// returned unchanged, which preserves reference identity; every other object goes through
-/// [`object_text`], so a boxed `Integer` becomes its decimal value and an object without a
-/// Java `toString` override gets `ClassName@hex`.
+/// [`object_text`], so a wrapper becomes its `toString` text and an object without a Java
+/// `toString` override gets `ClassName@hex`.
 fn string_value_of_object(
     shared: &Shared,
     _thread: &ThreadState,

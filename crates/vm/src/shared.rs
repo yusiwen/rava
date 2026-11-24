@@ -688,13 +688,46 @@ impl Shared {
         self.heap().allocate_lambda(lambda)
     }
 
-    /// Box an `int` as a fresh `java.lang.Integer` heap object.
+    /// Box a primitive value as a fresh wrapper heap object.
     ///
-    /// There is no small-value cache in M2.10: two calls with the same value return two
-    /// distinct objects, so `==` on boxes is not the JDK's small-integer identity. The
-    /// box is an ordinary heap object, not a permanent root.
+    /// There is no small-value cache: two calls with the same value return two distinct
+    /// objects, so `==` on boxes is not the JDK's small-value identity. The box is an
+    /// ordinary heap object, not a permanent root.
+    pub fn boxed_value(&self, boxed: BoxedPrimitive) -> ObjRef {
+        self.heap().allocate_boxed(boxed)
+    }
+
+    /// Box an `int` as a fresh `java.lang.Integer` heap object.
     pub fn box_int(&self, value: i32) -> ObjRef {
-        self.heap().allocate_boxed_int(value)
+        self.boxed_value(BoxedPrimitive::Integer(value))
+    }
+
+    /// Box a `long` as a fresh `java.lang.Long` heap object.
+    pub fn box_long(&self, value: i64) -> ObjRef {
+        self.boxed_value(BoxedPrimitive::Long(value))
+    }
+
+    /// Box a `double` as a fresh `java.lang.Double` heap object.
+    pub fn box_double(&self, value: f64) -> ObjRef {
+        self.boxed_value(BoxedPrimitive::Double(value))
+    }
+
+    /// The boxed primitive behind a reference.
+    ///
+    /// A null reference and a non-boxed object are typed errors, so a caller never
+    /// silently treats an unrelated reference as a box.
+    pub fn boxed(&self, reference: ObjRef) -> Result<BoxedPrimitive, VmError> {
+        if reference.is_null() {
+            return Err(VmError::Native("cannot unbox a null reference".to_owned()));
+        }
+        let heap = self.heap();
+        match heap.get(reference) {
+            Ok(HeapObject::Boxed(boxed)) => Ok(*boxed),
+            Ok(_) => Err(VmError::Native(format!(
+                "{reference} is not a boxed primitive"
+            ))),
+            Err(error) => Err(VmError::Native(error.to_string())),
+        }
     }
 
     /// The `int` inside a boxed `Integer`.
@@ -702,21 +735,7 @@ impl Shared {
     /// A null reference, a non-boxed object and a box of another primitive kind are typed
     /// errors, so a caller never silently treats an unrelated reference as an `int`.
     pub fn unbox_int(&self, reference: ObjRef) -> Result<i32, VmError> {
-        if reference.is_null() {
-            return Err(VmError::Native(
-                "cannot unbox a null reference as an int".to_owned(),
-            ));
-        }
-        let boxed = {
-            let heap = self.heap();
-            match heap.get(reference) {
-                Ok(HeapObject::Boxed(boxed)) => Some(*boxed),
-                Ok(_) => None,
-                Err(error) => return Err(VmError::Native(error.to_string())),
-            }
-        };
-        let boxed =
-            boxed.ok_or_else(|| VmError::Native(format!("{reference} is not a boxed Integer")))?;
+        let boxed = self.boxed(reference)?;
         boxed.as_int().ok_or_else(|| {
             VmError::Native(format!(
                 "{reference} is a boxed {}, not a boxed Integer",

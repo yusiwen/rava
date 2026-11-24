@@ -372,15 +372,7 @@ fn text_of(shared: &Shared, value: Value) -> Result<String, VmError> {
                 match heap.get(reference).map_err(heap_error)? {
                     HeapObject::Str(text) => Some(text.clone()),
                     HeapObject::StringBuilder(text) => Some(text.clone()),
-                    HeapObject::Boxed(rava_vm::BoxedPrimitive::Integer(value)) => {
-                        Some(value.to_string())
-                    }
-                    HeapObject::Boxed(rava_vm::BoxedPrimitive::Character(value)) => {
-                        Some(value.to_string())
-                    }
-                    HeapObject::Boxed(rava_vm::BoxedPrimitive::Boolean(value)) => {
-                        Some(value.to_string())
-                    }
+                    HeapObject::Boxed(boxed) => Some(boxed.text()),
                     _ => None,
                 }
             };
@@ -414,10 +406,7 @@ fn same_value(shared: &Shared, left: Value, right: Value) -> Result<bool, VmErro
         heap.get(right_ref).map_err(heap_error)?,
     ) {
         (HeapObject::Str(left), HeapObject::Str(right)) => Ok(left == right),
-        (
-            HeapObject::Boxed(rava_vm::BoxedPrimitive::Integer(left)),
-            HeapObject::Boxed(rava_vm::BoxedPrimitive::Integer(right)),
-        ) => Ok(left == right),
+        (HeapObject::Boxed(left), HeapObject::Boxed(right)) => Ok(left.java_equals(*right)),
         _ => Ok(left_ref == right_ref),
     }
 }
@@ -444,10 +433,14 @@ fn compare_values(shared: &Shared, left: Value, right: Value) -> Result<i32, VmE
                     rava_vm::string::utf16_units(left).cmp(&rava_vm::string::utf16_units(right))
                         as i32,
                 ),
-                (
-                    HeapObject::Boxed(rava_vm::BoxedPrimitive::Integer(left)),
-                    HeapObject::Boxed(rava_vm::BoxedPrimitive::Integer(right)),
-                ) => Ok(left.cmp(right) as i32),
+                (HeapObject::Boxed(left), HeapObject::Boxed(right)) => left
+                    .java_compare(*right)
+                    .map(|ordering| ordering as i32)
+                    .ok_or_else(|| {
+                        VmError::Native(
+                            "sorted() cannot compare two different wrapper kinds".to_owned(),
+                        )
+                    }),
                 _ => Err(VmError::Native(
                     "sorted() has no natural ordering for this element type".to_owned(),
                 )),
@@ -1296,7 +1289,8 @@ fn collect(
             joined.push_str(suffix);
             Ok(shared.heap().allocate_string(joined))
         }
-        CollectorKind::Counting => Ok(shared.heap().allocate_boxed_int(elements.len() as i32)),
+        // `Collectors.counting()` returns a `Long`, as the JDK does.
+        CollectorKind::Counting => Ok(shared.box_long(elements.len() as i64)),
         CollectorKind::ToMap { key, value } => {
             let class = shared.load_library_class(HASH_MAP_CLASS)?;
             let map = shared.heap().allocate_map(class);

@@ -1012,11 +1012,11 @@ fn wrong_receivers_static_fields_and_wrong_arguments_are_typed_errors() {
     let wrong = reference_array(&fixture.shared, &[text]);
     assert_native_error(
         method_invoke(&fixture, set_value, Value::Ref(bean), wrong),
-        "boxed Integer",
+        "is not a boxed primitive",
     );
     assert_native_error(
         field_set(&fixture, value_field, bean, Value::Ref(text)),
-        "boxed Integer",
+        "is not a boxed primitive",
     );
 
     // Constructor argument errors.
@@ -1032,7 +1032,7 @@ fn wrong_receivers_static_fields_and_wrong_arguments_are_typed_errors() {
     let wrong = reference_array(&fixture.shared, &[text]);
     assert_native_error(
         constructor_new_instance(&fixture, constructor, Value::Ref(wrong)),
-        "boxed Integer",
+        "is not a boxed primitive",
     );
 
     assert_eq!(fixture.thread.frame_depth(), 0);
@@ -1138,7 +1138,7 @@ fn a_thrown_invocation_is_propagated_not_swallowed() {
 }
 
 #[test]
-fn boxed_helpers_reject_null_and_non_integer_references() {
+fn boxed_helpers_reject_null_and_non_boxed_references() {
     let fixture = fixture();
     assert!(matches!(
         fixture.shared.unbox_int(ObjRef::NULL),
@@ -1147,13 +1147,18 @@ fn boxed_helpers_reject_null_and_non_integer_references() {
     let text = fixture.shared.intern_string("42");
     assert!(matches!(
         fixture.shared.unbox_int(text),
-        Err(VmError::Native(ref detail)) if detail.contains("not a boxed Integer")
+        Err(VmError::Native(ref detail)) if detail.contains("not a boxed")
     ));
 
-    // A primitive descriptor other than int is not guessed at.
+    // M2.25: every primitive descriptor converts through its own wrapper. An `int` box
+    // widens to a `long` parameter (JLS §5.3) but does not narrow to a `byte` one.
     assert!(matches!(
         boxed::unbox_argument(&fixture.shared, "J", Value::Ref(fixture.shared.box_int(1))),
-        Err(VmError::Native(ref detail)) if detail.contains("only int and reference")
+        Ok(Value::Long(1))
+    ));
+    assert!(matches!(
+        boxed::unbox_argument(&fixture.shared, "B", Value::Ref(fixture.shared.box_int(1))),
+        Err(VmError::Native(ref detail)) if detail.contains("does not widen")
     ));
     assert!(matches!(
         boxed::box_result(&fixture.shared, "V", None),
@@ -1161,6 +1166,14 @@ fn boxed_helpers_reject_null_and_non_integer_references() {
     ));
     assert!(matches!(
         boxed::box_result(&fixture.shared, "J", Some(Value::Long(1))),
-        Err(VmError::Native(ref detail)) if detail.contains("only int")
+        Ok(Value::Ref(reference))
+            if matches!(
+                fixture.shared.heap().get(reference).unwrap(),
+                HeapObject::Boxed(BoxedPrimitive::Long(1))
+            )
+    ));
+    assert!(matches!(
+        boxed::box_result(&fixture.shared, "I", Some(Value::Long(1))),
+        Err(VmError::Native(ref detail)) if detail.contains("returned")
     ));
 }

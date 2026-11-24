@@ -93,8 +93,8 @@ fn reference_argument(
     }
 }
 
-/// Equality of two map keys: strings by content, boxed `Integer`s by value, everything
-/// else by reference identity; null equals only null.
+/// Equality of two map keys: strings by content, boxed primitives by per-kind Java value
+/// equality, everything else by reference identity; null equals only null.
 fn keys_equal(shared: &Shared, left: Value, right: Value) -> Result<bool, VmError> {
     let (Value::Ref(left_ref), Value::Ref(right_ref)) = (left, right) else {
         return Ok(left == right);
@@ -108,10 +108,7 @@ fn keys_equal(shared: &Shared, left: Value, right: Value) -> Result<bool, VmErro
         heap.get(right_ref).map_err(heap_error)?,
     ) {
         (HeapObject::Str(left), HeapObject::Str(right)) => Ok(left == right),
-        (
-            HeapObject::Boxed(rava_vm::BoxedPrimitive::Integer(left)),
-            HeapObject::Boxed(rava_vm::BoxedPrimitive::Integer(right)),
-        ) => Ok(left == right),
+        (HeapObject::Boxed(left), HeapObject::Boxed(right)) => Ok(left.java_equals(*right)),
         _ => Ok(left_ref == right_ref),
     }
 }

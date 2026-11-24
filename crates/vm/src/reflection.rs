@@ -6,8 +6,9 @@
 //! bootstrap `Class.forName`. M2.8 adds the declared-member queries and read-only
 //! `Field`, `Method` and `Constructor` objects: the declaring class, name, modifiers,
 //! field type, return type, parameter types and parameter count. M2.10 adds `Field.get`
-//! and `Field.set` for `int` and reference fields, boxing an `int` on read and unboxing
-//! a boxed `Integer` on write. M2.14 adds `getDeclaredField`/`getField`,
+//! and `Field.set`; M2.25 extends both to every primitive kind, boxing a field read
+//! through its own wrapper and unboxing a wrapper on write (with Java's widening rule for
+//! a numeric value). M2.14 adds `getDeclaredField`/`getField`,
 //! `getDeclaredMethod`/`getMethod` and `getDeclaredConstructor`/`getConstructor`: a
 //! query matches a field by name and an executable by name plus parameter descriptors,
 //! `get*` walks the superclass chain and interfaces while `getDeclared*` stays on the
@@ -1735,13 +1736,13 @@ fn field_view(shared: &Shared, member: &ReflectMember) -> Result<FieldView, VmEr
     })
 }
 
-/// `Field.get(Object)`: read an instance field and box an `int` result.
+/// `Field.get(Object)`: read an instance field and box a primitive result.
 ///
-/// M2.10 supports instance fields only: a static field is a typed mismatch rather than a
-/// silent read with an ignored receiver. The receiver must be an instance assignable to
-/// the declaring class, and the value is converted with [`boxed::box_result`], so an
-/// `int` becomes a `java.lang.Integer` box and a reference keeps its handle. There is no
-/// access check, so a private field reads like a public one.
+/// Instance fields only: a static field is a typed mismatch rather than a silent read
+/// with an ignored receiver. The receiver must be an instance assignable to the declaring
+/// class, and the value is converted with [`boxed::box_result`], so each primitive becomes
+/// its own wrapper (`boolean` a `Boolean`, `long` a `Long`, ...) and a reference keeps its
+/// handle. There is no access check, so a private field reads like a public one.
 fn field_get(
     shared: &Shared,
     _thread: &ThreadState,
@@ -1770,12 +1771,12 @@ fn field_get(
     Ok(Some(result))
 }
 
-/// `Field.set(Object, Object)`: write an instance field, unboxing an `int` value.
+/// `Field.set(Object, Object)`: write an instance field, unboxing a primitive value.
 ///
-/// The descriptor decides the conversion: `I` requires a boxed `Integer`, a reference
-/// descriptor passes the handle through (null included), and any other primitive
-/// descriptor is a typed error. A static field and a non-assignable receiver are
-/// rejected exactly as in [`field_get`].
+/// The descriptor decides the conversion: a primitive field requires the matching wrapper
+/// (a narrower numeric wrapper is accepted by Java's widening rule, JLS §5.3) and a
+/// reference descriptor passes the handle through (null included). A static field and a
+/// non-assignable receiver are rejected exactly as in [`field_get`].
 fn field_set(
     shared: &Shared,
     _thread: &ThreadState,
