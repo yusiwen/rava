@@ -16,6 +16,8 @@ pub enum VmError {
     Jar(String),
     /// A loader or class source is inconsistent.
     Loader(String),
+    /// A native implementation failed.
+    Native(String),
     /// The same `(loader, name)` was defined twice.
     DuplicateClass { loader: LoaderId, name: String },
     /// No loader in the delegation chain supplied the class.
@@ -29,6 +31,7 @@ impl fmt::Display for VmError {
             Self::ClassFile(error) => write!(f, "invalid class file: {error}"),
             Self::Jar(detail) => write!(f, "invalid jar: {detail}"),
             Self::Loader(detail) => write!(f, "loader error: {detail}"),
+            Self::Native(detail) => write!(f, "native error: {detail}"),
             Self::DuplicateClass { loader, name } => {
                 write!(f, "class {name} is already defined in loader {}", loader.0)
             }

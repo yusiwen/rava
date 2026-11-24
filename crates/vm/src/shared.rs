@@ -4,6 +4,7 @@
 //! heap. Per-thread state lives in [`crate::ThreadState`]; a Java call never holds
 //! one of these locks.
 
+use std::collections::HashMap;
 use std::sync::{Mutex, MutexGuard, RwLock};
 
 use crate::VmError;
@@ -11,12 +12,23 @@ use crate::heap::Heap;
 use crate::loader::{ClassEntry, ClassId, ClassTable, LoaderId};
 use crate::source::ClassSource;
 use crate::thread::ThreadState;
+use crate::value::Value;
 use std::sync::Arc;
 
-#[derive(Debug)]
+pub type NativeFn = fn(&Shared, &ThreadState, LoaderId, &[Value]) -> Result<Option<Value>, VmError>;
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct NativeKey {
+    pub owner: String,
+    pub name: String,
+    pub descriptor: String,
+}
+
 pub struct Shared {
     classes: RwLock<ClassTable>,
     heap: Mutex<Heap>,
+    natives: RwLock<HashMap<NativeKey, NativeFn>>,
+    stdout: Mutex<Vec<u8>>,
 }
 
 impl Shared {
@@ -24,6 +36,8 @@ impl Shared {
         Self {
             classes: RwLock::new(ClassTable::with_bootstrap(source)),
             heap: Mutex::new(Heap::new()),
+            natives: RwLock::new(HashMap::new()),
+            stdout: Mutex::new(Vec::new()),
         }
     }
 
@@ -87,5 +101,48 @@ impl Shared {
 
     pub fn thread_state(&self, id: u64) -> ThreadState {
         ThreadState::new(id)
+    }
+
+    pub fn register_native(
+        &self,
+        owner: impl Into<String>,
+        name: impl Into<String>,
+        descriptor: impl Into<String>,
+        function: NativeFn,
+    ) {
+        self.natives
+            .write()
+            .expect("native table lock poisoned")
+            .insert(
+                NativeKey {
+                    owner: owner.into(),
+                    name: name.into(),
+                    descriptor: descriptor.into(),
+                },
+                function,
+            );
+    }
+
+    pub fn native(&self, owner: &str, name: &str, descriptor: &str) -> Option<NativeFn> {
+        self.natives
+            .read()
+            .expect("native table lock poisoned")
+            .get(&NativeKey {
+                owner: owner.to_owned(),
+                name: name.to_owned(),
+                descriptor: descriptor.to_owned(),
+            })
+            .copied()
+    }
+
+    pub fn write_stdout(&self, bytes: &[u8]) {
+        self.stdout
+            .lock()
+            .expect("stdout lock poisoned")
+            .extend_from_slice(bytes);
+    }
+
+    pub fn stdout(&self) -> String {
+        String::from_utf8_lossy(&self.stdout.lock().expect("stdout lock poisoned")).into_owned()
     }
 }

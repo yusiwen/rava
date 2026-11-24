@@ -13,7 +13,7 @@ pub use error::InterpError;
 pub use frame::Frame;
 pub use instr::{DecodedMethod, Instr, decode};
 
-use rava_vm::{ClassId, Shared, ThreadState, Value};
+use rava_vm::{ClassId, ClassState, HeapObject, Shared, ThreadState, Value};
 
 /// Run a static method with `args` and return its result (`None` for `void`).
 pub fn run_static_method(
@@ -27,6 +27,9 @@ pub fn run_static_method(
     let entry = shared
         .entry(class)
         .ok_or_else(|| InterpError::Decode(format!("class {} is not loaded", class.0)))?;
+    if name != "<clinit>" {
+        ensure_initialized(shared, thread, class)?;
+    }
     let file = entry.file.clone();
     let method =
         file.find_method(name, descriptor)?
@@ -35,7 +38,18 @@ pub fn run_static_method(
                 name: name.to_owned(),
                 descriptor: descriptor.to_owned(),
             })?;
-    if method.is_native() || method.is_abstract() {
+    if method.is_native() {
+        let native = shared
+            .native(&entry.name, name, descriptor)
+            .ok_or_else(|| {
+                InterpError::Decode(format!(
+                    "no native implementation for {}.{name}{descriptor}",
+                    entry.name
+                ))
+            })?;
+        return native(shared, thread, entry.loader, &args).map_err(InterpError::Vm);
+    }
+    if method.is_abstract() {
         return Err(InterpError::NativeOrAbstract {
             name: name.to_owned(),
             descriptor: descriptor.to_owned(),
@@ -91,6 +105,90 @@ fn execute(
                 })?;
                 *slot = value;
             }
+            Instr::LdcString(text) => {
+                let reference = shared.heap().allocate_string(text);
+                frame.push(Value::Ref(reference))?;
+            }
+            Instr::GetStatic {
+                class,
+                name,
+                descriptor,
+            } => {
+                let target = resolve_from(shared, frame.class, &class)?;
+                ensure_initialized(shared, thread, target)?;
+                let entry = shared
+                    .entry(target)
+                    .ok_or_else(|| InterpError::Decode("static class vanished".to_owned()))?;
+                let value = entry
+                    .statics
+                    .lock()
+                    .expect("static field lock poisoned")
+                    .get(&(name.clone(), descriptor.clone()))
+                    .copied()
+                    .ok_or_else(|| {
+                        InterpError::Decode(format!(
+                            "no static field {}.{name}:{descriptor}",
+                            entry.name
+                        ))
+                    })?;
+                frame.push(value)?;
+            }
+            Instr::InvokeVirtual {
+                class: _,
+                name,
+                descriptor,
+            } => {
+                let count = argument_count(&descriptor)?;
+                let mut args = Vec::with_capacity(count);
+                for _ in 0..count {
+                    args.push(frame.pop()?);
+                }
+                args.reverse();
+                let receiver = frame.pop()?;
+                let Value::Ref(reference) = receiver else {
+                    return Err(InterpError::WrongValue);
+                };
+                let receiver_class = {
+                    let heap = shared.heap();
+                    match heap.get(reference).map_err(|_| InterpError::WrongValue)? {
+                        HeapObject::Instance(instance) => instance.class,
+                        _ => return Err(InterpError::WrongValue),
+                    }
+                };
+                let entry = shared
+                    .entry(receiver_class)
+                    .ok_or_else(|| InterpError::Decode("receiver class vanished".to_owned()))?;
+                let method = entry.file.find_method(&name, &descriptor)?.ok_or_else(|| {
+                    InterpError::MethodNotFound {
+                        class: entry.name.clone(),
+                        name: name.clone(),
+                        descriptor: descriptor.clone(),
+                    }
+                })?;
+                if !method.is_native() {
+                    return Err(InterpError::Decode(format!(
+                        "non-native instance call {}.{name}{descriptor} is not implemented",
+                        entry.name
+                    )));
+                }
+                let native = shared
+                    .native(&entry.name, &name, &descriptor)
+                    .ok_or_else(|| {
+                        InterpError::Decode(format!(
+                            "no native implementation for {}.{name}{descriptor}",
+                            entry.name
+                        ))
+                    })?;
+                let result =
+                    native(shared, thread, entry.loader, &args).map_err(InterpError::Vm)?;
+                if !descriptor.ends_with(")V") {
+                    frame.push(
+                        result.ok_or_else(|| {
+                            InterpError::Decode("missing return value".to_owned())
+                        })?,
+                    )?;
+                }
+            }
             Instr::IAdd | Instr::ISub | Instr::IMul | Instr::IDiv => {
                 let right = int(frame.pop()?)?;
                 let left = int(frame.pop()?)?;
@@ -116,14 +214,7 @@ fn execute(
                     args.push(frame.pop()?);
                 }
                 args.reverse();
-                let target = shared.load_class(
-                    // Static calls resolve from the current class's loader.
-                    shared
-                        .entry(frame.class)
-                        .ok_or_else(|| InterpError::Decode("current class vanished".to_owned()))?
-                        .loader,
-                    &class,
-                )?;
+                let target = resolve_from(shared, frame.class, &class)?;
                 let result = run_static_method(shared, thread, target, &name, &descriptor, args)?;
                 if !descriptor.ends_with(")V") {
                     let value = result
@@ -139,6 +230,53 @@ fn execute(
 
 fn int(value: Value) -> Result<i32, InterpError> {
     value.as_int().ok_or(InterpError::WrongValue)
+}
+
+fn resolve_from(shared: &Shared, current: ClassId, name: &str) -> Result<ClassId, InterpError> {
+    let loader = shared
+        .entry(current)
+        .ok_or_else(|| InterpError::Decode("current class vanished".to_owned()))?
+        .loader;
+    Ok(shared.load_class(loader, name)?)
+}
+
+fn ensure_initialized(
+    shared: &Shared,
+    thread: &ThreadState,
+    class: ClassId,
+) -> Result<(), InterpError> {
+    let entry = shared
+        .entry(class)
+        .ok_or_else(|| InterpError::Decode(format!("class {} is not loaded", class.0)))?;
+    {
+        let mut state = entry.state.lock().expect("class state lock poisoned");
+        match *state {
+            ClassState::Initialized => return Ok(()),
+            ClassState::Initializing => return Ok(()),
+            ClassState::Erroneous => {
+                return Err(InterpError::Decode(format!(
+                    "class {} failed initialization",
+                    entry.name
+                )));
+            }
+            ClassState::Uninitialized => *state = ClassState::Initializing,
+        }
+    }
+
+    let result = (|| -> Result<(), InterpError> {
+        if entry.file.find_method("<clinit>", "()V")?.is_some() {
+            run_static_method(shared, thread, class, "<clinit>", "()V", Vec::new())?;
+        }
+        Ok(())
+    })();
+
+    let mut state = entry.state.lock().expect("class state lock poisoned");
+    *state = if result.is_ok() {
+        ClassState::Initialized
+    } else {
+        ClassState::Erroneous
+    };
+    result
 }
 
 fn argument_count(descriptor: &str) -> Result<usize, InterpError> {

@@ -4,9 +4,9 @@ A Java 17 runtime in Rust, built to run Spring — not just a corpus.
 
 ## Status
 
-**Decisions accepted (2026-11-23). M0.1–M0.5a are in place: workspace, parser,
-loader identity, heap/seams and the integer interpreter core. Hello is not runnable
-yet.** M0.5b, the minimum class library and natives for Hello, is next.
+**Decisions accepted (2026-11-23). M0.1–M0.5b are in place: workspace, parser,
+loader identity, heap/seams, the interpreter core and Hello.** M0.6, safepoint/GC-root
+invariants, is next.
 
 ## What this project is
 

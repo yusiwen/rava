@@ -17,7 +17,18 @@ pub enum Instr {
     ISub,
     IMul,
     IDiv,
+    LdcString(String),
+    GetStatic {
+        class: String,
+        name: String,
+        descriptor: String,
+    },
     InvokeStatic {
+        class: String,
+        name: String,
+        descriptor: String,
+    },
+    InvokeVirtual {
         class: String,
         name: String,
         descriptor: String,
@@ -89,10 +100,40 @@ pub fn decode(file: &ClassFile, attribute_data: &[u8]) -> Result<DecodedMethod, 
             0x6c => Instr::IDiv,
             0xac => Instr::IReturn,
             0xb1 => Instr::Return,
+            0x12 => {
+                let index = byte(code, pc)?;
+                pc += 1;
+                resolve_ldc(file, u16::from(index))?
+            }
+            0xb2 => {
+                let index = u16::from_be_bytes([byte(code, pc)?, byte(code, pc + 1)?]);
+                pc += 2;
+                let (class, name, descriptor) = resolve_field(file, index)?;
+                Instr::GetStatic {
+                    class,
+                    name,
+                    descriptor,
+                }
+            }
+            0xb6 => {
+                let index = u16::from_be_bytes([byte(code, pc)?, byte(code, pc + 1)?]);
+                pc += 2;
+                let (class, name, descriptor) = resolve_method(file, index, true)?;
+                Instr::InvokeVirtual {
+                    class,
+                    name,
+                    descriptor,
+                }
+            }
             0xb8 => {
                 let index = u16::from_be_bytes([byte(code, pc)?, byte(code, pc + 1)?]);
                 pc += 2;
-                resolve_invoke(file, index)?
+                let (class, name, descriptor) = resolve_method(file, index, false)?;
+                Instr::InvokeStatic {
+                    class,
+                    name,
+                    descriptor,
+                }
             }
             other => {
                 return Err(InterpError::Decode(format!(
@@ -110,23 +151,56 @@ pub fn decode(file: &ClassFile, attribute_data: &[u8]) -> Result<DecodedMethod, 
     })
 }
 
-fn resolve_invoke(file: &ClassFile, index: u16) -> Result<Instr, InterpError> {
-    let Constant::MethodRef {
+fn resolve_ldc(file: &ClassFile, index: u16) -> Result<Instr, InterpError> {
+    let Constant::String { string_index } = file.constant_pool.get(index)? else {
+        return Err(InterpError::Decode(format!(
+            "constant {index} is not a String"
+        )));
+    };
+    Ok(Instr::LdcString(
+        file.constant_pool.utf8(*string_index)?.to_owned(),
+    ))
+}
+
+fn resolve_field(file: &ClassFile, index: u16) -> Result<(String, String, String), InterpError> {
+    let Constant::FieldRef {
         class_index,
         name_and_type_index,
     } = file.constant_pool.get(index)?
     else {
         return Err(InterpError::Decode(format!(
-            "constant {index} is not a Methodref"
+            "constant {index} is not a Fieldref"
         )));
     };
     let class = file.constant_pool.class_name(*class_index)?.to_owned();
     let (name, descriptor) = file.constant_pool.name_and_type(*name_and_type_index)?;
-    Ok(Instr::InvokeStatic {
-        class,
-        name: name.to_owned(),
-        descriptor: descriptor.to_owned(),
-    })
+    Ok((class, name.to_owned(), descriptor.to_owned()))
+}
+
+fn resolve_method(
+    file: &ClassFile,
+    index: u16,
+    virtual_call: bool,
+) -> Result<(String, String, String), InterpError> {
+    let constant = file.constant_pool.get(index)?;
+    let (class_index, name_and_type_index) = match constant {
+        Constant::MethodRef {
+            class_index,
+            name_and_type_index,
+        } => (*class_index, *name_and_type_index),
+        Constant::InterfaceMethodRef {
+            class_index,
+            name_and_type_index,
+        } if virtual_call => (*class_index, *name_and_type_index),
+        _ => {
+            return Err(InterpError::Decode(format!(
+                "constant {index} is not a method reference"
+            )));
+        }
+    };
+    let class = file.constant_pool.class_name(class_index)?.to_owned();
+    let (name, descriptor) = file.constant_pool.name_and_type(name_and_type_index)?;
+    Ok((class, name.to_owned(), descriptor.to_owned()))
 }
 
 fn byte(code: &[u8], offset: usize) -> Result<u8, InterpError> {

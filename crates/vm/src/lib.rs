@@ -16,8 +16,8 @@ pub use error::VmError;
 pub use heap::{
     Array, ArrayKind, FieldLayout, FieldSlot, Heap, HeapError, HeapObject, Instance, ObjRef,
 };
-pub use loader::{ClassEntry, ClassId, LoaderId};
-pub use shared::Shared;
+pub use loader::{ClassEntry, ClassId, ClassState, LoaderId};
+pub use shared::{NativeFn, NativeKey, Shared};
 pub use source::{ClassSource, DirectorySource, JarSource};
 pub use thread::ThreadState;
 pub use value::Value;

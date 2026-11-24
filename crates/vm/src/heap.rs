@@ -147,6 +147,9 @@ pub struct Array {
 pub enum HeapObject {
     Instance(Instance),
     Array(Array),
+    /// A minimal string object for `ldc` and native printing. The class-library
+    /// `java.lang.String` representation arrives with the library slice.
+    Str(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -235,6 +238,20 @@ impl Heap {
         self.allocate(HeapObject::Array(Array { kind, elements }))
     }
 
+    pub fn allocate_string(&mut self, text: impl Into<String>) -> ObjRef {
+        self.allocate(HeapObject::Str(text.into()))
+    }
+
+    pub fn string(&self, reference: ObjRef) -> Result<&str, HeapError> {
+        match self.get(reference)? {
+            HeapObject::Str(text) => Ok(text),
+            _ => Err(HeapError::WrongObjectKind {
+                reference,
+                expected: "a string",
+            }),
+        }
+    }
+
     pub fn get(&self, reference: ObjRef) -> Result<&HeapObject, HeapError> {
         if reference.is_null() {
             return Err(HeapError::NullReference);
@@ -278,7 +295,7 @@ impl Heap {
     pub fn instance(&self, reference: ObjRef) -> Result<&Instance, HeapError> {
         match self.get(reference)? {
             HeapObject::Instance(instance) => Ok(instance),
-            HeapObject::Array(_) => Err(HeapError::WrongObjectKind {
+            HeapObject::Array(_) | HeapObject::Str(_) => Err(HeapError::WrongObjectKind {
                 reference,
                 expected: "an instance",
             }),
@@ -288,7 +305,7 @@ impl Heap {
     pub fn instance_mut(&mut self, reference: ObjRef) -> Result<&mut Instance, HeapError> {
         match self.get_mut(reference)? {
             HeapObject::Instance(instance) => Ok(instance),
-            HeapObject::Array(_) => Err(HeapError::WrongObjectKind {
+            HeapObject::Array(_) | HeapObject::Str(_) => Err(HeapError::WrongObjectKind {
                 reference,
                 expected: "an instance",
             }),
@@ -298,7 +315,7 @@ impl Heap {
     pub fn array(&self, reference: ObjRef) -> Result<&Array, HeapError> {
         match self.get(reference)? {
             HeapObject::Array(array) => Ok(array),
-            HeapObject::Instance(_) => Err(HeapError::WrongObjectKind {
+            HeapObject::Instance(_) | HeapObject::Str(_) => Err(HeapError::WrongObjectKind {
                 reference,
                 expected: "an array",
             }),
@@ -308,7 +325,7 @@ impl Heap {
     pub fn array_mut(&mut self, reference: ObjRef) -> Result<&mut Array, HeapError> {
         match self.get_mut(reference)? {
             HeapObject::Array(array) => Ok(array),
-            HeapObject::Instance(_) => Err(HeapError::WrongObjectKind {
+            HeapObject::Instance(_) | HeapObject::Str(_) => Err(HeapError::WrongObjectKind {
                 reference,
                 expected: "an array",
             }),

@@ -4,7 +4,7 @@
 //! is keyed by that pair so two loaders can define the same name independently.
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use rava_classfile::ClassFile;
 
@@ -37,12 +37,22 @@ struct ClassKey {
     name: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClassState {
+    Uninitialized,
+    Initializing,
+    Initialized,
+    Erroneous,
+}
+
 #[derive(Debug)]
 pub struct ClassEntry {
     pub id: ClassId,
     pub loader: LoaderId,
     pub name: String,
     pub file: Arc<ClassFile>,
+    pub statics: Mutex<std::collections::HashMap<(String, String), crate::value::Value>>,
+    pub state: Mutex<ClassState>,
 }
 
 #[derive(Debug)]
@@ -158,6 +168,8 @@ impl ClassTable {
             loader,
             name: name.to_owned(),
             file,
+            statics: Mutex::new(std::collections::HashMap::new()),
+            state: Mutex::new(ClassState::Uninitialized),
         }));
         Ok(id)
     }
