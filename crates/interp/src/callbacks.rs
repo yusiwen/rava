@@ -8,11 +8,20 @@
 //! [`crate::lambda::invoke_sam`], and any other object runs its own `apply` method through
 //! [`crate::run_instance_method`].
 //!
-//! Only the method the startup path needs is registered. `compute`, `computeIfPresent`,
-//! `merge`, `forEach`, `removeIf` and the stream operations still fail loudly as
-//! unimplemented methods rather than guessing.
+//! The registered surface is what the Spring startup path reached: `Map.computeIfAbsent`,
+//! `Iterable.forEach`, `Arrays.sort(Object[], Comparator)`, `List.sort(Comparator)` and the
+//! `Comparator.comparingInt`/`reversed` factories with their native lambda targets.
+//! `compute`, `computeIfPresent`, `merge`, the remaining `Comparator` factories and the
+//! stream operations still fail loudly as unimplemented methods rather than guessing.
+//!
+//! A key equality here takes the already-locked [`rava_vm::Heap`] rather than locking it,
+//! because `computeIfAbsent` scans the entries while it holds the guard; locking again on
+//! the same thread would deadlock.
 
-use rava_vm::{ClassId, HeapObject, LoaderId, ObjRef, Shared, ThreadState, Value, VmError};
+use rava_vm::{
+    ClassId, HeapObject, LambdaObject, LambdaTarget, LambdaTargetKind, LoaderId, ObjRef, Shared,
+    ThreadState, Value, VmError,
+};
 
 use crate::{InterpError, lambda, run_instance_method};
 
@@ -25,6 +34,32 @@ const COMPARATOR_COMPARE: &str = "(Ljava/lang/Object;Ljava/lang/Object;)I";
 /// The `computeIfAbsent` descriptor.
 const COMPUTE_IF_ABSENT: &str =
     "(Ljava/lang/Object;Ljava/util/function/Function;)Ljava/lang/Object;";
+
+/// `Comparator.compare(Object, Object)int`.
+const COMPARATOR_INT_COMPARE: &str = "(Ljava/lang/Object;Ljava/lang/Object;)I";
+
+/// The `Comparator.comparingInt` descriptor.
+const COMPARING_INT: &str = "(Ljava/util/function/ToIntFunction;)Ljava/util/Comparator;";
+
+/// The registry name of the native lambda target a `comparingInt` comparator calls.
+const COMPARING_INT_TARGET_NAME: &str = "comparingInt$";
+
+/// The native lambda target's descriptor: the captured extractor plus the two compared
+/// values.
+const COMPARING_INT_TARGET: &str =
+    "(Ljava/util/function/ToIntFunction;Ljava/lang/Object;Ljava/lang/Object;)I";
+
+/// `ToIntFunction.applyAsInt(Object)int`.
+const TO_INT_APPLY_AS_INT: &str = "(Ljava/lang/Object;)I";
+
+/// `Comparator.reversed()Comparator`.
+const COMPARATOR_REVERSED: &str = "()Ljava/util/Comparator;";
+
+/// The registry name of the native lambda target a reversed comparator calls.
+const REVERSED_TARGET_NAME: &str = "reversed$";
+
+/// The reversed target's descriptor: the wrapped comparator plus the two compared values.
+const REVERSED_TARGET: &str = "(Ljava/util/Comparator;Ljava/lang/Object;Ljava/lang/Object;)I";
 
 pub fn register_natives(shared: &Shared) {
     for class in [
@@ -41,6 +76,30 @@ pub fn register_natives(shared: &Shared) {
             compute_if_absent,
         );
     }
+    shared.register_native(
+        "java/util/Comparator",
+        "comparingInt",
+        COMPARING_INT,
+        comparator_comparing_int,
+    );
+    shared.register_native(
+        "java/util/Comparator",
+        COMPARING_INT_TARGET_NAME,
+        COMPARING_INT_TARGET,
+        comparator_comparing_int_compare,
+    );
+    shared.register_native(
+        "java/util/Comparator",
+        "reversed",
+        COMPARATOR_REVERSED,
+        comparator_reversed,
+    );
+    shared.register_native(
+        "java/util/Comparator",
+        REVERSED_TARGET_NAME,
+        REVERSED_TARGET,
+        comparator_reversed_compare,
+    );
     shared.register_native(
         "java/util/Arrays",
         "sort",
@@ -95,14 +154,16 @@ fn reference_argument(
 
 /// Equality of two map keys: strings by content, boxed primitives by per-kind Java value
 /// equality, everything else by reference identity; null equals only null.
-fn keys_equal(shared: &Shared, left: Value, right: Value) -> Result<bool, VmError> {
+///
+/// The heap is passed in rather than locked here: `computeIfAbsent` already holds the guard
+/// while it scans the entries, and locking it a second time on the same thread deadlocks.
+fn keys_equal(heap: &rava_vm::Heap, left: Value, right: Value) -> Result<bool, VmError> {
     let (Value::Ref(left_ref), Value::Ref(right_ref)) = (left, right) else {
         return Ok(left == right);
     };
     if left_ref.is_null() || right_ref.is_null() {
         return Ok(left_ref == right_ref);
     }
-    let heap = shared.heap();
     match (
         heap.get(left_ref).map_err(heap_error)?,
         heap.get(right_ref).map_err(heap_error)?,
@@ -114,12 +175,12 @@ fn keys_equal(shared: &Shared, left: Value, right: Value) -> Result<bool, VmErro
 }
 
 fn find_key(
-    shared: &Shared,
+    heap: &rava_vm::Heap,
     entries: &[(Value, Value)],
     key: Value,
 ) -> Result<Option<usize>, VmError> {
     for (position, (candidate, _)) in entries.iter().enumerate() {
-        if keys_equal(shared, *candidate, key)? {
+        if keys_equal(heap, *candidate, key)? {
             return Ok(Some(position));
         }
     }
@@ -147,7 +208,7 @@ fn compute_if_absent(
                 "Map.computeIfAbsent receiver is not a map: {error}"
             ))
         })?;
-        let position = find_key(shared, entries, key)?;
+        let position = find_key(&heap, entries, key)?;
         position.map(|position| entries[position].1)
     };
     if let Some(value) = existing {
@@ -375,4 +436,155 @@ fn interp_to_vm(error: InterpError) -> VmError {
         InterpError::Thrown(throwable) => VmError::Thrown(throwable),
         other => VmError::Native(other.to_string()),
     }
+}
+
+/// `Comparator.comparingInt(ToIntFunction)`: a comparator over the extractor's `int` key.
+///
+/// The JDK returns a synthetic lambda whose `compare` calls `applyAsInt` on both arguments
+/// and compares the results. There is no class file for that body here either, so the
+/// lambda carries a [`LambdaTargetKind::Native`] target: the registry entry
+/// `Comparator.comparingInt$` implements the comparison.
+fn comparator_comparing_int(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let function = reference_argument(args, 0, "Comparator.comparingInt")?;
+    if function.is_null() {
+        return Err(VmError::Native(
+            "Comparator.comparingInt received a null extractor".to_owned(),
+        ));
+    }
+    let comparator = shared.load_library_class("java/util/Comparator")?;
+    let lambda = shared.allocate_lambda(LambdaObject {
+        interface: comparator,
+        sam_name: "compare".to_owned(),
+        sam_descriptor: COMPARATOR_INT_COMPARE.to_owned(),
+        instantiated_descriptor: COMPARATOR_INT_COMPARE.to_owned(),
+        target: LambdaTarget {
+            class: comparator,
+            name: COMPARING_INT_TARGET_NAME.to_owned(),
+            descriptor: COMPARING_INT_TARGET.to_owned(),
+            kind: LambdaTargetKind::Native,
+        },
+        captured: vec![Value::Ref(function)],
+    });
+    Ok(Some(Value::Ref(lambda)))
+}
+
+/// The body of a `comparingInt` comparator: compare the two extracted `int` keys.
+fn comparator_comparing_int_compare(
+    shared: &Shared,
+    thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let function = reference_argument(args, 0, "Comparator.comparingInt")?;
+    let left = reference_argument(args, 1, "Comparator.comparingInt")?;
+    let right = reference_argument(args, 2, "Comparator.comparingInt")?;
+    let left_key = invoke_to_int(shared, thread, function, Value::Ref(left))?;
+    let right_key = invoke_to_int(shared, thread, function, Value::Ref(right))?;
+    Ok(Some(Value::Int(match left_key.cmp(&right_key) {
+        std::cmp::Ordering::Less => -1,
+        std::cmp::Ordering::Equal => 0,
+        std::cmp::Ordering::Greater => 1,
+    })))
+}
+
+/// Call a `ToIntFunction`, through a lambda object or the object's own `applyAsInt`.
+fn invoke_to_int(
+    shared: &Shared,
+    thread: &ThreadState,
+    function: ObjRef,
+    argument: Value,
+) -> Result<i32, VmError> {
+    if function.is_null() {
+        return Err(VmError::Native(
+            "Comparator.comparingInt received a null extractor".to_owned(),
+        ));
+    }
+    let lambda = {
+        let heap = shared.heap();
+        match heap.get(function).map_err(heap_error)? {
+            HeapObject::Lambda(lambda) => Some(lambda.clone()),
+            _ => None,
+        }
+    };
+    let result = if let Some(lambda) = lambda {
+        lambda::invoke_sam(shared, thread, &lambda, vec![argument]).map_err(interp_to_vm)?
+    } else {
+        let class: ClassId = {
+            let heap = shared.heap();
+            heap.object_class(function).map_err(heap_error)?
+        };
+        run_instance_method(
+            shared,
+            thread,
+            class,
+            "applyAsInt",
+            TO_INT_APPLY_AS_INT,
+            function,
+            vec![argument],
+        )
+        .map_err(interp_to_vm)?
+    };
+    match result {
+        Some(Value::Int(value)) => Ok(value),
+        _ => Err(VmError::Native(
+            "ToIntFunction.applyAsInt returned a non-int value".to_owned(),
+        )),
+    }
+}
+
+/// `Comparator.reversed()`: a comparator over the same keys in the opposite order.
+///
+/// The JDK's default method returns `Collections.reverseOrder(this)`, a comparator whose
+/// `compare` negates the wrapped comparator's result. It is a native here because the C1
+/// stub carries no `Code`, and its body is another [`LambdaTargetKind::Native`] lambda.
+fn comparator_reversed(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    _args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    if receiver.is_null() {
+        return Err(VmError::Native(
+            "Comparator.reversed was called on a null receiver".to_owned(),
+        ));
+    }
+    let comparator = shared.load_library_class("java/util/Comparator")?;
+    let lambda = shared.allocate_lambda(LambdaObject {
+        interface: comparator,
+        sam_name: "compare".to_owned(),
+        sam_descriptor: COMPARATOR_INT_COMPARE.to_owned(),
+        instantiated_descriptor: COMPARATOR_INT_COMPARE.to_owned(),
+        target: LambdaTarget {
+            class: comparator,
+            name: REVERSED_TARGET_NAME.to_owned(),
+            descriptor: REVERSED_TARGET.to_owned(),
+            kind: LambdaTargetKind::Native,
+        },
+        captured: vec![Value::Ref(receiver)],
+    });
+    Ok(Some(Value::Ref(lambda)))
+}
+
+/// The body of a reversed comparator: negate the wrapped comparator's result.
+fn comparator_reversed_compare(
+    shared: &Shared,
+    thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let inner = reference_argument(args, 0, "Comparator.reversed")?;
+    let left = reference_argument(args, 1, "Comparator.reversed")?;
+    let right = reference_argument(args, 2, "Comparator.reversed")?;
+    let ordering = invoke_compare(shared, thread, inner, Value::Ref(left), Value::Ref(right))?;
+    // `Collections.reverseOrder` negates the result, which wraps like Java's `-`.
+    Ok(Some(Value::Int(ordering.wrapping_neg())))
 }

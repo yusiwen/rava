@@ -15,11 +15,13 @@
 //! cost of this slice.
 //!
 //! The decoded instruction subset models no Java exception objects yet, so a negative
-//! initial capacity, a null receiver and a non-reference key or value are typed
-//! [`crate::VmError::Native`] errors rather than synthesized exceptions. Only the methods
-//! this slice lists are registry entries; `getOrDefault`, `putIfAbsent`, `putAll`,
-//! `keySet`, `values`, `entrySet` and the rest of the `HashMap` stub still reach a
-//! declaration with no `Code` and fail loudly instead of guessing.
+//! capacity, a non-positive or NaN load factor, a null receiver and a non-reference key or
+//! value are typed [`crate::VmError::Native`] errors rather than synthesized exceptions.
+//! The registry surface is the one this crate and `callbacks` install; any other `HashMap`
+//! stub method still reaches a declaration with no `Code` and fails loudly instead of
+//! guessing. `LinkedHashMap`'s `accessOrder` flag is the `MapObject::access_order` field:
+//! when it is true an existing entry moves to the end on access, which is why the
+//! constructors and the access paths below distinguish it from plain insertion order.
 
 use crate::VmError;
 use crate::heap::{Heap, HeapError, HeapObject, ObjRef};
@@ -97,11 +99,12 @@ pub fn register_natives(shared: &Shared) {
     // through the ordinary superclass walk; only its constructors are distinct.
     shared.register_native(LINKED_HASH_MAP_CLASS, "<init>", "()V", map_init);
     shared.register_native(LINKED_HASH_MAP_CLASS, "<init>", "(I)V", map_init_capacity);
+    shared.register_native(LINKED_HASH_MAP_CLASS, "<init>", "(IF)V", map_init_threshold);
     shared.register_native(
         LINKED_HASH_MAP_CLASS,
         "<init>",
-        "(ILF)V",
-        map_init_threshold,
+        "(IFZ)V",
+        map_init_access_order,
     );
     shared.register_native(
         LINKED_HASH_MAP_CLASS,
@@ -128,7 +131,7 @@ pub fn register_natives(shared: &Shared) {
 fn register_map_surface(shared: &Shared, class: &'static str) {
     shared.register_native(class, "<init>", "()V", map_init);
     shared.register_native(class, "<init>", "(I)V", map_init_capacity);
-    shared.register_native(class, "<init>", "(ILF)V", map_init_threshold);
+    shared.register_native(class, "<init>", "(IF)V", map_init_threshold);
     shared.register_native(class, "<init>", "(Ljava/util/Map;)V", map_init_from);
     shared.register_native(class, "size", "()I", hash_map_size);
     shared.register_native(class, "isEmpty", "()Z", hash_map_is_empty);
@@ -320,6 +323,23 @@ fn find_value(
     Ok(None)
 }
 
+/// Move the entry at `position` to the end when the receiver is access-ordered.
+///
+/// `LinkedHashMap` with `accessOrder` true reorders its iteration whenever an access or an
+/// update touches an existing entry; every other map keeps insertion order. The entry keeps
+/// its stored key and value, so this changes only the order `keySet`/`values`/`entrySet`
+/// observe.
+fn touch_entry(heap: &mut Heap, receiver: ObjRef, position: usize) -> Result<(), VmError> {
+    if !heap.map_access_order(receiver).map_err(heap_error)? {
+        return Ok(());
+    }
+    let entries = heap.map_mut(receiver).map_err(heap_error)?;
+    debug_assert!(position < entries.len(), "the position comes from find_key");
+    let entry = entries.remove(position);
+    entries.push(entry);
+    Ok(())
+}
+
 /// `HashMap.size()`: the number of entries.
 fn hash_map_size(
     shared: &Shared,
@@ -375,6 +395,8 @@ fn hash_map_put(
     match position {
         Some(position) => {
             let previous = std::mem::replace(&mut entries[position].1, Value::Ref(value));
+            // An update of an existing key is an access for an access-ordered map.
+            touch_entry(&mut heap, receiver, position)?;
             Ok(Some(previous))
         }
         None => {
@@ -396,13 +418,18 @@ fn hash_map_get(
     args: &[Value],
 ) -> Result<Option<Value>, VmError> {
     let key = reference_argument(args, 0, "HashMap.get")?;
-    let heap = shared.heap();
-    let entries = entries(&heap, receiver, "HashMap.get")?;
-    let position = find_key(&heap, entries, Value::Ref(key)).map_err(heap_error)?;
-    Ok(Some(match position {
-        Some(position) => entries[position].1,
-        None => Value::Ref(ObjRef::NULL),
-    }))
+    let mut heap = shared.heap();
+    let position = {
+        let entries = entries(&heap, receiver, "HashMap.get")?;
+        find_key(&heap, entries, Value::Ref(key)).map_err(heap_error)?
+    };
+    let Some(position) = position else {
+        return Ok(Some(Value::Ref(ObjRef::NULL)));
+    };
+    let value = entries(&heap, receiver, "HashMap.get")?[position].1;
+    // `LinkedHashMap` in access order counts a successful `get` as an access.
+    touch_entry(&mut heap, receiver, position)?;
+    Ok(Some(value))
 }
 
 /// `HashMap.containsKey(Object)`.
@@ -523,9 +550,82 @@ fn map_init_threshold(
             "Map.<init>: negative capacity {capacity}"
         )));
     }
+    // The JDK rejects a non-positive or NaN load factor; there is no resizing here, but the
+    // argument is still checked so a bad value is not silently accepted.
+    load_factor_argument(args, 1, "Map.<init>")?;
     let heap = shared.heap();
     entries(&heap, receiver, "Map.<init>")?;
     Ok(None)
+}
+
+/// `LinkedHashMap.<init>(IFZ)V`: the capacity and load-factor hints plus the access-order
+/// flag.
+///
+/// `accessOrder` true makes every later lookup or update of an existing key move that entry
+/// to the end, which is the order `keySet`/`values`/`entrySet` observe. The capacity and
+/// load factor stay hints because the map never resizes, but both are validated the way the
+/// JDK validates them.
+fn map_init_access_order(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let capacity = int_argument(args, 0, "LinkedHashMap.<init>")?;
+    if capacity < 0 {
+        return Err(VmError::Native(format!(
+            "LinkedHashMap.<init>: negative capacity {capacity}"
+        )));
+    }
+    load_factor_argument(args, 1, "LinkedHashMap.<init>")?;
+    let access_order = match args.get(2).copied() {
+        Some(Value::Int(value)) => value != 0,
+        Some(_) => {
+            return Err(VmError::Native(
+                "LinkedHashMap.<init> expects a boolean access-order argument".to_owned(),
+            ));
+        }
+        None => {
+            return Err(VmError::Native(
+                "LinkedHashMap.<init> is missing its access-order argument".to_owned(),
+            ));
+        }
+    };
+    let mut heap = shared.heap();
+    entries(&heap, receiver, "LinkedHashMap.<init>")?;
+    heap.set_map_access_order(receiver, access_order)
+        .map_err(heap_error)?;
+    Ok(None)
+}
+
+/// A map constructor's load-factor argument, which the JDK requires to be positive and not
+/// NaN.
+fn load_factor_argument(
+    args: &[Value],
+    position: usize,
+    method: &'static str,
+) -> Result<f32, VmError> {
+    let load_factor = match args.get(position).copied() {
+        Some(Value::Float(value)) => value,
+        Some(_) => {
+            return Err(VmError::Native(format!(
+                "{method} expects a float load factor"
+            )));
+        }
+        None => {
+            return Err(VmError::Native(format!(
+                "{method} is missing its load factor"
+            )));
+        }
+    };
+    // NaN compares false with everything, so it is checked separately.
+    if load_factor.is_nan() || load_factor <= 0.0 {
+        return Err(VmError::Native(format!(
+            "{method}: load factor {load_factor} is not positive"
+        )));
+    }
+    Ok(load_factor)
 }
 
 /// `Map.<init>(Map)V`: copy every entry of the source map.
@@ -549,14 +649,18 @@ fn hash_map_get_or_default(
 ) -> Result<Option<Value>, VmError> {
     let key = reference_argument(args, 0, "Map.getOrDefault")?;
     let fallback = reference_argument(args, 1, "Map.getOrDefault")?;
-    let found = {
-        let heap = shared.heap();
+    let mut heap = shared.heap();
+    let position = {
         let entries = entries(&heap, receiver, "Map.getOrDefault")?;
-        find_key(&heap, entries, Value::Ref(key))
-            .map_err(heap_error)?
-            .map(|position| entries[position].1)
+        find_key(&heap, entries, Value::Ref(key)).map_err(heap_error)?
     };
-    Ok(Some(found.unwrap_or(Value::Ref(fallback))))
+    let Some(position) = position else {
+        return Ok(Some(Value::Ref(fallback)));
+    };
+    let found = entries(&heap, receiver, "Map.getOrDefault")?[position].1;
+    // `LinkedHashMap` in access order counts a successful `getOrDefault` as an access.
+    touch_entry(&mut heap, receiver, position)?;
+    Ok(Some(found))
 }
 
 /// `Map.remove(Object, Object)`: remove only when the stored value matches.
@@ -659,6 +763,8 @@ fn hash_map_put_if_absent(
     match position {
         Some(position) => {
             let previous = entries(&heap, receiver, "Map.putIfAbsent")?[position].1;
+            // The JDK's `putIfAbsent` still records an access for an existing key.
+            touch_entry(&mut heap, receiver, position)?;
             Ok(Some(previous))
         }
         None => {

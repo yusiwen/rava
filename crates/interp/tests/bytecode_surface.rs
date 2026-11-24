@@ -1247,12 +1247,13 @@ fn instanceof_handles_null_and_primitive_operands() {
         ))
     };
 
-    // Null is an instance of every reference type, including an interface and an array.
-    assert_eq!(is("isDog", null), 1);
-    assert_eq!(is("isPet", null), 1);
-    assert_eq!(is("isDogArray", null), 1);
-    assert_eq!(is("isIntArray", null), 1);
-    assert_eq!(is("isCloneable", null), 1);
+    // JVMS §6.5: `instanceof` of a null reference pushes 0, for a class, an interface
+    // and an array alike.
+    assert_eq!(is("isDog", null), 0);
+    assert_eq!(is("isPet", null), 0);
+    assert_eq!(is("isDogArray", null), 0);
+    assert_eq!(is("isIntArray", null), 0);
+    assert_eq!(is("isCloneable", null), 0);
 
     // A primitive operand names no reference type, so nothing is its instance, null
     // included.

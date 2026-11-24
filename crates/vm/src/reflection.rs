@@ -213,6 +213,12 @@ pub fn register_natives(shared: &Shared) {
     );
     shared.register_native(
         "java/lang/Class",
+        "getDeclaredClasses",
+        "()[Ljava/lang/Class;",
+        class_get_declared_classes,
+    );
+    shared.register_native(
+        "java/lang/Class",
         "getDeclaredFields",
         "()[Ljava/lang/reflect/Field;",
         class_get_declared_fields,
@@ -1140,6 +1146,58 @@ fn class_get_declared_constructors(
     _args: &[Value],
 ) -> Result<Option<Value>, VmError> {
     let array = declared_members_of(shared, receiver, MemberKind::Constructor)?;
+    Ok(Some(Value::Ref(array)))
+}
+
+/// `Class.getDeclaredClasses()`: the member classes this class declares.
+///
+/// A member class is an `InnerClasses` row whose `outer_class` is this class. A local or
+/// anonymous class stores a zero `outer_class` there, so the same filter excludes it, which
+/// is the JDK's "declared as a member" rule. Each row's internal name is resolved through
+/// this class's defining loader and returned as its cached class object. A primitive or
+/// array class has no class file, so it declares no member class and gets an empty
+/// `Class[]`.
+fn class_get_declared_classes(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    _args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let class = match class_object_of(shared, receiver)? {
+        ClassObject::Named(class) => Some(class),
+        ClassObject::Primitive(_) | ClassObject::Array(_) => None,
+    };
+    let mut objects = Vec::new();
+    if let Some(class) = class {
+        let (loader, binary_name, inner) = {
+            let entry = shared
+                .entry(class)
+                .ok_or_else(|| VmError::Loader(format!("class id {} is not loaded", class.0)))?;
+            let metadata = entry.metadata()?;
+            (
+                entry.loader,
+                metadata.binary_name.clone(),
+                metadata.inner_classes,
+            )
+        };
+        for row in inner {
+            if row.outer_class.as_deref() != Some(binary_name.as_str()) {
+                continue;
+            }
+            let member = match shared.load_class(loader, &row.inner_class) {
+                Ok(member) => member,
+                // The C1 tree is the pinned manifest's subset of the JDK, so a member class
+                // outside it has no committed class file even though the JDK would return
+                // it. Skip only that row rather than failing the whole query.
+                Err(VmError::ClassNotFound { .. }) => continue,
+                Err(error) => return Err(error),
+            };
+            objects.push(shared.class_object(member)?);
+        }
+    }
+    let component = shared.load_library_class("java/lang/Class")?;
+    let array = allocate_reference_array(shared, ClassRef::Named(component), &objects)?;
     Ok(Some(Value::Ref(array)))
 }
 

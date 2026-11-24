@@ -16,11 +16,12 @@
 //! frame model.
 //!
 //! The supported target kinds are a static method, an instance method
-//! (`REF_invokeVirtual`/`REF_invokeSpecial`/`REF_invokeInterface`) and a constructor
-//! (`REF_newInvokeSpecial`). For an instance target the receiver is the first captured or
-//! SAM value, exactly as the implementation method's first parameter; a bound method
-//! reference therefore captures the receiver, and an unbound one (`String::length`) takes
-//! it from the SAM argument. Argument adaptation (boxing, unboxing, widening, a cast to
+//! (`REF_invokeVirtual`/`REF_invokeSpecial`/`REF_invokeInterface`), a constructor
+//! (`REF_newInvokeSpecial`) and a native registry entry ([`LambdaTargetKind::Native`]) that
+//! a VM factory such as `Comparator.comparingInt` creates because its body has no class
+//! file. For an instance target the receiver is the first captured or SAM value, exactly as
+//! the implementation method's first parameter; a bound method reference therefore captures
+//! the receiver, and an unbound one (`String::length`) takes it from the SAM argument. Argument adaptation (boxing, unboxing, widening, a cast to
 //! the instantiated type) is not implemented: a value whose representation does not
 //! already match the target parameter descriptor is a typed
 //! [`crate::InterpError::Lambda`].
@@ -213,6 +214,27 @@ pub(crate) fn invoke_sam(
                 receiver,
                 remaining,
             )
+        }
+        LambdaTargetKind::Native => {
+            let owner = target_name(shared, lambda.target.class);
+            let native = shared
+                .native(&owner, &lambda.target.name, &lambda.target.descriptor)
+                .ok_or_else(|| {
+                    InterpError::Decode(format!(
+                        "no native implementation for lambda target {owner}::{}:{}",
+                        lambda.target.name, lambda.target.descriptor
+                    ))
+                })?;
+            let loader = shared
+                .entry(lambda.target.class)
+                .ok_or_else(|| {
+                    InterpError::Decode(format!(
+                        "lambda target class {} is not loaded",
+                        lambda.target.class.0
+                    ))
+                })?
+                .loader;
+            native(shared, thread, loader, ObjRef::NULL, &values).map_err(InterpError::from)
         }
         LambdaTargetKind::Constructor => {
             let instance = shared.allocate_instance(lambda.target.class)?;

@@ -430,12 +430,12 @@ fn execute(
                 frame.pc = target;
             }
             Instr::InstanceOf { class } => {
-                // JVMS §6.5.instanceof: null is an instance of every reference type and
-                // of no primitive type, so it needs no operand resolution. A primitive
-                // operand is a non-reference type, so no object is ever its instance.
+                // JVMS §6.5.instanceof: a null reference is an instance of no type, so the
+                // instruction pushes 0 without resolving the operand. A primitive operand
+                // names a non-reference type, so no object is ever its instance either.
                 let reference = pop_reference(frame)?;
                 let result = if reference.is_null() {
-                    primitive_operand(&class).is_none()
+                    false
                 } else {
                     let target = resolve_class_operand(shared, frame.class, &class)?;
                     let actual = runtime_class_ref(shared, reference)?;
@@ -930,24 +930,43 @@ fn invoke_interface(
         Err(error) => return Err(error.into()),
     };
     if let Some(lambda) = lambda {
-        if lambda.interface != interface {
-            return Err(InterpError::NotAssignable {
-                expected: class_name(shared, interface),
-                found: class_name(shared, lambda.interface),
-            });
+        if lambda.sam_name == name && lambda.sam_descriptor == descriptor {
+            if lambda.interface != interface {
+                return Err(InterpError::NotAssignable {
+                    expected: class_name(shared, interface),
+                    found: class_name(shared, lambda.interface),
+                });
+            }
+            // The receiver and the call arguments have been popped from the frame; publish
+            // them as call roots while the target runs.
+            let mut call_roots = args.clone();
+            call_roots.push(Value::Ref(receiver));
+            publish_roots(guard, frame, &call_roots);
+            return lambda::invoke_sam(shared, thread, &lambda, args);
         }
-        if lambda.sam_name != name || lambda.sam_descriptor != descriptor {
+        // A call that is not the SAM is still an ordinary interface call when the interface
+        // declares a concrete method: `Comparator.reversed` on a `Comparator` lambda. A
+        // declaration the lambda does not implement (an abstract method of its functional
+        // interface) keeps the typed SAM-mismatch error.
+        let concrete = match find_interface_method(shared, interface, name, descriptor)? {
+            Some(declaring) => {
+                let entry = shared
+                    .entry(declaring)
+                    .ok_or_else(|| InterpError::Decode("interface vanished".to_owned()))?;
+                entry
+                    .file
+                    .find_method(name, descriptor)?
+                    .map(|method| !method.is_abstract())
+                    .unwrap_or(false)
+            }
+            None => false,
+        };
+        if !concrete {
             return Err(InterpError::Lambda(format!(
                 "invokeinterface {name}{descriptor} does not match the lambda's SAM {}:{}",
                 lambda.sam_name, lambda.sam_descriptor
             )));
         }
-        // The receiver and the call arguments have been popped from the frame; publish
-        // them as call roots while the target runs.
-        let mut call_roots = args.clone();
-        call_roots.push(Value::Ref(receiver));
-        publish_roots(guard, frame, &call_roots);
-        return lambda::invoke_sam(shared, thread, &lambda, args);
     }
 
     let start = dispatch_class(shared, frame.class, receiver)?;

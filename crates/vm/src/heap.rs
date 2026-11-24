@@ -896,6 +896,13 @@ pub enum LambdaTargetKind {
     /// A `REF_newInvokeSpecial` implementation: the captured values and the SAM arguments
     /// are the constructor's arguments, and the SAM result is the new instance.
     Constructor,
+    /// A native registry entry rather than a Java method.
+    ///
+    /// A VM factory such as `Comparator.comparingInt` returns a lambda whose body has no
+    /// class-file method to point at; the target names a `(owner, name, descriptor)` the
+    /// registry implements, and it receives the captured values followed by the SAM
+    /// arguments like a static target.
+    Native,
 }
 
 /// The implementation method a lambda calls when its SAM method is invoked.
@@ -964,10 +971,17 @@ pub struct SetObject {
 
 /// A `java.util.Map`-family VM object: its runtime class and its `(key, value)` entries
 /// in insertion order.
+///
+/// `access_order` is the `LinkedHashMap` flag: when it is true, a lookup or an update of an
+/// existing key moves that entry to the end of `entries`, which is the order `keySet`,
+/// `values`, `entrySet` and an iteration observe. Every other map keeps it false, so its
+/// entries stay in insertion order.
 #[derive(Debug, Clone, PartialEq)]
 pub struct MapObject {
     pub class: ClassId,
     pub entries: Vec<(Value, Value)>,
+    /// `LinkedHashMap`'s access-order flag.
+    pub access_order: bool,
     /// The subclass's instance fields, in layout order.
     pub fields: Vec<Value>,
 }
@@ -1568,6 +1582,7 @@ impl Heap {
         self.allocate(HeapObject::Map(MapObject {
             class,
             entries: Vec::new(),
+            access_order: false,
             fields,
         }))
     }
@@ -1982,6 +1997,35 @@ impl Heap {
     pub fn map_mut(&mut self, reference: ObjRef) -> Result<&mut Vec<(Value, Value)>, HeapError> {
         match self.get_mut(reference)? {
             HeapObject::Map(map) => Ok(&mut map.entries),
+            _ => Err(HeapError::WrongObjectKind {
+                reference,
+                expected: "a map",
+            }),
+        }
+    }
+
+    /// The `LinkedHashMap` access-order flag behind a map reference.
+    pub fn map_access_order(&self, reference: ObjRef) -> Result<bool, HeapError> {
+        match self.get(reference)? {
+            HeapObject::Map(map) => Ok(map.access_order),
+            _ => Err(HeapError::WrongObjectKind {
+                reference,
+                expected: "a map",
+            }),
+        }
+    }
+
+    /// Set the `LinkedHashMap` access-order flag behind a map reference.
+    pub fn set_map_access_order(
+        &mut self,
+        reference: ObjRef,
+        access_order: bool,
+    ) -> Result<(), HeapError> {
+        match self.get_mut(reference)? {
+            HeapObject::Map(map) => {
+                map.access_order = access_order;
+                Ok(())
+            }
             _ => Err(HeapError::WrongObjectKind {
                 reference,
                 expected: "a map",

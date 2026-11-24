@@ -194,8 +194,9 @@ class's loader, stores the value in the declaring class's `statics` table keyed 
 and a value of the wrong kind with typed errors. `checkcast` and `instanceof` resolve a
 named, primitive or array class operand through the same loader, use
 superclass/interface/array-covariance assignability (including the
-`Object`/`Cloneable`/`Serializable` array supertypes), treat null as an instance of every
-reference type and a primitive as matching no reference value, and report a failed cast
+`Object`/`Cloneable`/`Serializable` array supertypes), treat null as an instance of no
+type (the result is 0, JVMS §6.5; corrected in M2.26) and a primitive as matching no
+reference value, and report a failed cast
 as a typed `ClassCast` error instead of synthesizing `ClassCastException`. `tableswitch`
 and `lookupswitch` map their default and case targets to instruction indices at decode
 time and reject non-zero padding, non-boundary targets, inverted/truncated tables and
@@ -246,20 +247,33 @@ use canonical-bit equality and the JDK total order (`NaN` equals `NaN`, `0.0` so
 with the JLS widening rule. A malformed `parseXxx` is a typed error; a hex float literal is
 rejected and the case-insensitive `inf`/`nan` spellings are accepted where Java's grammar
 is not, which are the documented parser gaps. A committed `BoxProbe` fixture
-covers all eight kinds (`cargo test -p rava-interp --test primitive_boxes`). **M2.23 is
-blocked (2026-11-24):** the committed `demo.SpringSmoke` fixture and
-`crates/cli/tests/spring_context.rs` start a real Spring
+covers all eight kinds (`cargo test -p rava-interp --test primitive_boxes`). **M2.26 is
+done (2026-11-24):** `instanceof` of a null operand pushes 0 for a class, an interface and
+an array (JVMS §6.5), the committed M2.21 test now expects that, and null still passes
+every reference `checkcast`. `LinkedHashMap(int,float,boolean)` is a real constructor and
+its `accessOrder` flag is honoured: `get`/`getOrDefault` and an update of an existing
+`put`/`putIfAbsent` key move that entry to the end, which `keySet`/`values`/`entrySet` and
+iteration observe, while `(I)V`, `(IF)V` and `HashMap(IF)V` stay insertion-ordered;
+capacity and load factor remain hints, and a negative capacity or a non-positive/NaN load
+factor is a typed error. The map constructors use the JDK's `(IF)V` descriptor rather than
+the non-existent `(ILF)V` the registry carried before. The Spring rerun exposed and this
+slice fixed a heap-lock re-entry in `computeIfAbsent`, `Class.getDeclaredClasses`,
+`Comparator.comparingInt` and `Comparator.reversed` over a new native lambda target, and
+non-SAM default interface calls on a lambda (`cargo test -p rava-interp --test
+spring_fixes`). **M2.23 is blocked (2026-11-24):** the committed `demo.SpringSmoke`
+fixture and `crates/cli/tests/spring_context.rs` start a real Spring
 `AnnotationConfigApplicationContext` and assert the `hello` bean, but the local test still
-fails — now because the interpreter pushes 1 for `null instanceof LocalResourceCache`
-where JVMS §6.5 requires 0, so `CachingMetadataReaderFactory.setCacheLimit(int)` takes
-the wrong branch and hands a null to `checkcast`/`invokevirtual`, failing with `operand
-has the wrong type`. With that corrected locally the next blocker is
-`java.util.LinkedHashMap(int, float, boolean)`, whose C1 stub has neither code nor a
-native. The committed M2.21 test `instanceof_handles_null_and_primitive_operands`
-asserts the same wrong `instanceof` result and has to be corrected with the fix. The startup chain before that point is in place: monitors, the missing numeric
-instructions, collections, iterators, logging, concurrency natives, exception
-construction, reflection, the primitive-box step and the stream pipeline. The M2 gate is
-not claimed.
+fails. M2.26 fixed the `instanceof`-of-null bug the chain exposed and the
+`LinkedHashMap(int,float,boolean)` constructor behind it, and the startup now stops at a
+class the pinned manifest never included: `Method.getReturnType()` on
+`java.lang.annotation.Target.value()` resolves `Ljava/lang/annotation/ElementType;`, and
+`stdlib/c1/classes` has no `ElementType`. The M1.2 manifest records `CONSTANT_Class`
+owners only, so a type that appears solely inside a descriptor (`ElementType`,
+`RetentionPolicy`) has no stub; fixing that expands the pinned manifest and both stub
+trees, not the runtime. The startup chain before that point is in place: monitors, the
+missing numeric instructions, collections, iterators, logging, concurrency natives,
+exception construction, reflection, the primitive-box step, the stream pipeline,
+`computeIfAbsent`, `getDeclaredClasses` and comparators. The M2 gate is not claimed.
 
 ## What this project is
 

@@ -7,8 +7,9 @@
 
 > Ledger. P0 and P1 were accepted on 2026-11-23. M1 is complete; M2 is in progress
 > (M2.1, M2.2, M2.3, M2.4, M2.5, M2.6, M2.7, M2.8, M2.9, M2.10, M2.11, M2.12,
-> M2.13, M2.14, M2.15, M2.16, M2.17, M2.18, M2.19, M2.20, M2.21, M2.22, M2.24 and
-> M2.25 done; M2.23 is blocked on `instanceof` of null in the Spring startup path).
+> M2.13, M2.14, M2.15, M2.16, M2.17, M2.18, M2.19, M2.20, M2.21, M2.22, M2.24,
+> M2.25 and M2.26 done; M2.23 is blocked on a descriptor-only library type,
+> `java.lang.annotation.ElementType`, reached through `Method.getReturnType`).
 > Keep this file honest and terse.
 
 ## Phase status
@@ -30,8 +31,8 @@ release process, if wanted, becomes its own phase.
 > Gates are defined in `docs/requirements.md` § Milestones. P0 and P1 are accepted;
 > M0 and M1 are complete, and both gate reviews have passed. M2 is in progress, with
 > M2.1, M2.2, M2.3, M2.4, M2.5, M2.6, M2.7, M2.8, M2.9, M2.10, M2.11, M2.12, M2.13,
-> M2.14, M2.15, M2.16, M2.17, M2.18, M2.19, M2.20, M2.21, M2.22, M2.24 and M2.25
-> done.
+> M2.14, M2.15, M2.16, M2.17, M2.18, M2.19, M2.20, M2.21, M2.22, M2.24, M2.25 and
+> M2.26 done.
 
 | Milestone | Delivers | Gate | Status |
 | :--- | :--- | :--- | :--- |
@@ -87,14 +88,14 @@ release process, if wanted, becomes its own phase.
 | M2.23 | Spring `AnnotationConfigApplicationContext` bean graph | R3 | `RAVA_SPRING_ACCEPTANCE=1 cargo test -p rava-cli --test spring_context` exits 0 | blocked |
 | M2.24 | `java.util.stream` pipeline for Spring's annotation metadata | R3 | `cargo test -p rava-interp --test streams` exits 0 | done |
 | M2.25 | Full primitive-box family and Number accessors | R3 | `cargo test -p rava-interp --test primitive_boxes` exits 0 | done |
-| M2.26 | `instanceof(null)` correctness and map constructor surface | R3 | `cargo test -p rava-interp --test spring_fixes` exits 0 | todo |
+| M2.26 | `instanceof(null)` correctness and map constructor surface | R3 | `cargo test -p rava-interp --test spring_fixes` exits 0 | done |
 
 P0 and P1 are accepted; P2 is done because the M2 increments are sliced. All M0 and
 M1 slices are done, and both gate reviews passed. M2.1, M2.2, M2.3, M2.4, M2.5,
 M2.6, M2.7, M2.8, M2.9, M2.10, M2.11, M2.12, M2.13, M2.14, M2.15, M2.16, M2.17,
-M2.18, M2.19, M2.20, M2.21, M2.22, M2.24 and M2.25 are done; M2.23 is blocked on the
-`instanceof`-of-null step of its Spring startup path (see the M2.23 boundary). The M2
-gate is not claimed.
+M2.18, M2.19, M2.20, M2.21, M2.22, M2.24, M2.25 and M2.26 are done; M2.23 is blocked
+on a class the pinned manifest does not include, `java.lang.annotation.ElementType`
+(see the M2.23 boundary). The M2 gate is not claimed.
 
 ## Slice log
 
@@ -136,6 +137,7 @@ gate is not claimed.
 | M2.22 | `cargo test -p rava-interp --test generic_types` | 0 | 2026-11-24 | `rava-classfile`'s `metadata::signature` module parses class, method and field JVMS signatures into `ClassSignature`/`MethodSignature`/`TypeSignature`, preserving class and member type-parameter names with their class and interface bounds, nested `Outer<T>.Inner<U>` owners, `+`/`-`/`*` type arguments, arrays and `^` throws; malformed input, `V` outside a method result, trailing bytes and nesting past 256 are typed `SignatureError`s. `rava-vm`'s `generic` module resolves those names through the declaring class's loader: a raw type is the existing `Class`/primitive/array class object, while `ParameterizedType`, `TypeVariable`, `WildcardType` and `GenericArrayType` are `HeapObject::Type` objects cached structurally by `Shared::type_object` and enumerated as roots; `getClass` reports the public `java.lang.reflect` interface, and `Object.toString`/`Type.getTypeName` render a deterministic type name. The natives cover `Class.getGenericSuperclass`/`getGenericInterfaces`/`getTypeParameters`, `Field.getGenericType`, `Method.getGenericReturnType`/`getGenericParameterTypes`/`getTypeParameters`, `Constructor.getGenericParameterTypes`/`getTypeParameters`, `ParameterizedType.getActualTypeArguments`/`getRawType`/`getOwnerType`, `TypeVariable.getName`/`getBounds`/`getGenericDeclaration`, `WildcardType.getUpperBounds`/`getLowerBounds` and `GenericArrayType.getGenericComponentType`; the committed release-17 fixture (`demo.Box`, `StringBox`, `Plain`, `Nest`, `GenericProbe`) covers the parameterized superinterface, `List<String>`, `T[]`, `? extends Number`, `? super Integer`, a `Map$Entry` owner, a `Nest<String>.Inner<Integer>` owner, the generic method and both generic constructors; 7 tests; `cargo test -p rava-interp` 178, `rava-vm` 50, `rava-classfile` 56 and `rava-cli` 77 pass, workspace 361; `cargo xtask ci` exits 0 |
 | M2.24 | `cargo test -p rava-interp --test streams` | 0 | 2026-11-24 | `rava-vm` gains `HeapObject::Stream(StreamObject)`, `Spliterator(SpliteratorObject)`, `Collector(CollectorObject)` with a `CollectorKind`, `Optional(Option<Value>)` and the internal `Sink(SinkObject)` consumer; each allocator/accessor is ordinary heap state and `Shared::roots` enumerates stream and spliterator elements, a collector's supplier/key/value/accumulator/combiner/finisher callbacks, an optional's value and a sink's destination, while `Shared::get_class`/`Object.toString` report `java.util.stream.Stream`, `java.util.Spliterator`, `java.util.stream.Collector`, `java.util.Optional` and `java.util.function.Consumer`. `rava-interp::streams` is the eager pipeline: `StreamSupport.stream` drains a VM spliterator directly and a Java spliterator through its own `tryAdvance` with a native consumer that appends to the stream, so Spring's `AnnotationsSpliterator` runs unmodified; `Stream.empty/of/ofNullable/concat`, `filter`, `map`, `flatMap`, `distinct`, `sorted()` (natural order over `Integer`/`Long`/`Float`/`Double`/`String`) and `sorted(Comparator)`, `peek`, `limit`, `skip`, `forEach`, `forEachOrdered`, `toArray` (both forms), `collect(Collector)` and `collect(Supplier,BiConsumer,BiConsumer)`, `count`, `anyMatch`/`allMatch`/`noneMatch`, `findFirst`/`findAny`, `min`/`max`, `reduce`, `toList` and `iterator`; `BaseStream.isParallel`/`sequential`/`parallel`/`unordered`/`onClose`/`close`; `Collection.stream`/`parallelStream`/`spliterator`/`removeIf`; `Spliterator.tryAdvance`/`forEachRemaining`/`trySplit`/`estimateSize`/`getExactSizeIfKnown`/`characteristics`/`hasCharacteristics`/`getComparator`; `Spliterators.emptySpliterator`/`spliterator(Object[],...)`/`spliterator(Collection,int)`/`iterator`; `Collectors.toList`/`toSet`/`toUnmodifiableList`/`toUnmodifiableSet`/`toCollection`/`joining()`/`joining(CharSequence)`/`joining(delim,prefix,suffix)`/`counting`/`toMap` and `Collector.of` in its four- and five-argument forms; `Optional.empty/of/ofNullable/get/isPresent/isEmpty/orElse/orElseGet/orElseThrow/ifPresent/map/filter/toString`; and `Map.forEach(BiConsumer)`. Every callback is invoked the way the rest of the interpreter invokes one — a `LambdaObject` through `lambda::invoke_sam`, any other object through its own SAM on the receiver's superclass chain — and a throwable raised by a callback crosses the native ABI as `VmError::Thrown` rather than being swallowed. An instance-target method reference now dispatches on the receiver's runtime class (then the target owner's interfaces), which is what Spring's `MergedAnnotation::isDirectlyPresent` predicate needs. The chain also exposed and fixed: `Map.of` up to ten pairs, the full map surface on `LinkedHashMap` and `Properties`, concrete `toArray` overrides, `Collections.newSetFromMap`/`emptyIterator`, `Enum.equals`/`hashCode`/`getDeclaringClass`, `Objects.requireNonNull`/`isNull`/`nonNull`/`equals`/`hashCode`/`toString`, `boolean`/`char` (and `byte`/`short` as `Integer`) results in reflective boxing, and superclass walks that now use `Shared::resolution_superclass` so the library's deliberate `AbstractStringBuilder`/`Dictionary` omissions do not break assignability. The committed `crates/interp/tests/fixtures/streams/` fixture (`demo.StreamProbe` plus a real Java `WordSpliterator`, `javac --release 17`) drives filter/map/collect toList and toSet, joining, sorted/limit, a capturing lambda, the VM spliterator surface, a Java spliterator, `Collector.of` with identity and real finishers, and a caught and an uncaught throwing callback; 13 tests; `cargo test -p rava-interp` 191, `rava-vm` 50 and `rava-cli` 78 pass, workspace 375; `cargo xtask ci` exits 0. The Spring rerun now passes the stream calls and stops at `java/lang/Byte.valueOf(B)Ljava/lang/Byte;`, the primitive-box expansion the startup path needs; M2.23 stays blocked. |
 | M2.25 | `cargo test -p rava-interp --test primitive_boxes` | 0 | 2026-11-24 | `HeapObject::Boxed(BoxedPrimitive)` now carries all eight primitives, and `BoxedPrimitive` implements the Java conversion rules: `byteValue`/`shortValue`/`intValue` narrow through the low bits (a `float`/`double` saturates through `int`, NaN becomes 0), `longValue`/`floatValue`/`doubleValue` widen (a `long` to `float` rounds), `equals`/`hashCode` use canonical `Float`/`Double` bits, and `compareTo` is the JDK total order. `Shared` gains `boxed_value`/`boxed`/`box_long`/`box_double`, and `Heap` gains one boxed allocator per kind. The wrapper registry covers `valueOf` (primitive, `String`, `String`+radix), the six `Number` accessors, `parseXxx` (decimal and radix), both `toString` forms, `equals`, `hashCode` (instance and static), `compareTo`/`compare`, the `Float`/`Double` `isNaN`/`isInfinite`/`isFinite`/bit methods, `Long.toHexString`, the `Character` comparison surface and `Boolean.valueOf(String)`/`hashCode`/`compare`/`getBoolean`; the `Number` accessors are also registered on `java.lang.Number`, so a call that resolves to the abstract superclass still converts. A malformed or out-of-range `parseXxx` is a typed `VmError::Native`; the documented syntax gaps are a rejected hex floating literal and an accepted case-insensitive `inf`/`nan` spelling, and the float/double text keeps the M2.9 plain-decimal boundary. `String.valueOf`, `Object.toString`, `StringBuilder.append`, stream `joining` and `Arrays.toString` render every box through `BoxedPrimitive::text`; boxed equality/hashing is shared by `Objects`, maps, callbacks, arrays and streams, and `Collectors.counting()` now boxes a `Long`. Reflective adaptation covers every descriptor: `box_result` returns each primitive's own wrapper, `unbox_argument` applies the JLS §5.3 widening rule (a `Character` widens as its code unit, a wrong or wider box is typed), so `Field.get`/`set`, `Method.invoke`, `Constructor.newInstance` and `Method.getDefaultValue` work for all primitives. The assembled `BoxProbe` fixture covers valueOf, the accessors, parse, text, equals/hash/compare, field get/set, method invoke, constructor arguments and `String.valueOf` for all eight kinds; 11 tests; `cargo test -p rava-interp` 202, `rava-vm` 50, `rava-cli` 78 and `rava-classfile` 56 pass, workspace 386; `cargo xtask ci` exits 0 |
+| M2.26 | `cargo test -p rava-interp --test spring_fixes` | 0 | 2026-11-24 | `instanceof` of a null operand now pushes 0 for a named class, an interface and an array (JVMS §6.5) instead of 1, and the committed M2.21 test `instanceof_handles_null_and_primitive_operands` was corrected to expect 0; null still passes every reference `checkcast`. `java/util/LinkedHashMap.<init>(IFZ)V` exists and its `accessOrder` flag is honoured: `get`/`getOrDefault`/`put` (existing key)/`putIfAbsent` (existing key) move the entry to the end of `MapObject::entries`, which `keySet`/`values`/`entrySet` and iteration observe; `(I)V`, `(IF)V` and `HashMap(IF)V` keep insertion order, and a negative capacity or a non-positive/NaN load factor is a typed error. The registry's map constructors were corrected from the non-existent `(ILF)V` to the JDK's `(IF)V` on every map surface. The Spring rerun then exposed and this slice fixed: a heap-lock re-entry deadlock in `computeIfAbsent` (`keys_equal` locked the heap while the caller held it), `Class.getDeclaredClasses` over the `InnerClasses` metadata (member rows only; a member outside the C1 subset is skipped), `Comparator.comparingInt` over the new `LambdaTargetKind::Native` lambda target, `Comparator.reversed`, and non-SAM default interface calls on a lambda (`invokeinterface` on a `Comparator` lambda now falls through to a concrete declaration instead of the SAM-mismatch error). The new `crates/interp/tests/spring_fixes.rs` has 9 tests; `cargo test -p rava-interp` 211, `rava-vm` 50, `rava-cli` 78 and `rava-classfile` 56 pass, workspace 395; `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all --check` and `cargo xtask ci` exit 0. The Spring acceptance still exits 1, now at `error: runtime error: class java/lang/annotation/ElementType not found from loader 0`; the M2.23 boundary records the root cause. |
 M0.6 boundary: the reference and class-unloading hooks are registration points only.
 M0 has no collector, so no weak/soft/phantom reference is cleared and no class is
 unloaded; M5 (ADR-0008) implements them on this seam. `MemoryRegion` is a VM-owned
@@ -751,11 +753,11 @@ M2.23 boundary: the committed `crates/cli/tests/fixtures/spring/` fixture
 `crates/cli/tests/spring_context.rs` run a real Spring
 `AnnotationConfigApplicationContext` through `rava run` and assert exactly `hello\n`; the
 test skips with a clear message only when `compat/jars` is absent, so a jar-less CI checkout
-stays green. The local acceptance currently **fails**: Spring's
-`AnnotatedElementUtils.getMergedAnnotationAttributes` reaches
-`java/util/stream/StreamSupport.stream(Ljava/util/Spliterator;Z)Ljava/util/stream/Stream;`,
-and the runtime library has no `java.util.stream` pipeline (`Stream`/`Spliterator`/
-`Collector`), so the context never reaches `refresh()`. The first blocker fixed in this
+stays green. The acceptance failed at each step of this chain: the first failure was
+Spring's `AnnotatedElementUtils.getMergedAnnotationAttributes` reaching
+`java/util/stream/StreamSupport.stream(Ljava/util/Spliterator;Z)Ljava/util/stream/Stream;`
+when the runtime library had no `java.util.stream` pipeline (`Stream`/`Spliterator`/
+`Collector`), so the context never reached `refresh()`. The first blocker fixed in this
 slice was `java/util/LinkedHashSet.<init>(I)V`; the chain then exposed, and this slice
 fixes, `monitorenter`/`monitorexit`, `invokedynamic`'s interface-method references,
 float/long/double constants, arithmetic, conversions and the `dup`/`pop` family, and the
@@ -776,17 +778,20 @@ failing annotation reflection. M2.24 landed the eager `java.util.stream` pipelin
 acceptance now runs through `StreamSupport.stream`, `filter`, `map`, `sorted`, `collect` and
 the `Collector`/`Spliterator` callbacks. M2.25 landed the primitive-box family, so
 `BeanUtils`'s static initializer now boxes every primitive type and the context gets past
-that step. It still **fails**, now at
-`org/springframework/core/type/classreading/CachingMetadataReaderFactory.setCacheLimit(I)V`
-with `operand has the wrong type`: the interpreter's `instanceof` pushes 1 for a null
-operand, but JVMS §6.5 requires 0, so `null instanceof LocalResourceCache` takes the true
-branch and the following `checkcast`/`invokevirtual` is handed the null. A local probe that
-made `instanceof` of null push 0 reached the next blocker,
-`java/util/LinkedHashMap.<init>(IFZ)V has no bytecode`. M2.23 stays blocked on that pair;
-the `instanceof` fix is M2.21 semantics, not a boxing change, and is not part of this
-slice: the committed `instanceof_handles_null_and_primitive_operands` test asserts
-the same wrong result, so the fix must correct that test as well. The test and fixture
-are committed and must not be weakened.
+that step. M2.26 fixed the `instanceof`-of-null semantics the chain exposed (the
+interpreter pushed 1 where JVMS §6.5 requires 0, so
+`CachingMetadataReaderFactory.setCacheLimit` took the wrong branch) and the map
+constructor surface behind it, and this boundary stays **blocked** at the next class the
+startup path needs: `Method.getReturnType()` on `java.lang.annotation.Target.value()`
+resolves the descriptor `Ljava/lang/annotation/ElementType;` through the bootstrap loader
+and `stdlib/c1/classes` has no `ElementType`. The root cause is the documented M1.2
+boundary: the static manifest records `CONSTANT_Class` owners only, so a type that
+appears solely inside a descriptor (`@Target`'s `ElementType`, `@Retention`'s
+`RetentionPolicy`) was never a manifest owner and has no stub. Fixing it means expanding
+the pinned manifest and both committed stub trees (M1.2, M1.3 and M2.2), not adding a
+runtime branch. The local acceptance exits 1 with
+`error: runtime error: class java/lang/annotation/ElementType not found from loader 0`.
+The test and fixture are committed and must not be weakened.
 
 M2.24 boundary: the stream pipeline is **eager**. A `Stream` holds its whole element list, and `filter`/`map`/`flatMap`/`distinct`/`sorted`/`peek`/`limit`/`skip`/`sequential`/`parallel`/`unordered` each allocate a new stream with a computed vector; there is no lazy stage graph, no short-circuiting until a terminal operation, no `Spliterator`-backed stream after construction, no parallel execution (the `boolean` of `StreamSupport.stream` is recorded and `isParallel` reports it) and no close action (`onClose` returns the stream, `close` does nothing). `sorted()` compares `Integer`/`Long`/`Float`/`Double` numerically and `String` by UTF-16 code unit; any other element or a null is a typed error rather than a synthesized `ClassCastException`/`NullPointerException`. `distinct` and `toSet` compare strings by content, boxed primitives by per-kind value equality and everything else by reference identity; `Collectors.toMap` appends without the JDK's duplicate-key `IllegalStateException`, `toList`/`toUnmodifiableList` return an ordinary modifiable heap list (there is no unmodifiable wrapper), `toUnmodifiableSet` is the ordinary linked set, and `Collectors.counting()` boxes a `Long` (M2.25 replaced the temporary `Integer` count that stood in before the primitive-box family existed). `joining` renders a non-null element through the VM's `String.valueOf` shape, so a non-`CharSequence` is accepted where the JDK would reject it. A VM `Spliterator` is a snapshot plus a cursor with `ORDERED|SIZED|SUBSIZED` (`DISTINCT` added for a set); `trySplit` returns null and `getComparator` null. A Java object implementing `Spliterator` is drained through its own `tryAdvance` and a native `Consumer` sink, so a Java default `forEachRemaining` is not executed by the VM; Spring's and the fixture's spliterators implement the abstract `tryAdvance`, which is the shape this slice supports. `Optional.empty()` allocates a fresh object rather than the JDK singleton, and a present value is a `Value`, so `Optional` identity is not the JDK's. `Collection.stream`/`spliterator` snapshot the collection, so a later mutation is not observed. `removeIf` and `Map.forEach` are the two callback-taking collection operations added here; `compute`/`merge`/`removeIf`'s concurrent variants and the primitive `IntStream`/`LongStream`/`DoubleStream` pipelines are out of scope. `java.util.stream` `gather`, `mapMulti`, `takeWhile`/`dropWhile`, `reduce` with three arguments, `Collectors.groupingBy`/`partitioningBy`/`teeing`/`summarizing*` and `Spliterator.OfInt`/`OfLong`/`OfDouble` are not implemented and fail loudly. No Spring behavior is faked: the acceptance fixture and test are unchanged, and the remaining blocker is recorded above.
 
@@ -823,6 +828,32 @@ error. `Field.get`/`set`, `Method.invoke`, `Constructor.newInstance` and
 `decode`, the unsigned/radix `toString` families beyond `Integer`'s hex/binary/octal and
 `Long.toHexString`, `Character.toString(int)`, the small-value caches, and the
 `instanceof`-of-null bug recorded on the M2.23 boundary.
+
+M2.26 boundary: `instanceof` of a null reference pushes 0 for a named class, an interface
+and an array, and a null still passes every reference `checkcast`; a primitive operand
+matches no value. The map representation gains one `access_order` flag on
+`HeapObject::Map`. `LinkedHashMap(int,float,boolean)` sets it and `HashMap(int,float)`,
+`LinkedHashMap(int,float)` and `LinkedHashMap(int)` leave it false; with the flag true a
+successful `get`/`getOrDefault` and an update of an existing key through `put`/
+`putIfAbsent` move that entry to the end, which is the order `keySet`/`values`/`entrySet`
+snapshot and therefore the order an iteration observes. There is no hashing, tree bin or
+resize, so capacity and load factor are still hints; they are validated the way the JDK
+validates them (a negative capacity and a non-positive or NaN load factor are typed
+errors). The map constructors use the JDK's `(IF)V` descriptor, not the `(ILF)V` the
+registry carried before, and `LinkedHashMap`'s `(Map)`/`(I)`/`()` forms and `(IFZ)V` are
+all registered. This slice also closed what the Spring rerun reached: `computeIfAbsent`
+scans the entries under one heap guard (`keys_equal` takes `&Heap` instead of locking
+again), `Class.getDeclaredClasses` returns the `InnerClasses` member rows of the class
+in class-file order and skips a member whose class is outside the C1 subset, the lambda
+representation gains `LambdaTargetKind::Native` for a VM factory body, and
+`Comparator.comparingInt`/`reversed` build their comparators over it. `invokeinterface`
+on a lambda now treats a call that is not the SAM as an ordinary interface call when the
+interface declares a concrete method, so `Comparator.reversed` works on a `Comparator`
+lambda while an abstract non-SAM method still raises the typed SAM error. Not in this
+slice: the manifest's descriptor-only types (`ElementType`, `RetentionPolicy`), which is
+the recorded M2.23 blocker; `Comparator.comparing`, `comparingLong`, `comparingDouble`,
+`thenComparing*` and `naturalOrder`; and any change to the committed Spring fixture or
+acceptance.
 
 ## Decision log
 
@@ -944,18 +975,20 @@ A fresh session should:
     the committed `demo.StreamProbe` fixture
     (`cargo test -p rava-interp --test streams`). M2.25 landed the full primitive-box
     family and the `Number` accessors (`cargo test -p rava-interp --test
-    primitive_boxes`). M2.23 is **blocked**: the Spring startup path now runs through
-    class loading, logging, annotation reflection, the primitive-box and `BeanUtils`
-    static-initializer step, concurrent collections and the stream pipeline, and the first
-    remaining blocker is the interpreter's `instanceof` of a null operand (JVMS §6.5 says
-    the result is 0; the VM pushes 1), which sends
-    `CachingMetadataReaderFactory.setCacheLimit` down the `null instanceof
-    LocalResourceCache` true branch and fails with `operand has the wrong type`. The
-    M2.21 test `instanceof_handles_null_and_primitive_operands` currently asserts that
-    wrong result and has to be corrected with it. With that corrected locally the next
-    blocker is `java/util/LinkedHashMap.<init>(IFZ)V has no
-    bytecode`. `cargo test -p rava-cli --test spring_context` exits 1 with the
-    `instanceof` message; the M2 gate is not claimed.
+    primitive_boxes`). M2.26 landed the `instanceof`-of-null correction (with the M2.21
+    test fixed) and the `LinkedHashMap(IFZ)V` constructor with honest access order
+    (`cargo test -p rava-interp --test spring_fixes`), plus the lock, reflection and
+    `Comparator` fixes the rerun exposed. M2.23 is **blocked**: the Spring startup path
+    runs through class loading, logging, annotation reflection, the primitive-box step,
+    the stream pipeline, `CachingMetadataReaderFactory`, `computeIfAbsent`, member
+    reflection, `Class.getDeclaredClasses` and comparators, and the next blocker is a
+    library class the pinned manifest never included: `Method.getReturnType()` on
+    `@Target.value()` resolves `Ljava/lang/annotation/ElementType;`, and
+    `stdlib/c1/classes` has no `ElementType`. The manifest's M1.2 boundary (only
+    `CONSTANT_Class` owners) is the root cause; the fix belongs to the pinned surface
+    (M1.2/M1.3/M2.2), not to a runtime branch. `cargo test -p rava-cli --test
+    spring_context` exits 1 with `class java/lang/annotation/ElementType not found from
+    loader 0`; the M2 gate is not claimed.
 4. Do not write runtime code outside a defined slice.
 
 ## Open decisions
