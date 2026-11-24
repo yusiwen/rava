@@ -44,18 +44,26 @@ When the fact is only a status, update `PROJECT.md` instead.
 | [`c1-metadata.md`](c1-metadata.md) | What exactly does the M2 C1 metadata diff compare, and what does “diff 0” prove? | current |
 | [`spring-context.md`](spring-context.md) | How does a real Spring `AnnotationConfigApplicationContext` reach a bean on rava? | current |
 
-## Planned implementation documents
+## Planned retrospective documents (M0–M2)
 
-These are the next explanation documents, in priority order. Each is a separate
-PR-sized writing task; a document is done only when its commands have been re-run and
-its boundaries re-checked against `PROJECT.md`.
+**Every document in this backlog is retrospective.** It describes a mechanism that is
+already implemented in M0–M2 and must be backed by existing code and commands.
+Explanations for M3–M9 are written only after the corresponding slice lands; until then
+their contract and status live in `docs/requirements.md`, `docs/adr/` and `PROJECT.md`.
+Do not pre-write future-milestone implementation documents here.
 
-| Priority | Document | Question it must answer |
-| :--- | :--- | :--- |
-| P1 | `interpreter-execution.md` | How do decoded IR, frames, static/instance calls, the native ABI, exceptions, `invokedynamic`, lambdas and streams execute a method? |
-| P1 | `reflection-and-metadata.md` | How does a C1 metadata record become a `Class`/member/annotation/generic `Type` at runtime? |
-| P2 | `testing-and-evidence.md` | How are fixtures, golden dumps, opt-in Spring acceptance and reproducible stub trees generated and checked? |
-| P2 | `notes/M2.md` (history) | What did M2 teach, which blockers appeared in order, and what remains fragile? |
+Each is a separate PR-sized writing task; a document is done only when its commands
+have been re-run and its boundaries re-checked against `PROJECT.md`.
+
+| Priority | Document | Already landed in | Question it must answer |
+| :--- | :--- | :--- | :--- |
+| P1 | `interpreter-execution.md` | M0.5a, M2.5–M2.7, M2.18, M2.19, M2.24 | How do decoded IR, frames, static/instance calls, the native ABI, exceptions, `invokedynamic`, lambdas and streams execute a method? |
+| P1 | `reflection-and-metadata.md` | M2.1, M2.4, M2.8, M2.10, M2.11, M2.22 | How does a C1 metadata record become a `Class`/member/annotation/generic `Type` at runtime? |
+| P2 | `testing-and-evidence.md` | M0–M2 gates | How are fixtures, golden dumps, opt-in Spring acceptance and reproducible stub trees generated and checked? |
+
+M2 history is a **History** document under `docs/notes/`, not an explanation; it is
+added there when the milestone note is written. The explanation backlog does not absorb
+future or historical material.
 
 ## Current boundaries
 
