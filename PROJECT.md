@@ -6,8 +6,8 @@
 **Started:** 2026-11-22
 
 > Ledger. P0 and P1 were accepted on 2026-11-23. M1 is complete; M2 is in progress
-> (M2.1, M2.2, M2.3, M2.4, M2.5, M2.6, M2.7, M2.8, M2.9, M2.10, M2.11 and M2.12
-> done). Keep this file honest and terse.
+> (M2.1, M2.2, M2.3, M2.4, M2.5, M2.6, M2.7, M2.8, M2.9, M2.10, M2.11, M2.12 and
+> M2.13 done). Keep this file honest and terse.
 
 ## Phase status
 
@@ -27,7 +27,8 @@ release process, if wanted, becomes its own phase.
 
 > Gates are defined in `docs/requirements.md` § Milestones. P0 and P1 are accepted;
 > M0 and M1 are complete, and both gate reviews have passed. M2 is in progress, with
-> M2.1, M2.2, M2.3, M2.4, M2.5, M2.6, M2.7, M2.8, M2.9, M2.10, M2.11 and M2.12 done.
+> M2.1, M2.2, M2.3, M2.4, M2.5, M2.6, M2.7, M2.8, M2.9, M2.10, M2.11, M2.12 and M2.13
+> done.
 
 | Milestone | Delivers | Gate | Status |
 | :--- | :--- | :--- | :--- |
@@ -70,11 +71,12 @@ release process, if wanted, becomes its own phase.
 | M2.10 | Boxed values and reflection invocation | R3 | `cargo test -p rava-interp --test reflection_invoke` exits 0 | done |
 | M2.11 | Annotation reflection and proxies | R3 | `cargo test -p rava-interp --test annotations` exits 0 | done |
 | M2.12 | `StringBuilder` and core collection behavior | R3 | `cargo test -p rava-interp --test collections` exits 0 | done |
-| M2.13 | `HashMap` and `String.valueOf`/value conversion | R3 | `cargo test -p rava-interp --test maps_values` exits 0 | todo |
+| M2.13 | `HashMap` and `String.valueOf`/value conversion | R3 | `cargo test -p rava-interp --test maps_values` exits 0 | done |
+| M2.14 | Named member lookup (`getDeclaredMethod`/`getField`/`getConstructor`) | R3 | `cargo test -p rava-interp --test member_lookup` exits 0 | todo |
 
 P0 and P1 are accepted; P2 is done because the M2 increments are sliced. All M0 and
 M1 slices are done, and both gate reviews passed. M2.1, M2.2, M2.3, M2.4, M2.5,
-M2.6, M2.7, M2.8, M2.9, M2.10, M2.11 and M2.12 are done; M2.13 is next.
+M2.6, M2.7, M2.8, M2.9, M2.10, M2.11, M2.12 and M2.13 are done; M2.14 is next.
 
 ## Slice log
 
@@ -104,6 +106,7 @@ M2.6, M2.7, M2.8, M2.9, M2.10, M2.11 and M2.12 are done; M2.13 is next.
 | M2.10 | `cargo test -p rava-interp --test reflection_invoke` | 0 | 2026-11-24 | `HeapObject::Boxed(BoxedPrimitive::Integer)` is a heap object, not a second `Value` variant; `Shared::get_class` and `invokevirtual` dispatch it to `java/lang/Integer`, so `getClass` reports the boxed class; `Shared::box_int`/`unbox_int` and the `boxed::{unbox_argument,box_result}` helpers convert `int` boxes and pass reference handles through; the `java/lang/Integer` registry overrides `valueOf(I)`, `intValue`, `toString()`, `toString(I)`, `equals`, `hashCode`, `compareTo(Integer)` and `parseInt(String)`; `Field.get`/`set` cover `int` and reference instance fields, reject a static field and a null or non-assignable receiver, and preserve reference identity; `Method.invoke` runs static and instance methods by the reflected name and descriptor with no overload lookup, unboxes `int` arguments, boxes an `int` result and ignores the receiver for a static method; `Constructor.newInstance` allocates the declaring class, unboxes its arguments and runs `<init>` through `run_instance_method`; a Java throwable from an invoked method crosses the native ABI as `VmError::Thrown` and becomes `InterpError::Thrown`, so it is not swallowed (`InvocationTargetException` wrapping is deferred); the `Bean`/`BoxProbe` fixture covers boxed virtual calls, `(I)V` and `()V` construction, int/reference field access, getters/setters and static `sum`, plus wrong receivers, a static field, wrong arity and type, a missing-descriptor method and the no-`getDeclaredMethod` boundary; 9 tests; `cargo test -p rava-interp` 70, `cargo test -p rava-vm` 45 and `cargo test -p rava-cli` 67 pass, workspace 232; `cargo xtask ci` exits 0 |
 | M2.11 | `cargo test -p rava-interp --test annotations` | 0 | 2026-11-24 | `HeapObject::Annotation` carries the annotation type's `ClassId` and the encoded values from the M2.1 metadata model, and `HeapObject::Enum` (cached per `(class, name)` as a permanent root) represents an enum constant; `Class`, `Field`, `Method` and `Constructor` gain `getDeclaredAnnotations`, `getAnnotations` and `getAnnotation(Class)` over that metadata in class-file order, returning an empty array for no declared annotations and null for a missing single annotation; `Class.getAnnotations` merges superclass annotations whose type is itself `@Inherited`, nearest declaration winning, while `getDeclaredAnnotations` stays declared-only; an omitted element falls back to the annotation type's `AnnotationDefault`; element values decode through the annotation type's loader as interned strings, `Value` primitives, class literals (`c`), enum constants (`e`), nested annotation objects (`@`) and primitive/reference arrays (`[`); `invokevirtual` dispatches an annotation receiver to its annotation type and the annotation module answers `annotationType`, every element method and deterministic `equals`/`hashCode`/`toString`; `java/lang/annotation/Annotation.annotationType` and the three queries on `Class`/`Field`/`Method`/`Constructor` (plus `AccessibleObject.getAnnotations`, where the C1 stub declares it) are registry natives, and `java/lang/Enum.name`/`toString` report a constant's name; the committed release-17 fixture under `crates/interp/tests/fixtures/annotations/` annotates a class, field, method and constructor with string/int/boolean/long/double/class/enum/nested/array elements and defaults and an `@Inherited` superclass annotation; 10 tests; `cargo test -p rava-interp` 80, `rava-vm` 47, `rava-classfile` 50 and `rava-cli` 67 pass, workspace 244; `cargo xtask ci` exits 0 |
 | M2.12 | `cargo test -p rava-interp --test collections` | 0 | 2026-11-24 | `HeapObject::StringBuilder(String)` and `HeapObject::List(Vec<Value>)` are ordinary heap objects selected by their class identity in `Shared::allocate_instance`; `Shared::get_class`, `invokevirtual` dispatch and `Object.toString`'s runtime name report `java/lang/StringBuilder` and `java/util/ArrayList`, and `Shared::roots` enumerates every non-null reference held by a heap list. The builder natives cover the three constructors, the `String`/`Object`/`int`/`long`/`char`/`boolean`/`float`/`double`/`CharSequence` `append` overloads, `toString`, `length`, `charAt`, `setLength`, `reverse`, `deleteCharAt` and `insert(I,String)` over UTF-16 units (null String appends `"null"`, a split surrogate is `UnpairedSurrogate`); the list natives cover both constructors, `size`, `isEmpty`, both `add` forms, `get`, `set`, `clear`, both `remove` forms, `contains` and `indexOf` with reference-equality membership and typed bounds errors. The `CollectionsProbe` fixture exercises the bytecode path (including `getClass().getName()` on both VM classes), and the registry is called directly only for the `long`/`float`/`double` overloads the decoded instruction subset cannot load. 12 new tests; `cargo test -p rava-interp` 92, `rava-vm` 47, `rava-classfile` 50 and `rava-cli` 67 pass, workspace 256; `cargo xtask ci` exits 0 |
+| M2.13 | `cargo test -p rava-interp --test maps_values` | 0 | 2026-11-24 | `HeapObject::Map(Vec<(Value, Value)>)` is an insertion-ordered map with a heap allocator and accessors, selected by the `java.util.HashMap` class identity in `Shared::allocate_instance`; `Shared::get_class`, `invokevirtual` dispatch and `Object.toString`'s runtime name report `java.util.HashMap`, and `Shared::roots` enumerates every non-null key and value a map holds. The natives cover the `()V`/`(I)V` constructors, `size`, `isEmpty`, `put` (returning the previous value or null), `get`, `containsKey`, `containsValue`, `remove` and `clear`; null keys and values are stored, a string key compares by content, a boxed `Integer` key by value and every other key by reference identity, and a negative capacity or a non-reference argument is a typed `VmError::Native`. `String.valueOf` covers `Object`, `int`, `long`, `boolean`, `char`, `float` and `double`: null renders `"null"`, a `String` returns itself, a boxed `Integer` its decimal value, any other object the VM's `ClassName@hex` shape that matches M2.9 `Object.toString`, `valueOf(int)` is byte-identical to `Integer.toString(int)`, and a lone surrogate `char` is `UnpairedSurrogate`; the value-conversion helpers moved from `collections` to `string`, so `StringBuilder.append(Object)` keeps the same text. The assembled `MapProbe` exercises the bytecode path, two distinct equal-content string keys and two distinct boxed `Integer` keys, roots, and typed errors; 16 tests; `cargo test -p rava-interp` 108, `rava-vm` 47, `rava-classfile` 50 and `rava-cli` 67 pass, workspace 272; `cargo xtask ci` exits 0 |
 
 M0.6 boundary: the reference and class-unloading hooks are registration points only.
 M0 has no collector, so no weak/soft/phantom reference is cleared and no class is
@@ -453,6 +456,39 @@ is assembled in `crates/interp/tests/collections.rs` rather than committed, and 
 `long`/`float`/`double` append overloads are called through the registry because the
 decoded instruction subset has no `lload`/`fload`/`dload` or `ldc2_w`.
 
+M2.13 boundary: a map is `HeapObject::Map(Vec<(Value, Value)>)`, an insertion-ordered
+vector of pairs rather than a hash table: lookup is a linear scan, there is no bucketing,
+tree bin, resizing or load factor, and `HashMap(int)` treats its capacity as a hint. Keys
+and values are `Value`s, so a null key and a null value are stored exactly as the JDK
+stores them; a null value is an entry, not an absent key, and `get` returns null for both.
+Membership compares a string key by content, a boxed `Integer` key by value and every
+other reference by identity; `containsValue` uses the same rule, which matches the JDK for
+the string and `Integer` values this slice models but differs from a Java `equals`
+override on any other class, because a VM native cannot re-enter the interpreter. The map
+natives are the two constructors and `size`, `isEmpty`, `put`, `get`, `containsKey`,
+`containsValue`, `remove` and `clear`; `put` and `remove` return the previous or removed
+value and `put` of an equal key replaces the value in place. A negative capacity, a null
+receiver and a non-reference key or value are typed `VmError::Native`s, not synthesized
+`IllegalArgumentException`/`NullPointerException`s. `HashMap`'s `(IF)V` and `(Map)V`
+constructors, `getOrDefault`, `putIfAbsent`, `putAll`, `keySet`, `values`, `entrySet`,
+`forEach`, `replace`/`merge`/`compute`, `clone`, `equals`, `hashCode` and `toString` have no
+registry entry and reach the C1 stub's missing `Code` as the typed
+`InterpError::NativeOrAbstract`, so they fail loudly instead of guessing. There is no
+`Map`-interface dispatch: a map receiver resolves to `java/util/HashMap` and there are no
+iterators, sets, entry objects, streams, `Objects.equals`/`Objects.hash`, concurrency or
+Spring in this slice. A map is an ordinary heap object, not a permanent root; `Shared::roots`
+enumerates its non-null keys and values, and because M0 has no collector an entry of an
+otherwise unreachable map is over-retained rather than traced. `String.valueOf(Object)`
+cannot dispatch an overridden Java `toString` either, so a `String` returns itself, a
+`StringBuilder` contributes its content, a boxed `Integer` its decimal value, null the
+interned `"null"`, and every other object the M2.9 `Object.toString` shape
+(`ClassName@hex`); an array has no class identity, so it is a typed error. `String.valueOf`
+covers only the `Object`, `int`, `long`, `boolean`, `char`, `float` and `double` overloads;
+the `char[]` forms remain absent, `valueOf(int)` uses the identical decimal text as
+`Integer.toString(int)`, and the float/double text keeps the M2.12 shortest-round-trip
+limitation (an exponential value is printed in plain decimal). A lone surrogate `char` is
+a typed `UnpairedSurrogate`.
+
 ## Decision log
 
 | ADR | Decision | Status |
@@ -510,7 +546,12 @@ A fresh session should:
    constructors, append overloads and list operations as native registry entries, the
    builder's UTF-16 semantics and the list's reference-equality membership, with
    `Shared::roots` enumerating list-held references (`cargo test -p rava-interp --test
-   collections`). M2.13 is next.
+   collections`). M2.13 landed `HashMap` and value conversion: the
+   `HeapObject::Map` representation, the map constructors and `size`/`isEmpty`/`put`/
+   `get`/`containsKey`/`containsValue`/`remove`/`clear` natives with content-equal string
+   keys and value-equal `Integer` keys, `Shared::roots` enumerating map keys and values,
+   and the `String.valueOf` overloads over the shared `ClassName@hex`/decimal text
+   (`cargo test -p rava-interp --test maps_values`). M2.14 is next.
 4. Do not write runtime code outside a defined slice.
 
 ## Open decisions
