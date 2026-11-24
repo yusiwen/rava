@@ -1,10 +1,12 @@
 //! `rava` — the command-line launcher.
 //!
-//! Deliberately dependency-light: M1 needs only `compat target` and `compat
-//! manifest`, so argument handling is a small match instead of a CLI framework.
+//! Deliberately dependency-light: M1 needs only the `compat` commands, so argument
+//! handling is a small match instead of a CLI framework.
 
 mod compat;
 mod manifest;
+mod stubs;
+mod surface;
 mod target;
 
 use std::process::ExitCode;
@@ -35,6 +37,8 @@ fn print_usage() {
     println!("usage: rava <command>");
     println!();
     println!("commands:");
-    println!("  compat target     print and validate the pinned compatibility target");
-    println!("  compat manifest   generate or check the static surface manifest");
+    println!("  compat target      print and validate the pinned compatibility target");
+    println!("  compat manifest    generate or check the static surface manifest");
+    println!("  compat stubs       write the signature-only stub class library");
+    println!("  compat link-check  resolve the manifest against the stub class library");
 }

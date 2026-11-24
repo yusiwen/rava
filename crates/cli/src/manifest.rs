@@ -11,7 +11,6 @@
 //! annotations or signatures; those belong to the dynamic/reflective steps of ADR-0003
 //! and later slices.
 
-use std::collections::BTreeSet;
 use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -20,6 +19,7 @@ use std::process::ExitCode;
 use rava_classfile::{ClassFile, Constant};
 use rava_vm::JarSource;
 
+use crate::surface::{Counts, Member, Surface};
 use crate::target::{self, JarLock, TargetLock};
 
 /// Package prefixes in scope. A reference to anything else is not a platform
@@ -48,48 +48,7 @@ impl From<target::LockError> for ManifestError {
     }
 }
 
-/// One `owner name descriptor` reference, ordered by owner, then name, then descriptor.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-struct Member {
-    owner: String,
-    name: String,
-    descriptor: String,
-}
-
-impl Member {
-    fn render(&self, kind: &str) -> String {
-        format!("{kind} {} {} {}\n", self.owner, self.name, self.descriptor)
-    }
-}
-
-/// The deduplicated platform surface of the pinned jar set.
-#[derive(Debug, Default)]
-struct Surface {
-    classes: BTreeSet<String>,
-    fields: BTreeSet<Member>,
-    methods: BTreeSet<Member>,
-    interface_methods: BTreeSet<Member>,
-}
-
-/// The record counts reported in the manifest header and on the command line.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct Counts {
-    classes: usize,
-    fields: usize,
-    methods: usize,
-    interface_methods: usize,
-}
-
 impl Surface {
-    fn counts(&self) -> Counts {
-        Counts {
-            classes: self.classes.len(),
-            fields: self.fields.len(),
-            methods: self.methods.len(),
-            interface_methods: self.interface_methods.len(),
-        }
-    }
-
     /// Records the platform references in one class's constant pool.
     fn record(&mut self, class: &ClassFile) -> Result<(), ManifestError> {
         let this = class.this_class_name().unwrap_or("<unknown>");
@@ -417,6 +376,7 @@ mod tests {
             jars_lock: "compat/jars.lock".to_owned(),
             jar_count: 35,
             manifest_path: "compat/surface/test.txt".to_owned(),
+            stubs_path: "stdlib/classes".to_owned(),
         }
     }
 

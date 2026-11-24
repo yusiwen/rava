@@ -1,6 +1,6 @@
 # Target lock: the single source of truth for the pinned platform (ADR-0002).
-# A version bump is a re-baseline: regenerate the manifest, reopen the gap count
-# and rerun the gates. It is never a silent dependency update.
+# A version bump is a re-baseline: regenerate the manifest and the stub library,
+# reopen the gap count and rerun the gates. It is never a silent dependency update.
 
 schema = 1
 
@@ -29,3 +29,9 @@ count = 35
 # Static surface manifest (ADR-0003, M1.2). `rava compat manifest --check`
 # regenerates it in memory and byte-compares this file.
 path = "compat/surface/spring-boot-3.5.16.txt"
+
+[stubs]
+# Signature-only class library (M1.3), generated from the manifest by
+# `rava compat stubs`. Regenerate it whenever the manifest changes; the class
+# files are committed deliverables, not build output.
+path = "stdlib/classes"

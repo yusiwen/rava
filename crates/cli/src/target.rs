@@ -52,6 +52,7 @@ pub struct TargetLock {
     pub jars_lock: String,
     pub jar_count: usize,
     pub manifest_path: String,
+    pub stubs_path: String,
 }
 
 impl TargetLock {
@@ -72,6 +73,7 @@ impl TargetLock {
         let reference_app = table(&document, "reference_app")?;
         let jars = table(&document, "jars")?;
         let manifest = table(&document, "manifest")?;
+        let stubs = table(&document, "stubs")?;
 
         let lock = Self {
             schema,
@@ -88,6 +90,7 @@ impl TargetLock {
             jars_lock: string(jars, "jars", "lock")?,
             jar_count: count(jars, "jars", "count")?,
             manifest_path: string(manifest, "manifest", "path")?,
+            stubs_path: string(stubs, "stubs", "path")?,
         };
         lock.validate()?;
         Ok(lock)
@@ -132,6 +135,7 @@ impl TargetLock {
             ("jars.directory", &self.jars_dir),
             ("jars.lock", &self.jars_lock),
             ("manifest.path", &self.manifest_path),
+            ("stubs.path", &self.stubs_path),
         ] {
             if !is_safe_relative(value) {
                 return Err(LockError::new(format!(
@@ -285,14 +289,17 @@ fn report(root: &Path) -> Result<String, LockError> {
     line(&mut output, "jar lock", &lock.jars_lock);
     line(&mut output, "jar count", &jar_lock.count.to_string());
     line(&mut output, "manifest", &lock.manifest_path);
+    line(&mut output, "stubs", &lock.stubs_path);
     output.push_str("target lock: ok\n");
     Ok(output)
 }
 
-/// Loads the target lock and the jar lock and checks that the jar directory matches.
+/// Loads and validates only `compat/targets.toml`.
 ///
-/// `compat manifest` reuses this so both commands reject the same broken target.
-pub fn load(root: &Path) -> Result<(TargetLock, JarLock), LockError> {
+/// `compat link-check` and `compat stubs` use this: they need the manifest and stub
+/// paths, not the downloaded jar set. `compat manifest` uses [`load`], which additionally
+/// requires the pinned jars and their lock.
+pub fn load_target(root: &Path) -> Result<TargetLock, LockError> {
     let target_path = root.join(TARGET_LOCK);
     let target_text = fs::read_to_string(&target_path).map_err(|error| {
         LockError::new(format!(
@@ -300,7 +307,14 @@ pub fn load(root: &Path) -> Result<(TargetLock, JarLock), LockError> {
             target_path.display()
         ))
     })?;
-    let lock = TargetLock::parse(&target_text)?;
+    TargetLock::parse(&target_text)
+}
+
+/// Loads the target lock and the jar lock and checks that the jar directory matches.
+///
+/// `compat manifest` reuses this so both commands reject the same broken target.
+pub fn load(root: &Path) -> Result<(TargetLock, JarLock), LockError> {
+    let lock = load_target(root)?;
 
     let jars_dir = root.join(&lock.jars_dir);
     if !jars_dir.is_dir() {
@@ -490,6 +504,9 @@ count = 2
 
 [manifest]
 path = "compat/surface/test.txt"
+
+[stubs]
+path = "stdlib/classes"
 "#,
             source_hash()
         )
@@ -519,6 +536,7 @@ path = "compat/surface/test.txt"
         assert_eq!(lock.jars_lock, "compat/jars.lock");
         assert_eq!(lock.jar_count, 2);
         assert_eq!(lock.manifest_path, "compat/surface/test.txt");
+        assert_eq!(lock.stubs_path, "stdlib/classes");
     }
 
     #[test]

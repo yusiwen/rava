@@ -35,10 +35,12 @@ pub struct ClassBuilder {
     index: HashMap<String, u16>,
     this_class: u16,
     super_class: u16,
+    access: u16,
     major: u16,
     fields: Vec<FieldEntry>,
     interfaces: Vec<u16>,
     methods: Vec<MethodEntry>,
+    source_file: Option<u16>,
     /// The next constant-pool index; `long`/`double` consume two (JVMS §4.4.5).
     next_index: u16,
 }
@@ -46,20 +48,39 @@ pub struct ClassBuilder {
 impl ClassBuilder {
     /// A class named `this` extending `super_name`, written as version `major`.
     pub fn new(this: &str, super_name: &str, major: u16) -> Self {
+        let mut builder = Self::root(this, major);
+        builder.super_class = builder.class(super_name);
+        builder
+    }
+
+    /// A class named `this` with no superclass — the shape `java/lang/Object` needs.
+    pub fn root(this: &str, major: u16) -> Self {
         let mut builder = Self {
             entries: Vec::new(),
             index: HashMap::new(),
             this_class: 0,
             super_class: 0,
+            access: 0x0021, // public super
             major,
             fields: Vec::new(),
             interfaces: Vec::new(),
             methods: Vec::new(),
+            source_file: None,
             next_index: 1,
         };
         builder.this_class = builder.class(this);
-        builder.super_class = builder.class(super_name);
         builder
+    }
+
+    /// Replaces the class access flags (the default is `public super`, `0x0021`).
+    pub fn with_access(mut self, access: u16) -> Self {
+        self.access = access;
+        self
+    }
+
+    /// Adds a `SourceFile` attribute, the class-level marker of where it came from.
+    pub fn source_file(&mut self, name: &str) {
+        self.source_file = Some(self.utf8(name));
     }
 
     /// A `CONSTANT_Utf8`, deduplicated.
@@ -217,6 +238,11 @@ impl ClassBuilder {
     /// Serialises the class file.
     pub fn build(&mut self) -> Vec<u8> {
         let code_name = self.utf8("Code");
+        let source_file_name = if self.source_file.is_some() {
+            Some(self.utf8("SourceFile"))
+        } else {
+            None
+        };
 
         let mut out = Vec::new();
         out.extend_from_slice(&[0xCA, 0xFE, 0xBA, 0xBE]);
@@ -227,7 +253,7 @@ impl ClassBuilder {
             out.extend_from_slice(entry);
         }
 
-        out.extend_from_slice(&0x0021u16.to_be_bytes()); // public super
+        out.extend_from_slice(&self.access.to_be_bytes());
         out.extend_from_slice(&self.this_class.to_be_bytes());
         out.extend_from_slice(&self.super_class.to_be_bytes());
         out.extend_from_slice(&(self.interfaces.len() as u16).to_be_bytes());
@@ -272,7 +298,15 @@ impl ClassBuilder {
             }
         }
 
-        out.extend_from_slice(&0u16.to_be_bytes()); // class attributes
+        match (self.source_file, source_file_name) {
+            (Some(source), Some(name)) => {
+                out.extend_from_slice(&1u16.to_be_bytes()); // one class attribute
+                out.extend_from_slice(&name.to_be_bytes());
+                out.extend_from_slice(&2u32.to_be_bytes()); // attribute length
+                out.extend_from_slice(&source.to_be_bytes());
+            }
+            _ => out.extend_from_slice(&0u16.to_be_bytes()),
+        }
         out
     }
 
@@ -282,5 +316,32 @@ impl ClassBuilder {
         self.entries.push(entry);
         self.index.insert(key, index);
         index
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ClassFile;
+
+    #[test]
+    fn writes_access_flags_a_root_superclass_and_a_source_file() {
+        let mut builder = ClassBuilder::root("java/lang/Object", 61).with_access(0x0421);
+        builder.source_file("RavaStub.java");
+        builder.method(0x0401, "toString", "()Ljava/lang/String;", None);
+
+        let class = ClassFile::parse(&builder.build()).expect("builder output parses");
+        assert_eq!(class.access_flags, 0x0421);
+        assert_eq!(class.super_class_name().unwrap(), None);
+        assert_eq!(
+            class.source_file().unwrap().as_deref(),
+            Some("RavaStub.java")
+        );
+        assert!(
+            class
+                .find_method("toString", "()Ljava/lang/String;")
+                .unwrap()
+                .is_some()
+        );
     }
 }

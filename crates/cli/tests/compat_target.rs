@@ -82,6 +82,9 @@ count = {jar_count}
 
 [manifest]
 path = "compat/surface/test.txt"
+
+[stubs]
+path = "stdlib/classes"
 "#,
         "a".repeat(64)
     )
