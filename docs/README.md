@@ -31,6 +31,7 @@ documents are added when there is something to record.
 | [`explanation/reflection-and-metadata.md`](explanation/reflection-and-metadata.md) | explanation | C1 metadata → class/member/annotation/generic `Type`, lookup, invocation and boundaries |
 | [`explanation/c1-metadata.md`](explanation/c1-metadata.md) | explanation | C1 levels, the 1,011/36 `ct.sym` split, normalization, and what “differences 0” does and does not prove |
 | [`explanation/spring-context.md`](explanation/spring-context.md) | explanation | the real Spring `AnnotationConfigApplicationContext` path from `rava run` to the `hello` bean |
+| [`explanation/testing-and-evidence.md`](explanation/testing-and-evidence.md) | explanation | fixtures vs generated artifacts, golden dumps, compatibility gates, the opt-in Spring acceptance and evidence rules |
 | [`../stdlib/README.md`](../stdlib/README.md) | state | the two generated class libraries, and what each one is for |
 | [`../stdlib/c1/README.md`](../stdlib/c1/README.md) | state | the M2.2 JDK 17 C1 signature tree, its normalization boundary and its gates |
 

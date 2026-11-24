@@ -45,6 +45,7 @@ When the fact is only a status, update `PROJECT.md` instead.
 | [`reflection-and-metadata.md`](reflection-and-metadata.md) | How does a C1 metadata record become a `Class`/member/annotation/generic `Type` at runtime? | current |
 | [`c1-metadata.md`](c1-metadata.md) | What exactly does the M2 C1 metadata diff compare, and what does “diff 0” prove? | current |
 | [`spring-context.md`](spring-context.md) | How does a real Spring `AnnotationConfigApplicationContext` reach a bean on rava? | current |
+| [`testing-and-evidence.md`](testing-and-evidence.md) | How are fixtures, golden dumps, compatibility gates and the opt-in Spring acceptance generated and checked? | current |
 
 ## Planned retrospective documents (M0–M2)
 
@@ -57,9 +58,9 @@ Do not pre-write future-milestone implementation documents here.
 Each is a separate PR-sized writing task; a document is done only when its commands
 have been re-run and its boundaries re-checked against `PROJECT.md`.
 
-| Priority | Document | Already landed in | Question it must answer |
-| :--- | :--- | :--- | :--- |
-| P2 | `testing-and-evidence.md` | M0–M2 gates | How are fixtures, golden dumps, opt-in Spring acceptance and reproducible stub trees generated and checked? |
+No retrospective explanation documents remain in the P0–P2 backlog. The next
+explanation documents will be added when a new milestone's code and acceptance commands
+land; future M3–M9 material stays in requirements/ADRs/PROJECT until then.
 
 M2 history is a **History** document under `docs/notes/`, not an explanation; it is
 added there when the milestone note is written. The explanation backlog does not absorb
