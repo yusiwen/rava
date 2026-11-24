@@ -13,7 +13,8 @@ use std::sync::{Mutex, MutexGuard, RwLock};
 
 use crate::VmError;
 use crate::heap::{
-    BoxedPrimitive, FieldLayout, Heap, HeapObject, MemberKind, ObjRef, ReflectMember,
+    AnnotationObject, BoxedPrimitive, FieldLayout, Heap, HeapObject, MemberKind, ObjRef,
+    ReflectMember,
 };
 use crate::hooks::Hooks;
 use crate::loader::{ClassEntry, ClassId, ClassTable, LoaderId};
@@ -40,6 +41,7 @@ pub enum SharedLock {
     Heap,
     ClassObjects,
     ReflectMembers,
+    EnumConstants,
     InternedStrings,
     NativeRegistry,
     Stdout,
@@ -52,6 +54,7 @@ impl fmt::Display for SharedLock {
             Self::Heap => write!(f, "heap"),
             Self::ClassObjects => write!(f, "class-object cache"),
             Self::ReflectMembers => write!(f, "reflected-member cache"),
+            Self::EnumConstants => write!(f, "enum-constant cache"),
             Self::InternedStrings => write!(f, "interned-string table"),
             Self::NativeRegistry => write!(f, "native registry"),
             Self::Stdout => write!(f, "stdout"),
@@ -84,6 +87,10 @@ pub struct Shared {
     /// the objects, which are never freed while `Shared` lives and are reported as roots
     /// by [`Shared::roots`].
     reflect_members: Mutex<HashMap<(ClassId, MemberKind, String, String), ObjRef>>,
+    /// One enum-constant object per `(enum class, constant name)`. The cache owns the
+    /// objects, which are never freed while `Shared` lives and are reported as roots by
+    /// [`Shared::roots`].
+    enum_constants: Mutex<HashMap<(ClassId, String), ObjRef>>,
     /// One canonical string object per interned text. The table owns the objects, which
     /// are never freed while `Shared` lives and are reported as roots by
     /// [`Shared::roots`].
@@ -100,6 +107,7 @@ impl Shared {
             heap: Mutex::new(Heap::new()),
             class_objects: Mutex::new(HashMap::new()),
             reflect_members: Mutex::new(HashMap::new()),
+            enum_constants: Mutex::new(HashMap::new()),
             interned_strings: Mutex::new(HashMap::new()),
             natives: RwLock::new(HashMap::new()),
             stdout: Mutex::new(Vec::new()),
@@ -230,6 +238,74 @@ impl Shared {
         Ok(reference)
     }
 
+    /// Allocate an annotation instance over its annotation type and encoded values.
+    ///
+    /// Annotation instances are ordinary heap objects: no cache owns them, so a second
+    /// query returns a second object. Two instances of the same encoded annotation
+    /// compare equal through `Annotation.equals` (the bytes of their canonical encoding),
+    /// which is the observable contract this slice provides; identity is not shared.
+    pub fn annotation_object(
+        &self,
+        class: ClassId,
+        values: Vec<rava_classfile::AnnotationValue>,
+    ) -> Result<ObjRef, VmError> {
+        if self.entry(class).is_none() {
+            return Err(VmError::Loader(format!(
+                "class id {} is not loaded",
+                class.0
+            )));
+        }
+        Ok(self.heap().allocate_annotation(class, values))
+    }
+
+    /// The annotation instance behind a reference, if it is one.
+    ///
+    /// A null reference and every other heap object return `None`, so a caller can use
+    /// this as a dispatch test without treating a non-annotation receiver as an error.
+    pub fn annotation(&self, reference: ObjRef) -> Result<Option<AnnotationObject>, VmError> {
+        if reference.is_null() {
+            return Ok(None);
+        }
+        let heap = self.heap();
+        match heap.get(reference) {
+            Ok(HeapObject::Annotation(annotation)) => Ok(Some(annotation.clone())),
+            Ok(_) => Ok(None),
+            Err(error) => Err(VmError::Native(error.to_string())),
+        }
+    }
+
+    /// The canonical enum-constant object for `(class, name)`, allocated on first use.
+    ///
+    /// The VM does not run the enum's `<clinit>`, so this object is not the enum's static
+    /// field value; it names the constant instead. Caching it makes two reads of the same
+    /// annotation element reference-identical, which is what Java code that compares
+    /// enum constants with `==` expects.
+    ///
+    /// Lock order is cache, then heap, matching [`Shared::class_object`].
+    pub fn enum_constant(&self, class: ClassId, name: &str) -> Result<ObjRef, VmError> {
+        if self.entry(class).is_none() {
+            return Err(VmError::Loader(format!(
+                "class id {} is not loaded",
+                class.0
+            )));
+        }
+        let mut cache = self
+            .enum_constants
+            .lock()
+            .expect("enum-constant cache lock poisoned");
+        let key = (class, name.to_owned());
+        if let Some(reference) = cache.get(&key) {
+            return Ok(*reference);
+        }
+        let reference = self
+            .heap
+            .lock()
+            .expect("heap lock poisoned")
+            .allocate_enum_constant(class, name);
+        cache.insert(key, reference);
+        Ok(reference)
+    }
+
     /// The canonical string object for `text`, allocated on first use.
     ///
     /// `String.intern` promises one object per text, so this is a side table keyed by the
@@ -297,8 +373,10 @@ impl Shared {
     ///
     /// An instance reports its defining class, a string reports `java.lang.String`, a
     /// class object reports `java.lang.Class`, a reflected member reports
-    /// `java.lang.reflect.Field`, `Method` or `Constructor`, and a box reports its boxed
-    /// class (`java.lang.Integer`); the latter four are VM-level objects with the
+    /// `java.lang.reflect.Field`, `Method` or `Constructor`, a box reports its boxed
+    /// class (`java.lang.Integer`), an annotation reports
+    /// `java.lang.annotation.Annotation` (its `annotationType()` names the annotation
+    /// type) and an enum constant reports its enum class; those VM-level objects use the
     /// bootstrap class library as their identity. Array class identity (`[I`,
     /// `[Ljava/lang/String;`) is not modeled in M2.4, so an array returns a typed error
     /// instead of a wrong class object.
@@ -309,6 +387,8 @@ impl Shared {
             Class,
             Reflect(MemberKind),
             Boxed(BoxedPrimitive),
+            Annotation,
+            Enum(ClassId),
         }
 
         let kind = {
@@ -322,6 +402,8 @@ impl Shared {
                 HeapObject::Class(_) => Kind::Class,
                 HeapObject::Reflect(member) => Kind::Reflect(member.kind),
                 HeapObject::Boxed(boxed) => Kind::Boxed(*boxed),
+                HeapObject::Annotation(_) => Kind::Annotation,
+                HeapObject::Enum(constant) => Kind::Enum(constant.class),
                 HeapObject::Array(_) => {
                     return Err(VmError::Native(
                         "array class objects are not supported yet (M2.4)".to_owned(),
@@ -348,6 +430,11 @@ impl Shared {
                 let class = self.load_library_class(boxed.class_name())?;
                 self.class_object(class)
             }
+            Kind::Annotation => {
+                let class = self.load_library_class("java/lang/annotation/Annotation")?;
+                self.class_object(class)
+            }
+            Kind::Enum(class) => self.class_object(class),
         }
     }
 
@@ -501,6 +588,18 @@ impl Shared {
         }
 
         {
+            let enum_constants = self
+                .enum_constants
+                .lock()
+                .expect("enum-constant cache lock poisoned");
+            for reference in enum_constants.values() {
+                if seen.insert(*reference) {
+                    roots.push(*reference);
+                }
+            }
+        }
+
+        {
             let interned_strings = self
                 .interned_strings
                 .lock()
@@ -548,6 +647,11 @@ impl Shared {
         {
             let _guard = self.reflect_members.try_lock().map_err(|_| LockHeld {
                 lock: SharedLock::ReflectMembers,
+            })?;
+        }
+        {
+            let _guard = self.enum_constants.try_lock().map_err(|_| LockHeld {
+                lock: SharedLock::EnumConstants,
             })?;
         }
         {

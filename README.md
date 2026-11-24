@@ -73,7 +73,17 @@ annotations and generics remain later slices. **M2.10 is done (2026-11-24):** a 
 constructors through the existing interpreter, using the reflected name and descriptor
 with no overload resolution. A Java throwable from an invoked method propagates as a
 `Thrown` rather than being swallowed; `InvocationTargetException` wrapping, varargs,
-access checks and `setAccessible` remain later slices. **M2.11 is next.**
+access checks and `setAccessible` remain later slices. **M2.11 is done (2026-11-24):** an
+annotation instance is a heap object carrying its annotation type and the class file's
+encoded element values; `Class`, `Field`, `Method` and `Constructor` answer
+`getDeclaredAnnotations`, `getAnnotations` and `getAnnotation`, with `AnnotationDefault`
+fallback, inherited `@Inherited` class annotations and null for a missing annotation;
+element values decode as strings, primitives, class literals, enum constants, nested
+annotations and primitive/reference arrays; and `invokevirtual` dispatches an annotation
+receiver to its annotation type, where `annotationType`, the element methods and
+deterministic `equals`/`hashCode`/`toString` are served. Repeatable containers
+(`getAnnotationsByType`), parameter and type annotations, annotation identity caching,
+the generic `Type` graph and Spring remain later slices. **M2.12 is next.**
 
 ## What this project is
 

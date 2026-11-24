@@ -5,6 +5,8 @@
 
 use std::fmt;
 
+use rava_classfile::metadata::AnnotationValue;
+
 use crate::loader::ClassId;
 use crate::value::Value;
 
@@ -260,6 +262,34 @@ pub struct ReflectMember {
     pub descriptor: String,
 }
 
+/// One annotation instance (`java.lang.annotation.Annotation`).
+///
+/// The object stores its annotation type's class identity and the element values the
+/// class file encodes, exactly as the M2.1 metadata model decoded them. A value the
+/// annotation omits is not stored: the element method falls back to the annotation type's
+/// `AnnotationDefault` when it is read. Annotation objects are allocated by
+/// [`crate::Shared::annotation_object`]; they are ordinary heap objects, not permanent
+/// roots.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AnnotationObject {
+    /// The annotation type, resolved through the defining loader of the annotated class.
+    pub class: ClassId,
+    /// The encoded `element_name`/`element_value` pairs, in class-file order.
+    pub values: Vec<AnnotationValue>,
+}
+
+/// One enum constant used as an annotation element value.
+///
+/// The VM does not execute the enum's `<clinit>` in this slice, so the constant is a heap
+/// object that names the enum class and the constant. [`crate::Shared::enum_constant`]
+/// caches one object per `(class, name)`, which keeps `==` on two reads of the same
+/// annotation element true, as it is for the JDK's static enum fields.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct EnumConstant {
+    pub class: ClassId,
+    pub name: String,
+}
+
 #[derive(Debug)]
 pub enum HeapObject {
     Instance(Instance),
@@ -285,6 +315,10 @@ pub enum HeapObject {
     /// A boxed primitive value (`java.lang.Integer.valueOf(int)`). The client class is
     /// named by [`BoxedPrimitive::class_name`]; the object holds no `ClassId` of its own.
     Boxed(BoxedPrimitive),
+    /// One annotation instance: its annotation type and its encoded element values.
+    Annotation(AnnotationObject),
+    /// One enum constant used as an annotation element value.
+    Enum(EnumConstant),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -395,6 +429,43 @@ impl Heap {
         self.allocate(HeapObject::Boxed(BoxedPrimitive::Integer(value)))
     }
 
+    /// Allocate an annotation instance. Callers go through
+    /// [`crate::Shared::annotation_object`].
+    pub fn allocate_annotation(&mut self, class: ClassId, values: Vec<AnnotationValue>) -> ObjRef {
+        self.allocate(HeapObject::Annotation(AnnotationObject { class, values }))
+    }
+
+    /// Allocate an enum constant. Callers go through
+    /// [`crate::Shared::enum_constant`], which caches one object per constant.
+    pub fn allocate_enum_constant(&mut self, class: ClassId, name: impl Into<String>) -> ObjRef {
+        self.allocate(HeapObject::Enum(EnumConstant {
+            class,
+            name: name.into(),
+        }))
+    }
+
+    /// The annotation instance behind a reference.
+    pub fn annotation(&self, reference: ObjRef) -> Result<&AnnotationObject, HeapError> {
+        match self.get(reference)? {
+            HeapObject::Annotation(annotation) => Ok(annotation),
+            _ => Err(HeapError::WrongObjectKind {
+                reference,
+                expected: "an annotation",
+            }),
+        }
+    }
+
+    /// The enum constant behind a reference.
+    pub fn enum_constant(&self, reference: ObjRef) -> Result<&EnumConstant, HeapError> {
+        match self.get(reference)? {
+            HeapObject::Enum(constant) => Ok(constant),
+            _ => Err(HeapError::WrongObjectKind {
+                reference,
+                expected: "an enum constant",
+            }),
+        }
+    }
+
     /// The boxed value behind a reference.
     pub fn boxed(&self, reference: ObjRef) -> Result<BoxedPrimitive, HeapError> {
         match self.get(reference)? {
@@ -485,7 +556,9 @@ impl Heap {
             | HeapObject::Str(_)
             | HeapObject::Class(_)
             | HeapObject::Reflect(_)
-            | HeapObject::Boxed(_) => Err(HeapError::WrongObjectKind {
+            | HeapObject::Boxed(_)
+            | HeapObject::Annotation(_)
+            | HeapObject::Enum(_) => Err(HeapError::WrongObjectKind {
                 reference,
                 expected: "an instance",
             }),
@@ -499,7 +572,9 @@ impl Heap {
             | HeapObject::Str(_)
             | HeapObject::Class(_)
             | HeapObject::Reflect(_)
-            | HeapObject::Boxed(_) => Err(HeapError::WrongObjectKind {
+            | HeapObject::Boxed(_)
+            | HeapObject::Annotation(_)
+            | HeapObject::Enum(_) => Err(HeapError::WrongObjectKind {
                 reference,
                 expected: "an instance",
             }),
@@ -513,7 +588,9 @@ impl Heap {
             | HeapObject::Str(_)
             | HeapObject::Class(_)
             | HeapObject::Reflect(_)
-            | HeapObject::Boxed(_) => Err(HeapError::WrongObjectKind {
+            | HeapObject::Boxed(_)
+            | HeapObject::Annotation(_)
+            | HeapObject::Enum(_) => Err(HeapError::WrongObjectKind {
                 reference,
                 expected: "an array",
             }),
@@ -527,7 +604,9 @@ impl Heap {
             | HeapObject::Str(_)
             | HeapObject::Class(_)
             | HeapObject::Reflect(_)
-            | HeapObject::Boxed(_) => Err(HeapError::WrongObjectKind {
+            | HeapObject::Boxed(_)
+            | HeapObject::Annotation(_)
+            | HeapObject::Enum(_) => Err(HeapError::WrongObjectKind {
                 reference,
                 expected: "an array",
             }),

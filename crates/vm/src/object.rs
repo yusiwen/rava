@@ -112,6 +112,8 @@ fn runtime_binary_name(shared: &Shared, receiver: ObjRef) -> Result<String, VmEr
         Class,
         Reflect(MemberKind),
         Boxed(&'static str),
+        Annotation,
+        Enum(ClassId),
         Array,
     }
 
@@ -126,6 +128,8 @@ fn runtime_binary_name(shared: &Shared, receiver: ObjRef) -> Result<String, VmEr
             HeapObject::Class(_) => Kind::Class,
             HeapObject::Reflect(member) => Kind::Reflect(member.kind),
             HeapObject::Boxed(boxed) => Kind::Boxed(boxed.binary_name()),
+            HeapObject::Annotation(_) => Kind::Annotation,
+            HeapObject::Enum(constant) => Kind::Enum(constant.class),
             HeapObject::Array(_) => Kind::Array,
         }
     };
@@ -141,6 +145,13 @@ fn runtime_binary_name(shared: &Shared, receiver: ObjRef) -> Result<String, VmEr
         Kind::Class => Ok("java.lang.Class".to_owned()),
         Kind::Reflect(kind) => Ok(kind.binary_name().to_owned()),
         Kind::Boxed(name) => Ok(name.to_owned()),
+        Kind::Annotation => Ok("java.lang.annotation.Annotation".to_owned()),
+        Kind::Enum(class) => {
+            let entry = shared
+                .entry(class)
+                .ok_or_else(|| VmError::Loader(format!("class id {} is not loaded", class.0)))?;
+            Ok(entry.name.replace('/', "."))
+        }
         Kind::Array => Err(VmError::Native(
             "array class names are not supported yet (M2.9)".to_owned(),
         )),

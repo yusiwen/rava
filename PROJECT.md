@@ -6,8 +6,8 @@
 **Started:** 2026-11-22
 
 > Ledger. P0 and P1 were accepted on 2026-11-23. M1 is complete; M2 is in progress
-> (M2.1, M2.2, M2.3, M2.4, M2.5, M2.6, M2.7, M2.8, M2.9 and M2.10 done). Keep this
-> file honest and terse.
+> (M2.1, M2.2, M2.3, M2.4, M2.5, M2.6, M2.7, M2.8, M2.9, M2.10 and M2.11 done). Keep
+> this file honest and terse.
 
 ## Phase status
 
@@ -27,7 +27,7 @@ release process, if wanted, becomes its own phase.
 
 > Gates are defined in `docs/requirements.md` § Milestones. P0 and P1 are accepted;
 > M0 and M1 are complete, and both gate reviews have passed. M2 is in progress, with
-> M2.1, M2.2, M2.3, M2.4, M2.5, M2.6, M2.7, M2.8, M2.9 and M2.10 done.
+> M2.1, M2.2, M2.3, M2.4, M2.5, M2.6, M2.7, M2.8, M2.9, M2.10 and M2.11 done.
 
 | Milestone | Delivers | Gate | Status |
 | :--- | :--- | :--- | :--- |
@@ -68,11 +68,11 @@ release process, if wanted, becomes its own phase.
 | M2.8 | Reflection member objects (`Field`/`Method`/`Constructor`) | R3 | `cargo test -p rava-interp --test reflection_members` exits 0 | done |
 | M2.9 | Core `Object`/`String` behavior | R3 | `cargo test -p rava-interp --test string_object` exits 0 | done |
 | M2.10 | Boxed values and reflection invocation | R3 | `cargo test -p rava-interp --test reflection_invoke` exits 0 | done |
-| M2.11 | Annotation reflection and proxies | R3 | `cargo test -p rava-interp --test annotations` exits 0 | todo |
+| M2.11 | Annotation reflection and proxies | R3 | `cargo test -p rava-interp --test annotations` exits 0 | done |
 
 P0 and P1 are accepted; P2 is done because the M2 increments are sliced. All M0 and
 M1 slices are done, and both gate reviews passed. M2.1, M2.2, M2.3, M2.4, M2.5,
-M2.6, M2.7, M2.8, M2.9 and M2.10 are done; M2.11 is next.
+M2.6, M2.7, M2.8, M2.9, M2.10 and M2.11 are done; M2.12 is next.
 
 ## Slice log
 
@@ -100,6 +100,7 @@ M2.6, M2.7, M2.8, M2.9 and M2.10 are done; M2.11 is next.
 | M2.8 | `cargo test -p rava-interp --test reflection_members` | 0 | 2026-11-24 | `HeapObject::Reflect(ReflectMember)` with a `MemberKind` of `Field`/`Method`/`Constructor`, the declaring `ClassId`, name and descriptor; `Shared::reflect_member` caches one object per `(class, kind, name, descriptor)` and `Shared::roots` enumerates those roots, while `Shared::get_class` and `invokevirtual` dispatch a member to `java/lang/reflect/{Field,Method,Constructor}`; `Class.getDeclaredFields/getDeclaredMethods/getDeclaredConstructors` return real heap reference arrays built from the typed C1 metadata model, and the read-only member natives cover `getName`/`getModifiers`/`getDeclaringClass`, `Field.getType`, `Method.getReturnType/getParameterTypes/getParameterCount` and `Constructor.getParameterTypes/getParameterCount/getName`; the `ReflectMembersProbe` fixture exercises them through the C1 bootstrap library; 7 tests; `cargo test -p rava-interp` 52, `cargo test -p rava-vm` 42 and `cargo test -p rava-cli` 67 pass, workspace 211; `cargo xtask ci` exits 0 |
 | M2.9 | `cargo test -p rava-interp --test string_object` | 0 | 2026-11-24 | `HeapObject::Str` stays the only string representation; the `java/lang/String` registry covers `length`, `isEmpty`, `charAt`, `equals`, `hashCode`, `compareTo`, `concat`, both `substring` overloads, `startsWith`, `endsWith`, `indexOf`, `replace(CC)`, `toCharArray`, `toString` and `intern`, and every operation reads UTF-16 code units from the stored text through `utf16_units`/`string_from_utf16`, so a supplementary character is two units; `java/lang/Object` gains `equals` (reference identity), `hashCode` (a deterministic mix of the `ObjRef` index and generation, documented as the identity hash and cached by nothing because the handle never changes) and `toString` (`ClassName@hexHashCode` with the dotted runtime binary name); `Shared::intern_string` keeps one canonical object per text as a permanent root, and `ldc` goes through it so repeated execution of a string constant reuses one object; `StringProbe` with 50+ `ldc` and argument helpers plus 8 tests; `cargo test -p rava-interp` 60, `cargo test -p rava-vm` 45 and `cargo test -p rava-cli` 67 pass, workspace 222; `cargo xtask ci` exits 0 |
 | M2.10 | `cargo test -p rava-interp --test reflection_invoke` | 0 | 2026-11-24 | `HeapObject::Boxed(BoxedPrimitive::Integer)` is a heap object, not a second `Value` variant; `Shared::get_class` and `invokevirtual` dispatch it to `java/lang/Integer`, so `getClass` reports the boxed class; `Shared::box_int`/`unbox_int` and the `boxed::{unbox_argument,box_result}` helpers convert `int` boxes and pass reference handles through; the `java/lang/Integer` registry overrides `valueOf(I)`, `intValue`, `toString()`, `toString(I)`, `equals`, `hashCode`, `compareTo(Integer)` and `parseInt(String)`; `Field.get`/`set` cover `int` and reference instance fields, reject a static field and a null or non-assignable receiver, and preserve reference identity; `Method.invoke` runs static and instance methods by the reflected name and descriptor with no overload lookup, unboxes `int` arguments, boxes an `int` result and ignores the receiver for a static method; `Constructor.newInstance` allocates the declaring class, unboxes its arguments and runs `<init>` through `run_instance_method`; a Java throwable from an invoked method crosses the native ABI as `VmError::Thrown` and becomes `InterpError::Thrown`, so it is not swallowed (`InvocationTargetException` wrapping is deferred); the `Bean`/`BoxProbe` fixture covers boxed virtual calls, `(I)V` and `()V` construction, int/reference field access, getters/setters and static `sum`, plus wrong receivers, a static field, wrong arity and type, a missing-descriptor method and the no-`getDeclaredMethod` boundary; 9 tests; `cargo test -p rava-interp` 70, `cargo test -p rava-vm` 45 and `cargo test -p rava-cli` 67 pass, workspace 232; `cargo xtask ci` exits 0 |
+| M2.11 | `cargo test -p rava-interp --test annotations` | 0 | 2026-11-24 | `HeapObject::Annotation` carries the annotation type's `ClassId` and the encoded values from the M2.1 metadata model, and `HeapObject::Enum` (cached per `(class, name)` as a permanent root) represents an enum constant; `Class`, `Field`, `Method` and `Constructor` gain `getDeclaredAnnotations`, `getAnnotations` and `getAnnotation(Class)` over that metadata in class-file order, returning an empty array for no declared annotations and null for a missing single annotation; `Class.getAnnotations` merges superclass annotations whose type is itself `@Inherited`, nearest declaration winning, while `getDeclaredAnnotations` stays declared-only; an omitted element falls back to the annotation type's `AnnotationDefault`; element values decode through the annotation type's loader as interned strings, `Value` primitives, class literals (`c`), enum constants (`e`), nested annotation objects (`@`) and primitive/reference arrays (`[`); `invokevirtual` dispatches an annotation receiver to its annotation type and the annotation module answers `annotationType`, every element method and deterministic `equals`/`hashCode`/`toString`; `java/lang/annotation/Annotation.annotationType` and the three queries on `Class`/`Field`/`Method`/`Constructor` (plus `AccessibleObject.getAnnotations`, where the C1 stub declares it) are registry natives, and `java/lang/Enum.name`/`toString` report a constant's name; the committed release-17 fixture under `crates/interp/tests/fixtures/annotations/` annotates a class, field, method and constructor with string/int/boolean/long/double/class/enum/nested/array elements and defaults and an `@Inherited` superclass annotation; 10 tests; `cargo test -p rava-interp` 80, `rava-vm` 47, `rava-classfile` 50 and `rava-cli` 67 pass, workspace 244; `cargo xtask ci` exits 0 |
 
 M0.6 boundary: the reference and class-unloading hooks are registration points only.
 M0 has no collector, so no weak/soft/phantom reference is cleared and no class is
@@ -381,6 +382,35 @@ original object instead of the throwable being swallowed. `Class.getDeclaredMeth
 `getMethod` and inherited-member lookup remain absent, and annotations, generics,
 collections and Spring stay later slices.
 
+M2.11 boundary: an annotation instance is `HeapObject::Annotation`, carrying the annotation
+type's `ClassId` and the element values the class file encodes, in class-file order. Only
+runtime-visible annotations are exposed; a `RuntimeInvisibleAnnotations` entry has no
+annotation object, as on the JDK. Annotation objects are ordinary allocations, not cached
+roots, so two queries return two objects; `Annotation.equals` compares the effective element
+values (declared or default) and is consistent with `Annotation.hashCode`, which is a
+deterministic FNV hash of that same encoding rather than the JDK's
+`(127 * name.hashCode()) ^ valueHashCode` formula, and `toString` prints `@dotted.Type` with
+only the explicitly encoded elements. Element values cover string, `boolean`/`byte`/`char`/
+`short`/`int` (as `Value::Int`), `long`/`float`/`double` (as their `Value` variants), object
+class literals, enum constants, nested annotations and arrays of those; nested arrays are
+reference arrays because `ArrayKind` has no array-of-array kind, and an array or primitive
+class literal (`[I`, `int.class`) is a typed error because arrays and primitives have no
+class identity. Enum constants are cached objects that name the enum class and the constant;
+the VM does not run the enum's `<clinit>`, so the object is not the enum's static field value,
+and `ordinal`/`valueOf` are absent while `Enum.name`/`toString` report the name. An annotation
+receiver dispatches to its annotation type, and `annotationType`, the element methods,
+`equals`, `hashCode` and `toString` are served before ordinary method resolution, so a C1
+stub's missing `Code` never reaches the interpreter; `Object.getClass` on an annotation
+reports `java.lang.annotation.Annotation`. `Class.getAnnotations` inherits a superclass
+annotation only when the annotation type carries `@Inherited`, and the nearest declaration of
+a type wins; `getAnnotation` follows that same view, while member queries see only the
+member's own annotations. Repeatable containers and `getAnnotationsByType`, parameter and
+type annotations, `isAnnotationPresent`, `Class.isAnnotation`, `setAccessible` and access
+checks, annotation identity caching, the generic `Type` graph, record/sealed reflective views
+and Spring stay out of this slice. The fixture is compiled at release 17 and committed under
+`crates/interp/tests/fixtures/annotations/` (sources in `src/`, classes in `classes/`) and is
+loaded through a `DirectorySource` child loader, so the test needs no JDK.
+
 ## Decision log
 
 | ADR | Decision | Status |
@@ -427,7 +457,13 @@ A fresh session should:
    landed boxed `Integer` values and reflective invocation: `Field.get`/`set` for `int`
    and reference fields, `Method.invoke` for static and instance methods, and
    `Constructor.newInstance`, all over the existing instance/static machinery
-   (`cargo test -p rava-interp --test reflection_invoke`). M2.11 is next.
+   (`cargo test -p rava-interp --test reflection_invoke`). M2.11 landed annotation
+   reflection: the `HeapObject::Annotation` and `HeapObject::Enum` representations, the
+   `getDeclaredAnnotations`/`getAnnotations`/`getAnnotation` queries on `Class`, `Field`,
+   `Method` and `Constructor`, `AnnotationDefault` fallback, inherited class annotations,
+   annotation-member dispatch through `invokevirtual`, and the committed release-17
+   fixture loaded from a child `DirectorySource` (`cargo test -p rava-interp --test
+   annotations`). M2.12 is next.
 4. Do not write runtime code outside a defined slice.
 
 ## Open decisions

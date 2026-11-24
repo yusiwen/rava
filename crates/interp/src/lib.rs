@@ -91,6 +91,19 @@ fn run_method(
     if name != "<clinit>" {
         ensure_initialized(shared, thread, class)?;
     }
+    // An annotation instance answers its own members: `annotationType` and the element
+    // methods are not declared on a superclass chain the JVM can resolve, so the
+    // annotation path runs before method lookup. A name it does not handle (`getClass`)
+    // falls through to the ordinary path.
+    if let Some(reference) = receiver {
+        if let Some(annotation) = shared.annotation(reference)? {
+            if let Some(value) =
+                rava_vm::annotation::invoke_member(shared, &annotation, name, descriptor, &args)?
+            {
+                return Ok(Some(value));
+            }
+        }
+    }
     let file = entry.file.clone();
     let method =
         file.find_method(name, descriptor)?
@@ -625,6 +638,17 @@ fn invoke_instance(
     name: &str,
     descriptor: &str,
 ) -> Result<Option<Value>, InterpError> {
+    // An annotation receiver dispatches to its annotation type. The members this slice
+    // answers (`annotationType`, the element methods, `equals`, `hashCode`, `toString`)
+    // are not all declared on that type's superclass chain, so they are served before
+    // resolution; anything else (`getClass`) resolves normally.
+    if let Some(annotation) = shared.annotation(receiver)? {
+        if let Some(value) =
+            rava_vm::annotation::invoke_member(shared, &annotation, name, descriptor, &args)?
+        {
+            return Ok(Some(value));
+        }
+    }
     let (entry, is_native) = resolve_virtual(shared, start, name, descriptor)?;
     shared.check_no_locks_held()?;
     let mut call_roots = args.clone();
@@ -934,6 +958,8 @@ fn dispatch_class(
         Class,
         Reflect(MemberKind),
         Boxed(BoxedPrimitive),
+        Annotation(ClassId),
+        Enum(ClassId),
         Array,
     }
 
@@ -945,6 +971,8 @@ fn dispatch_class(
             HeapObject::Class(_) => ReceiverKind::Class,
             HeapObject::Reflect(member) => ReceiverKind::Reflect(member.kind),
             HeapObject::Boxed(boxed) => ReceiverKind::Boxed(*boxed),
+            HeapObject::Annotation(annotation) => ReceiverKind::Annotation(annotation.class),
+            HeapObject::Enum(constant) => ReceiverKind::Enum(constant.class),
             HeapObject::Array(_) => ReceiverKind::Array,
         }
     };
@@ -955,6 +983,7 @@ fn dispatch_class(
         ReceiverKind::Class => resolve_from(shared, current, "java/lang/Class"),
         ReceiverKind::Reflect(kind) => resolve_from(shared, current, kind.class_name()),
         ReceiverKind::Boxed(boxed) => resolve_from(shared, current, boxed.class_name()),
+        ReceiverKind::Annotation(class) | ReceiverKind::Enum(class) => Ok(class),
         ReceiverKind::Array => resolve_from(shared, current, "java/lang/Object"),
     }
 }

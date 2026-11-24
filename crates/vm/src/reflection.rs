@@ -409,7 +409,10 @@ fn declared_members(shared: &Shared, class: ClassId, kind: MemberKind) -> Result
 }
 
 /// Allocate a `java.lang.Object[]`-shaped reference array holding `values`.
-fn allocate_reference_array(shared: &Shared, values: &[ObjRef]) -> Result<ObjRef, VmError> {
+pub(crate) fn allocate_reference_array(
+    shared: &Shared,
+    values: &[ObjRef],
+) -> Result<ObjRef, VmError> {
     let mut heap = shared.heap();
     let array = heap.allocate_array(ArrayKind::Reference, values.len());
     {

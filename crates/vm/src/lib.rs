@@ -5,6 +5,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod annotation;
 pub mod boxed;
 pub mod error;
 pub mod heap;
@@ -24,8 +25,8 @@ pub mod verify;
 
 pub use error::VmError;
 pub use heap::{
-    Array, ArrayKind, BoxedPrimitive, FieldLayout, FieldSlot, Heap, HeapError, HeapObject,
-    Instance, MemberKind, ObjRef, ReflectMember,
+    AnnotationObject, Array, ArrayKind, BoxedPrimitive, EnumConstant, FieldLayout, FieldSlot, Heap,
+    HeapError, HeapObject, Instance, MemberKind, ObjRef, ReflectMember,
 };
 pub use hooks::{ClassUnloadHook, Hooks, ReferenceHook};
 pub use loader::{ClassEntry, ClassId, ClassState, LoaderId};
