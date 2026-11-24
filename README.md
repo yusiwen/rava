@@ -26,7 +26,11 @@ unchanged and the M1 gate still passes. **M2.3 is done (2026-11-24):** the C1 tr
 the bootstrap class source, read through the existing `DirectorySource` with
 `(loader, name)` identity; `Shared::with_library_dir`, `Shared::load_library_class`,
 `Shared::library_metadata` and `ClassEntry::metadata()` expose its metadata without a
-`Code` attribute or executing a class. **M2.4 is next.**
+`Code` attribute or executing a class. **M2.4 is done (2026-11-24):** class objects are
+heap objects cached once per `(loader, name)` identity and enumerated as GC roots;
+`Object.getClass` and `Class.getName`, `getModifiers`, `isInterface`, `isArray`,
+`getSuperclass` and `forName` are native registry entries, and the registry overrides the
+C1 stubs that carry neither `Code` nor `ACC_NATIVE`. **M2.5 is next.**
 
 ## What this project is
 

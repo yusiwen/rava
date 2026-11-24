@@ -13,7 +13,12 @@ pub use error::InterpError;
 pub use frame::Frame;
 pub use instr::{DecodedMethod, Instr, decode};
 
-use rava_vm::{ClassId, ClassState, FrameRootsGuard, HeapObject, Shared, ThreadState, Value};
+use std::sync::Arc;
+
+use rava_vm::{
+    ClassEntry, ClassId, ClassState, FrameRootsGuard, HeapObject, ObjRef, Shared, ThreadState,
+    Value,
+};
 
 /// Run a static method with `args` and return its result (`None` for `void`).
 pub fn run_static_method(
@@ -39,16 +44,17 @@ pub fn run_static_method(
                 name: name.to_owned(),
                 descriptor: descriptor.to_owned(),
             })?;
+    // The native registry wins over the class file: the C1 stubs carry no `Code` and
+    // are not marked `ACC_NATIVE`, so "has a native implementation" is a registry
+    // question, not an access-flag question.
+    if let Some(native) = shared.native(&entry.name, name, descriptor) {
+        return native(shared, thread, entry.loader, ObjRef::NULL, &args).map_err(InterpError::Vm);
+    }
     if method.is_native() {
-        let native = shared
-            .native(&entry.name, name, descriptor)
-            .ok_or_else(|| {
-                InterpError::Decode(format!(
-                    "no native implementation for {}.{name}{descriptor}",
-                    entry.name
-                ))
-            })?;
-        return native(shared, thread, entry.loader, &args).map_err(InterpError::Vm);
+        return Err(InterpError::Decode(format!(
+            "no native implementation for {}.{name}{descriptor}",
+            entry.name
+        )));
     }
     if method.is_abstract() {
         return Err(InterpError::NativeOrAbstract {
@@ -98,7 +104,7 @@ fn execute(
 
         match instruction {
             Instr::Iconst(value) => frame.push(Value::Int(value))?,
-            Instr::ILoad(index) => {
+            Instr::ILoad(index) | Instr::ALoad(index) => {
                 let value = *frame.locals.get(usize::from(index)).ok_or_else(|| {
                     InterpError::Decode(format!("local {index} is outside the frame"))
                 })?;
@@ -154,45 +160,30 @@ fn execute(
                 let Value::Ref(reference) = receiver else {
                     return Err(InterpError::WrongValue);
                 };
-                let receiver_class = {
-                    let heap = shared.heap();
-                    match heap.get(reference).map_err(|_| InterpError::WrongValue)? {
-                        HeapObject::Instance(instance) => instance.class,
-                        _ => return Err(InterpError::WrongValue),
+                let start = dispatch_class(shared, frame.class, reference)?;
+                let (entry, is_native) = resolve_virtual(shared, start, &name, &descriptor)?;
+                // Registry first: a C1 stub method has no `Code` and no `ACC_NATIVE`
+                // flag, and the native is still the implementation.
+                let Some(native) = shared.native(&entry.name, &name, &descriptor) else {
+                    if is_native {
+                        return Err(InterpError::Decode(format!(
+                            "no native implementation for {}.{name}{descriptor}",
+                            entry.name
+                        )));
                     }
-                };
-                let entry = shared
-                    .entry(receiver_class)
-                    .ok_or_else(|| InterpError::Decode("receiver class vanished".to_owned()))?;
-                let method = entry.file.find_method(&name, &descriptor)?.ok_or_else(|| {
-                    InterpError::MethodNotFound {
-                        class: entry.name.clone(),
-                        name: name.clone(),
-                        descriptor: descriptor.clone(),
-                    }
-                })?;
-                if !method.is_native() {
                     return Err(InterpError::Decode(format!(
                         "non-native instance call {}.{name}{descriptor} is not implemented",
                         entry.name
                     )));
-                }
-                let native = shared
-                    .native(&entry.name, &name, &descriptor)
-                    .ok_or_else(|| {
-                        InterpError::Decode(format!(
-                            "no native implementation for {}.{name}{descriptor}",
-                            entry.name
-                        ))
-                    })?;
+                };
                 shared.check_no_locks_held()?;
                 // The receiver and arguments have been popped from the frame; publish
                 // them with the frame's roots so the native call cannot lose them.
                 let mut call_roots = args.clone();
                 call_roots.push(Value::Ref(reference));
                 publish_roots(guard, frame, &call_roots);
-                let result =
-                    native(shared, thread, entry.loader, &args).map_err(InterpError::Vm)?;
+                let result = native(shared, thread, entry.loader, reference, &args)
+                    .map_err(InterpError::Vm)?;
                 if !descriptor.ends_with(")V") {
                     frame.push(
                         result.ok_or_else(|| {
@@ -238,7 +229,7 @@ fn execute(
                     frame.push(value)?;
                 }
             }
-            Instr::IReturn => return Ok(Some(frame.pop()?)),
+            Instr::IReturn | Instr::AReturn => return Ok(Some(frame.pop()?)),
             Instr::Return => return Ok(None),
         }
     }
@@ -265,6 +256,74 @@ fn resolve_from(shared: &Shared, current: ClassId, name: &str) -> Result<ClassId
         .ok_or_else(|| InterpError::Decode("current class vanished".to_owned()))?
         .loader;
     Ok(shared.load_class(loader, name)?)
+}
+
+/// The class a virtual call starts resolution from.
+///
+/// An instance dispatches from its defining class. A string or a class object has no
+/// `ClassId` of its own in the heap, so it dispatches from `java/lang/String` or
+/// `java/lang/Class`, resolved through the caller's loader. An array has no class
+/// identity yet; `Object` methods (including `getClass`, which reports a typed error)
+/// still dispatch, and any other method fails resolution normally.
+fn dispatch_class(
+    shared: &Shared,
+    current: ClassId,
+    reference: ObjRef,
+) -> Result<ClassId, InterpError> {
+    enum ReceiverKind {
+        Instance(ClassId),
+        Str,
+        Class,
+        Array,
+    }
+
+    let kind = {
+        let heap = shared.heap();
+        match heap.get(reference).map_err(|_| InterpError::WrongValue)? {
+            HeapObject::Instance(instance) => ReceiverKind::Instance(instance.class),
+            HeapObject::Str(_) => ReceiverKind::Str,
+            HeapObject::Class(_) => ReceiverKind::Class,
+            HeapObject::Array(_) => ReceiverKind::Array,
+        }
+    };
+
+    match kind {
+        ReceiverKind::Instance(class) => Ok(class),
+        ReceiverKind::Str => resolve_from(shared, current, "java/lang/String"),
+        ReceiverKind::Class => resolve_from(shared, current, "java/lang/Class"),
+        ReceiverKind::Array => resolve_from(shared, current, "java/lang/Object"),
+    }
+}
+
+/// Resolve a virtual method from `start` up the superclass chain, the way JVMS §5.4.5
+/// resolves an instance method. Returns the declaring class and whether the declaration
+/// is `ACC_NATIVE`; the caller consults the native registry before the flag, because the
+/// C1 stubs declare no `Code` and do not set `ACC_NATIVE`.
+fn resolve_virtual(
+    shared: &Shared,
+    start: ClassId,
+    name: &str,
+    descriptor: &str,
+) -> Result<(Arc<ClassEntry>, bool), InterpError> {
+    let mut current = start;
+    loop {
+        let entry = shared
+            .entry(current)
+            .ok_or_else(|| InterpError::Decode("receiver class vanished".to_owned()))?;
+        if let Some(method) = entry.file.find_method(name, descriptor)? {
+            return Ok((Arc::clone(&entry), method.is_native()));
+        }
+        let Some(super_name) = entry.file.super_class_name()? else {
+            return Err(InterpError::MethodNotFound {
+                class: entry.name.clone(),
+                name: name.to_owned(),
+                descriptor: descriptor.to_owned(),
+            });
+        };
+        let super_name = super_name.to_owned();
+        let loader = entry.loader;
+        current = shared.load_class(loader, &super_name)?;
+    }
 }
 
 fn ensure_initialized(

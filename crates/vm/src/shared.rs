@@ -12,7 +12,7 @@ use std::sync::Arc;
 use std::sync::{Mutex, MutexGuard, RwLock};
 
 use crate::VmError;
-use crate::heap::{Heap, ObjRef};
+use crate::heap::{Heap, HeapObject, ObjRef};
 use crate::hooks::Hooks;
 use crate::loader::{ClassEntry, ClassId, ClassTable, LoaderId};
 use crate::source::{ClassSource, DirectorySource};
@@ -21,7 +21,8 @@ use crate::value::Value;
 
 use rava_classfile::ClassMetadata;
 
-pub type NativeFn = fn(&Shared, &ThreadState, LoaderId, &[Value]) -> Result<Option<Value>, VmError>;
+pub type NativeFn =
+    fn(&Shared, &ThreadState, LoaderId, ObjRef, &[Value]) -> Result<Option<Value>, VmError>;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct NativeKey {
@@ -35,6 +36,7 @@ pub struct NativeKey {
 pub enum SharedLock {
     ClassTable,
     Heap,
+    ClassObjects,
     NativeRegistry,
     Stdout,
 }
@@ -44,6 +46,7 @@ impl fmt::Display for SharedLock {
         match self {
             Self::ClassTable => write!(f, "class table"),
             Self::Heap => write!(f, "heap"),
+            Self::ClassObjects => write!(f, "class-object cache"),
             Self::NativeRegistry => write!(f, "native registry"),
             Self::Stdout => write!(f, "stdout"),
         }
@@ -67,6 +70,10 @@ impl std::error::Error for LockHeld {}
 pub struct Shared {
     classes: RwLock<ClassTable>,
     heap: Mutex<Heap>,
+    /// One class object per `ClassId`, the `(loader, name)` identity. The cache is the
+    /// owner of those objects: they are never freed while `Shared` lives, and
+    /// [`Shared::roots`] reports them as roots.
+    class_objects: Mutex<HashMap<ClassId, ObjRef>>,
     natives: RwLock<HashMap<NativeKey, NativeFn>>,
     stdout: Mutex<Vec<u8>>,
     hooks: Hooks,
@@ -77,6 +84,7 @@ impl Shared {
         Self {
             classes: RwLock::new(ClassTable::with_bootstrap(source)),
             heap: Mutex::new(Heap::new()),
+            class_objects: Mutex::new(HashMap::new()),
             natives: RwLock::new(HashMap::new()),
             stdout: Mutex::new(Vec::new()),
             hooks: Hooks::default(),
@@ -130,6 +138,81 @@ impl Shared {
             .metadata()
     }
 
+    /// The class object for one class identity, allocated on first use.
+    ///
+    /// The cache is keyed by [`ClassId`], which is `(defining loader, binary name)`, so
+    /// two loaders that define the same name get distinct class objects. The returned
+    /// handle is stable for the life of the `Shared`: class objects are never freed.
+    ///
+    /// Lock order is cache, then heap. No path takes the heap lock before this cache,
+    /// which is what keeps the pair deadlock-free at the native boundary.
+    pub fn class_object(&self, class: ClassId) -> Result<ObjRef, VmError> {
+        if self.entry(class).is_none() {
+            return Err(VmError::Loader(format!(
+                "class id {} is not loaded",
+                class.0
+            )));
+        }
+        let mut cache = self
+            .class_objects
+            .lock()
+            .expect("class-object cache lock poisoned");
+        if let Some(reference) = cache.get(&class) {
+            return Ok(*reference);
+        }
+        let reference = self
+            .heap
+            .lock()
+            .expect("heap lock poisoned")
+            .allocate_class(class);
+        cache.insert(class, reference);
+        Ok(reference)
+    }
+
+    /// The class object of a heap object: `Object.getClass` without the dispatch.
+    ///
+    /// An instance reports its defining class, a string reports `java.lang.String` and
+    /// a class object reports `java.lang.Class`; the latter two are VM-level objects
+    /// with the bootstrap class library as their identity. Array class identity
+    /// (`[I`, `[Ljava/lang/String;`) is not modeled in M2.4, so an array returns a
+    /// typed error instead of a wrong class object.
+    pub fn get_class(&self, reference: ObjRef) -> Result<ObjRef, VmError> {
+        enum Kind {
+            Instance(ClassId),
+            Str,
+            Class,
+        }
+
+        let kind = {
+            let heap = self.heap();
+            match heap
+                .get(reference)
+                .map_err(|error| VmError::Native(error.to_string()))?
+            {
+                HeapObject::Instance(instance) => Kind::Instance(instance.class),
+                HeapObject::Str(_) => Kind::Str,
+                HeapObject::Class(_) => Kind::Class,
+                HeapObject::Array(_) => {
+                    return Err(VmError::Native(
+                        "array class objects are not supported yet (M2.4)".to_owned(),
+                    ));
+                }
+            }
+        };
+
+        match kind {
+            Kind::Instance(class) => self.class_object(class),
+            Kind::Str => {
+                let class = self.load_library_class("java/lang/String")?;
+                self.class_object(class)
+            }
+            Kind::Class => {
+                let class = self.load_library_class("java/lang/Class")?;
+                self.class_object(class)
+            }
+        }
+    }
+
     pub fn define_class(
         &self,
         loader: LoaderId,
@@ -180,13 +263,15 @@ impl Shared {
         &self.hooks
     }
 
-    /// Collect the VM roots: every non-null class static field plus the roots the
-    /// given threads' active frames published.
+    /// Collect the VM roots: every non-null class static field, every cached class
+    /// object, plus the roots the given threads' active frames published.
     ///
     /// The class table is snapshotted before any per-class statics lock is taken, and
     /// each statics lock is released before the next class is visited, so this never
-    /// holds one shared lock while another is acquired. This returns the roots only,
-    /// not their transitive closure; M0 has no collector.
+    /// holds one shared lock while another is acquired. The class objects are permanent
+    /// (the cache never frees them) and are listed so a future collector sees the
+    /// retention instead of inferring it. This returns the roots only, not their
+    /// transitive closure; M0 has no collector.
     pub fn roots(&self, threads: &[&ThreadState]) -> Vec<ObjRef> {
         let entries: Vec<Arc<ClassEntry>> = {
             let classes = self.classes.read().expect("class table lock poisoned");
@@ -203,6 +288,18 @@ impl Shared {
                 };
                 if !reference.is_null() && seen.insert(reference) {
                     roots.push(reference);
+                }
+            }
+        }
+
+        {
+            let class_objects = self
+                .class_objects
+                .lock()
+                .expect("class-object cache lock poisoned");
+            for reference in class_objects.values() {
+                if seen.insert(*reference) {
+                    roots.push(*reference);
                 }
             }
         }
@@ -233,6 +330,11 @@ impl Shared {
         {
             let _guard = self.heap.try_lock().map_err(|_| LockHeld {
                 lock: SharedLock::Heap,
+            })?;
+        }
+        {
+            let _guard = self.class_objects.try_lock().map_err(|_| LockHeld {
+                lock: SharedLock::ClassObjects,
             })?;
         }
         {

@@ -50,6 +50,7 @@ fn init_system(
     shared: &Shared,
     _thread: &ThreadState,
     loader: LoaderId,
+    _receiver: ObjRef,
     _args: &[Value],
 ) -> Result<Option<Value>, VmError> {
     let print_stream = shared.load_class(loader, "java/io/PrintStream")?;
@@ -71,6 +72,7 @@ fn println(
     shared: &Shared,
     _thread: &ThreadState,
     _loader: LoaderId,
+    _receiver: ObjRef,
     args: &[Value],
 ) -> Result<Option<Value>, VmError> {
     let Some(Value::Ref(reference)) = args.first().copied() else {
@@ -92,6 +94,7 @@ fn println_int(
     shared: &Shared,
     _thread: &ThreadState,
     _loader: LoaderId,
+    _receiver: ObjRef,
     args: &[Value],
 ) -> Result<Option<Value>, VmError> {
     let Some(Value::Int(value)) = args.first().copied() else {

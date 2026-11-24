@@ -11,6 +11,7 @@ pub mod hooks;
 pub mod loader;
 pub mod memory;
 pub mod metadata;
+pub mod reflection;
 pub mod shared;
 pub mod source;
 pub mod thread;

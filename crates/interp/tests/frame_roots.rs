@@ -55,6 +55,7 @@ fn probe(
     _shared: &Shared,
     thread: &ThreadState,
     _loader: LoaderId,
+    _receiver: ObjRef,
     _args: &[Value],
 ) -> Result<Option<Value>, VmError> {
     let depth = thread.frame_depth() as i32;

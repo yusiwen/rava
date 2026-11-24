@@ -12,6 +12,7 @@ use crate::error::InterpError;
 pub enum Instr {
     Iconst(i32),
     ILoad(u8),
+    ALoad(u8),
     IStore(u8),
     IAdd,
     ISub,
@@ -34,6 +35,7 @@ pub enum Instr {
         descriptor: String,
     },
     IReturn,
+    AReturn,
     Return,
 }
 
@@ -87,7 +89,13 @@ pub fn decode(file: &ClassFile, attribute_data: &[u8]) -> Result<DecodedMethod, 
                 pc += 1;
                 Instr::ILoad(index)
             }
+            0x19 => {
+                let index = byte(code, pc)?;
+                pc += 1;
+                Instr::ALoad(index)
+            }
             0x1a..=0x1d => Instr::ILoad(opcode - 0x1a),
+            0x2a..=0x2d => Instr::ALoad(opcode - 0x2a),
             0x36 => {
                 let index = byte(code, pc)?;
                 pc += 1;
@@ -99,6 +107,7 @@ pub fn decode(file: &ClassFile, attribute_data: &[u8]) -> Result<DecodedMethod, 
             0x68 => Instr::IMul,
             0x6c => Instr::IDiv,
             0xac => Instr::IReturn,
+            0xb0 => Instr::AReturn,
             0xb1 => Instr::Return,
             0x12 => {
                 let index = byte(code, pc)?;

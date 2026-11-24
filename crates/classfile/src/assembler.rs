@@ -5,9 +5,10 @@
 //! wrong origin and an operand written in the wrong width — labels and a single `finish` pass remove
 //! both, for the opcodes implemented here.
 //!
-//! What it covers is exactly what the fixtures need: integer constants, loads and stores, `iadd`,
-//! `iinc`, two conditional branches, `goto`, `getstatic`, `invokevirtual`, `ldc`, and the two return
-//! forms. Everything else is still raw bytes through [`Assembler::op`].
+//! What it covers is exactly what the fixtures need: integer constants, integer and
+//! reference loads and stores, `iadd`, `iinc`, two conditional branches, `goto`,
+//! `getstatic`, `invokevirtual`, `ldc`, and the `ireturn`/`areturn`/`return` forms.
+//! Everything else is still raw bytes through [`Assembler::op`].
 //!
 //! `tableswitch` and `lookupswitch` are deliberately absent: their padding depends on the switch
 //! opcode's own address, which is a different encoding problem (and the decoder already handles the
@@ -86,6 +87,14 @@ impl Assembler {
         self.op(0x15, &[slot]);
     }
 
+    /// `aload` for a reference local. Slots 0..=3 use the implicit one-byte form.
+    pub fn aload(&mut self, slot: u8) {
+        match slot {
+            0..=3 => self.bytes.push(0x2a + slot),
+            _ => self.op(0x19, &[slot]),
+        }
+    }
+
     pub fn istore(&mut self, slot: u8) {
         self.op(0x36, &[slot]);
     }
@@ -128,6 +137,10 @@ impl Assembler {
 
     pub fn ireturn(&mut self) {
         self.bytes.push(0xac);
+    }
+
+    pub fn areturn(&mut self) {
+        self.bytes.push(0xb0);
     }
 
     pub fn return_(&mut self) {

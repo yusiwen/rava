@@ -150,6 +150,13 @@ pub enum HeapObject {
     /// A minimal string object for `ldc` and native printing. The class-library
     /// `java.lang.String` representation arrives with the library slice.
     Str(String),
+    /// A class object (`java.lang.Class`): one heap object per class identity.
+    ///
+    /// The heap stores only the identity; the class's name, modifiers, superclass and
+    /// flags are read from the class table when a native asks for them. Class objects
+    /// are created and cached by [`crate::Shared::class_object`], never by a caller
+    /// allocating directly.
+    Class(ClassId),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -242,12 +249,29 @@ impl Heap {
         self.allocate(HeapObject::Str(text.into()))
     }
 
+    /// Allocate a class object. Callers go through [`crate::Shared::class_object`],
+    /// which caches one object per class identity.
+    pub fn allocate_class(&mut self, class: ClassId) -> ObjRef {
+        self.allocate(HeapObject::Class(class))
+    }
+
     pub fn string(&self, reference: ObjRef) -> Result<&str, HeapError> {
         match self.get(reference)? {
             HeapObject::Str(text) => Ok(text),
             _ => Err(HeapError::WrongObjectKind {
                 reference,
                 expected: "a string",
+            }),
+        }
+    }
+
+    /// The class identity behind a class object.
+    pub fn class(&self, reference: ObjRef) -> Result<ClassId, HeapError> {
+        match self.get(reference)? {
+            HeapObject::Class(class) => Ok(*class),
+            _ => Err(HeapError::WrongObjectKind {
+                reference,
+                expected: "a class object",
             }),
         }
     }
@@ -295,40 +319,48 @@ impl Heap {
     pub fn instance(&self, reference: ObjRef) -> Result<&Instance, HeapError> {
         match self.get(reference)? {
             HeapObject::Instance(instance) => Ok(instance),
-            HeapObject::Array(_) | HeapObject::Str(_) => Err(HeapError::WrongObjectKind {
-                reference,
-                expected: "an instance",
-            }),
+            HeapObject::Array(_) | HeapObject::Str(_) | HeapObject::Class(_) => {
+                Err(HeapError::WrongObjectKind {
+                    reference,
+                    expected: "an instance",
+                })
+            }
         }
     }
 
     pub fn instance_mut(&mut self, reference: ObjRef) -> Result<&mut Instance, HeapError> {
         match self.get_mut(reference)? {
             HeapObject::Instance(instance) => Ok(instance),
-            HeapObject::Array(_) | HeapObject::Str(_) => Err(HeapError::WrongObjectKind {
-                reference,
-                expected: "an instance",
-            }),
+            HeapObject::Array(_) | HeapObject::Str(_) | HeapObject::Class(_) => {
+                Err(HeapError::WrongObjectKind {
+                    reference,
+                    expected: "an instance",
+                })
+            }
         }
     }
 
     pub fn array(&self, reference: ObjRef) -> Result<&Array, HeapError> {
         match self.get(reference)? {
             HeapObject::Array(array) => Ok(array),
-            HeapObject::Instance(_) | HeapObject::Str(_) => Err(HeapError::WrongObjectKind {
-                reference,
-                expected: "an array",
-            }),
+            HeapObject::Instance(_) | HeapObject::Str(_) | HeapObject::Class(_) => {
+                Err(HeapError::WrongObjectKind {
+                    reference,
+                    expected: "an array",
+                })
+            }
         }
     }
 
     pub fn array_mut(&mut self, reference: ObjRef) -> Result<&mut Array, HeapError> {
         match self.get_mut(reference)? {
             HeapObject::Array(array) => Ok(array),
-            HeapObject::Instance(_) | HeapObject::Str(_) => Err(HeapError::WrongObjectKind {
-                reference,
-                expected: "an array",
-            }),
+            HeapObject::Instance(_) | HeapObject::Str(_) | HeapObject::Class(_) => {
+                Err(HeapError::WrongObjectKind {
+                    reference,
+                    expected: "an array",
+                })
+            }
         }
     }
 

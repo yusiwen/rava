@@ -6,7 +6,7 @@
 **Started:** 2026-11-22
 
 > Ledger. P0 and P1 were accepted on 2026-11-23. M1 is complete; M2 is in progress
-> (M2.1, M2.2 and M2.3 done). Keep this file honest and terse.
+> (M2.1, M2.2, M2.3 and M2.4 done). Keep this file honest and terse.
 
 ## Phase status
 
@@ -26,7 +26,7 @@ release process, if wanted, becomes its own phase.
 
 > Gates are defined in `docs/requirements.md` § Milestones. P0 and P1 are accepted;
 > M0 and M1 are complete, and both gate reviews have passed. M2 is in progress, with
-> M2.1, M2.2 and M2.3 done.
+> M2.1, M2.2, M2.3 and M2.4 done.
 
 | Milestone | Delivers | Gate | Status |
 | :--- | :--- | :--- | :--- |
@@ -60,11 +60,11 @@ release process, if wanted, becomes its own phase.
 | M2.1 | C1 metadata model and normalized dump | R3 | `cargo test -p rava-classfile --test metadata_model` exits 0 | done |
 | M2.2 | JDK 17 signature stubs and zero metadata diff | R3 | `cargo run -p rava-cli -- compat metadata --check` exits 0 | done |
 | M2.3 | `stdlib/c1/classes` as the bootstrap library and its metadata through the VM | R3 | `cargo test -p rava-vm --test c1_runtime` exits 0 | done |
-| M2.4 | Class objects and basic `Object`/`Class` reflection | R3 | `cargo test -p rava-interp --test class_objects` exits 0 | todo |
+| M2.4 | Class objects and basic `Object`/`Class` reflection | R3 | `cargo test -p rava-interp --test class_objects` exits 0 | done |
 
 P0 and P1 are accepted; P2 is done because the M2 increments are sliced. All M0 and
-M1 slices are done, and both gate reviews passed. M2.1, M2.2 and M2.3 are done; M2.4 is
-next.
+M1 slices are done, and both gate reviews passed. M2.1, M2.2, M2.3 and M2.4 are done;
+M2.5 is next.
 
 ## Slice log
 
@@ -85,6 +85,7 @@ next.
 | M2.1 | `cargo test -p rava-classfile --test metadata_model` | 0 | 2026-11-24 | `rava-classfile`'s `metadata` module decodes the C1 attributes ADR-0006 lists into a typed model: access flags, binary name, superclass, interfaces, `Signature`, visible/invisible annotations with every element-value tag and repeatable containers as encoded, parameter and type annotations (all `target_info` variants and all four `type_path` kinds), nest host/members, permitted subclasses, inner and enclosing classes, `Record` components with their own annotations, `SourceFile`, `ConstantValue`, `Deprecated`, `Exceptions`, `MethodParameters`, `AnnotationDefault`; every attribute payload is still copied verbatim, so an undecoded attribute is retained; malformed payloads return `Error::BadAttribute` with a structured cause; a normalized dump with committed golden files for `Kitchen` and `Defaults`; 29 new tests, 43 `rava-classfile` tests; `cargo xtask ci` exits 0 |
 | M2.2 | `cargo run -p rava-cli -- compat metadata --check` | 0 | 2026-11-24 | `stdlib/c1/classes/` holds 980 committed class files: 952 projected from the host JDK 25 `lib/ct.sym` release-17 view (1,104 fields, 13,008 methods, class-file version 61.0) and 28 header-only placeholders for manifest owners Java 17 does not define, listed in `compat/surface/c1-unreferenced.txt`; the normalized M2.1 metadata dump has 0 differences across the 952 referenced classes, the only normalization being the class-file version line (ct.sym stores 69); `stdlib/classes` is untouched and `compat check` still resolves 980 classes and 4,851 member records with `unresolved 0`; `cargo test -p rava-cli` passes 67 tests; `cargo xtask ci` exits 0 |
 | M2.3 | `cargo test -p rava-vm --test c1_runtime` | 0 | 2026-11-24 | `stdlib/c1/classes` is the bootstrap class source through the existing `DirectorySource` and `(loader, name)` identity; `Shared::with_library_dir`, `Shared::load_library_class`, `Shared::library_metadata` and `ClassEntry::metadata()` decode C1 metadata without a `Code` attribute; the test loads `java.lang.String`, `java.lang.Class`, `java.util.List`, sealed `java.lang.reflect.Executable` and annotation type `java.lang.Deprecated`, checks superclass/interfaces/signatures/field and method descriptors/annotations/permitted subclasses, a second loader's distinct identity and no `Code` on any stub method; 7 tests; `cargo test -p rava-vm` passes 42 tests; `cargo xtask ci` exits 0 |
+| M2.4 | `cargo test -p rava-interp --test class_objects` | 0 | 2026-11-24 | `HeapObject::Class(ClassId)`, its heap allocator/accessor, `Shared::class_object` (one cached object per `(loader, name)` identity) and `Shared::get_class` for `Str`/`Instance`/`Class` (arrays return a typed error); cached class objects are enumerated by `Shared::roots`; the native ABI takes the receiver `ObjRef` (`ObjRef::NULL` for static calls), and `run_static_method`/`invokevirtual` consult the registry before `Code`, so the C1 stubs (no `Code`, no `ACC_NATIVE`) execute; `invokevirtual` resolves `HeapObject::Class` as `java/lang/Class` and `HeapObject::Str` as `java/lang/String`, walking the superclass chain; `Object.getClass`, `Class.getName/getModifiers/isInterface/isArray/getSuperclass/forName`; `ReflectProbe` fixture; 8 tests; `cargo test -p rava-interp` 16, `cargo test -p rava-vm` 42 and `cargo test -p rava-cli` 67 pass, workspace 175; `cargo xtask ci` exits 0 |
 
 M0.6 boundary: the reference and class-unloading hooks are registration points only.
 M0 has no collector, so no weak/soft/phantom reference is cleared and no class is
@@ -193,6 +194,25 @@ initialize or execute a class, does not build `Class`, `Field`, `Method` or `Con
 objects, and adds no reflection native or Spring path. The committed tree has no record
 class, so record metadata is exercised by the M2.1 fixtures rather than here.
 
+M2.4 boundary: a class object is `HeapObject::Class(ClassId)` and carries no metadata of
+its own; `Shared::class_object` caches exactly one object per `(loader, name)` identity.
+Those objects are permanent: they are never freed while `Shared` lives, and
+`Shared::roots` lists them, so a future collector sees the retention instead of inferring
+it. `Shared::get_class` maps an instance to its defining class, a string to the bootstrap
+`java.lang.String` class object and a class object to `java.lang.Class`; an array has no
+class identity in this slice, so it returns a typed `VmError::Native` rather than a wrong
+object, and `Class.isArray` is therefore always false. The native ABI now carries the
+receiver as an `ObjRef` (`ObjRef::NULL` for static calls), and the registry is consulted
+before `Code`, which is what makes the C1 stubs run even though they are not
+`ACC_NATIVE`. `invokevirtual` walks the superclass chain from the receiver's class
+(`java/lang/Class` and `java/lang/String` for class objects and strings) and supports
+only native targets; a non-native instance method still fails loudly. `Class.getName`
+returns the binary name with `.`, `getModifiers` reports `Modifier.classModifiers()` with
+`ACC_SUPER` masked out, `getSuperclass` is null for `Object` and for interfaces, and
+`forName` is bootstrap-only, does not initialize the class and rejects array class names.
+`Field`, `Method`, `Constructor`, annotation proxies, generic types, records and Spring
+remain later slices.
+
 ## Decision log
 
 | ADR | Decision | Status |
@@ -221,7 +241,8 @@ A fresh session should:
    signature stubs in `stdlib/c1/classes/` and the zero-diff `rava compat metadata
    --check` gate. M2.3 landed the runtime loading path: that tree is the bootstrap class
    source and its metadata is readable without `Code` (`cargo test -p rava-vm --test
-   c1_runtime`). M2.4 is next.
+   c1_runtime`). M2.4 landed class objects and the basic `Object`/`Class` natives
+   (`cargo test -p rava-interp --test class_objects`). M2.5 is next.
 4. Do not write runtime code outside a defined slice.
 
 ## Open decisions
