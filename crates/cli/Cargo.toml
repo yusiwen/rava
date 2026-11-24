@@ -8,3 +8,5 @@ authors.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+# Parse-only TOML: the lock is read through `toml::Table`, no derived types.
+toml = { version = "0.9", default-features = false, features = ["parse", "serde"] }

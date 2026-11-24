@@ -1,3 +1,38 @@
-fn main() {
-    eprintln!("rava: the runtime is not built yet");
+//! `rava` — the command-line launcher.
+//!
+//! Deliberately dependency-light: M1.1 needs only `compat target`, so argument
+//! handling is a small match instead of a CLI framework.
+
+mod compat;
+mod target;
+
+use std::process::ExitCode;
+
+fn main() -> ExitCode {
+    let mut args = std::env::args().skip(1);
+    let Some(command) = args.next() else {
+        print_usage();
+        return ExitCode::from(2);
+    };
+    let rest: Vec<String> = args.collect();
+
+    match command.as_str() {
+        "compat" => compat::run(&rest),
+        "-h" | "--help" | "help" => {
+            print_usage();
+            ExitCode::SUCCESS
+        }
+        other => {
+            eprintln!("error: unknown command `{other}`");
+            print_usage();
+            ExitCode::from(2)
+        }
+    }
+}
+
+fn print_usage() {
+    println!("usage: rava <command>");
+    println!();
+    println!("commands:");
+    println!("  compat target   print and validate the pinned compatibility target");
 }

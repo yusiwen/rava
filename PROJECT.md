@@ -52,7 +52,7 @@ release process, if wanted, becomes its own phase.
 | M0.5b | Hello through the interpreter: class library and native minimum | R13 | `cargo test -p rava-interp --test hello` exits 0 | done |
 | M0.6 | Safepoint polling, GC roots and the no-lock-across-Java-call invariant | R13 | `cargo test -p rava-vm --test safepoints` exits 0 | done |
 | M0.7 | Verifier dataflow skeleton and the metadata dump fixture | R13 | `cargo test -p rava-vm --test verifier_skeleton` exits 0 | done |
-| M1.1 | Target lock, reference app and pinned jar set | R2 | `cargo run -p rava-cli -- compat target` exits 0 | todo |
+| M1.1 | Target lock, reference app and pinned jar set | R2 | `cargo run -p rava-cli -- compat target` exits 0 | done |
 | M1.2 | Static manifest over the pinned jars | R1 | `cargo run -p rava-cli -- compat manifest --check` exits 0 | todo |
 | M1.3 | Stub library surface and zero-unresolved link-check | R2 | `cargo run -p rava-cli -- compat link-check` exits 0 | todo |
 | M1.4 | Manifest reproducibility and M1 gate review | R1, R2 | `cargo xtask ci` exits 0 | todo |
@@ -72,6 +72,7 @@ are done and the M0 gate review passed.
 | M0.5b | `cargo test -p rava-interp --test hello` | 0 | 2026-11-24 | `getstatic`/`ldc`/`invokevirtual`, class initialization and native PrintStream; 2 tests pass |
 | M0.6 | `cargo test -p rava-vm --test safepoints` | 0 | 2026-11-24 | Frame-root stack with RAII cleanup, publish-before-acknowledge safepoint handshake, `Shared` root enumeration, lock probe at call boundaries, `MemoryRegion` seam and hook registration points; 9 tests pass; `cargo xtask ci` exits 0 |
 | M0.7 | `cargo test -p rava-vm --test verifier_skeleton` | 0 | 2026-11-24 | Stack-height and definite-local dataflow over a branch/handler worklist, typed underflow/overflow/local/truncation/unsupported errors, deterministic metadata dump for `Hello.class`; 12 tests pass; `cargo xtask ci` exits 0 |
+| M1.1 | `cargo run -p rava-cli -- compat target` | 0 | 2026-11-24 | `compat/targets.toml` pins Java 17, Boot 3.5.16, Spring 6.2.19, Tomcat 10.1.55, the reference app source hash and a 35-jar set; the reference app builds at release 17; a clean refetch reproduces all 35 sha256 entries and `bash compat/fetch-jars.sh --check` passes; `cargo test -p rava-cli` passes 17 tests |
 
 M0.6 boundary: the reference and class-unloading hooks are registration points only.
 M0 has no collector, so no weak/soft/phantom reference is cleared and no class is
@@ -90,6 +91,12 @@ branches, and exception-handler entry; `jsr`/`ret`, `wide`, `tableswitch` and
 `lookupswitch` return `UnsupportedOpcode`. Type states, stack-map frames and
 generated-class verification land at M3 (ADR-0012). The metadata dump is a stable text
 fixture, not a reflection API.
+
+M1.1 boundary: `compat target` validates that the target lock parses, that its
+`[jars].count` agrees with `compat/jars.lock`, and that `compat/jars/` holds the
+declared number of jars. It does not hash the jars (that is
+`bash compat/fetch-jars.sh --check`) and does not scan the manifest; M1.2 adds the
+static manifest and M1.3 the link-check.
 
 ## Decision log
 
@@ -114,8 +121,8 @@ A fresh session should:
 
 1. Read `README.md`, `docs/requirements.md` and `docs/open-questions.md`.
 2. Read the ADRs in order; 0001–0005 are the project-defining decisions.
-3. M0 is complete; M1 is in progress. The next slice is M1.1 (target lock, reference
-   app and pinned jar set).
+3. M0 is complete; M1 is in progress. The next slice is M1.2 (static manifest over
+   the pinned jars).
 4. Do not write runtime code outside a defined slice.
 
 ## Open decisions

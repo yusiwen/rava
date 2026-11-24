@@ -1,0 +1,26 @@
+# Target lock: the single source of truth for the pinned platform (ADR-0002).
+# A version bump is a re-baseline: regenerate the manifest, reopen the gap count
+# and rerun the gates. It is never a silent dependency update.
+
+schema = 1
+
+[platform]
+java = "17"
+class_file = "61.0"
+spring_boot = "3.5.16"
+spring_framework = "6.2.19"
+tomcat = "10.1.55"
+
+[reference_app]
+path = "reference-app"
+version = "0.1.0"
+main_class = "dev.rava.reference.ReferenceApplication"
+# Deterministic sha256 of reference-app/pom.xml and reference-app/src/, printed by
+# `bash compat/source-hash.sh`. fetch-jars.sh refuses to build against another tree.
+source_sha256 = "cb78ed489b27964b765c0f923b73d759fa1248cf0899e1ad8e91d9e5903d3450"
+
+[jars]
+directory = "compat/jars"
+lock = "compat/jars.lock"
+# Must equal `count` in compat/jars.lock; compat target checks it.
+count = 35

@@ -4,10 +4,11 @@ A Java 17 runtime in Rust, built to run Spring — not just a corpus.
 
 ## Status
 
-**Decisions accepted (2026-11-23). M0 is complete:** workspace, parser, loader
-identity, heap/seams, the interpreter core, Hello, safepoint/GC-root and
-no-lock-across-Java-call invariants, and the verifier dataflow skeleton with the
-metadata dump fixture. **M1 is next.**
+**Decisions accepted (2026-11-23). M0 is complete; M1.1 is done (2026-11-24):**
+workspace, parser, loader identity, heap/seams, the interpreter core, Hello,
+safepoint/GC-root and no-lock-across-Java-call invariants, the verifier dataflow
+skeleton with the metadata dump fixture, and the pinned target lock with the
+reference application and its 35-jar set. **M1.2 (surface manifest) is next.**
 
 ## What this project is
 
@@ -35,9 +36,10 @@ target and enforced by C0–C4 gates.
 | Reference application | servlet web app, `text/plain` endpoint, no JSON, no database |
 | Reference JDK | 17 |
 
-The Spring, Boot and Tomcat versions are pinned in `compat/targets.toml`; the reference
-application's commit is created and pinned as the first M1 task. Reactive web
-(Spring WebFlux) is a later target, not part of the first acceptance.
+The Spring, Boot and Tomcat versions are pinned in `compat/targets.toml`, together
+with the reference application's source hash; `compat/jars.lock` pins the sha256 of
+every jar in the flat `compat/jars/` set. The jars are fetched, not committed.
+Reactive web (Spring WebFlux) is a later target, not part of the first acceptance.
 
 ## Documents
 
@@ -63,6 +65,16 @@ The Rust toolchain is pinned by `rust-toolchain.toml`; the local gate is:
 ```sh
 cargo xtask ci
 ```
+
+The pinned target and jar set are checked with:
+
+```sh
+cargo run -p rava-cli -- compat target
+bash compat/fetch-jars.sh --check
+```
+
+`bash compat/fetch-jars.sh` (re)fetches the jars from Maven Central and needs
+`JAVA_HOME` and Maven; `--check` verifies the existing directory without fetching.
 
 ## License
 

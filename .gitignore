@@ -1,4 +1,6 @@
 /target
+/reference-app/target/
+/compat/jars/
 /.direnv
 /result
 /result-*
