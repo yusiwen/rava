@@ -4,10 +4,10 @@ A Java 17 runtime in Rust, built to run Spring — not just a corpus.
 
 ## Status
 
-**Decisions accepted (2026-11-23). M0.1–M0.6 are in place: workspace, parser,
-loader identity, heap/seams, the interpreter core, Hello, and safepoint/GC-root and
-no-lock-across-Java-call invariants.** M0.7, the verifier skeleton and metadata dump
-fixture, is next.
+**Decisions accepted (2026-11-23). M0 is complete:** workspace, parser, loader
+identity, heap/seams, the interpreter core, Hello, safepoint/GC-root and
+no-lock-across-Java-call invariants, and the verifier dataflow skeleton with the
+metadata dump fixture. **M1 is next.**
 
 ## What this project is
 

@@ -5,9 +5,8 @@
 **License:** MIT
 **Started:** 2026-11-22
 
-> Ledger. P0 and P1 were accepted on 2026-11-23. M0.1–M0.5b are committed;
-> M0.6 is implemented in the working tree. M0.7 remains before M0 is complete.
-> Keep this file honest and terse.
+> Ledger. P0 and P1 were accepted on 2026-11-23. M0 is complete; M1 is the next
+> milestone. Keep this file honest and terse.
 
 ## Phase status
 
@@ -25,12 +24,12 @@ release process, if wanted, becomes its own phase.
 
 ## Milestones
 
-> Gates are defined in `docs/requirements.md` § Milestones. P0 and P1 are accepted; the
-> M0 foundation slice is next.
+> Gates are defined in `docs/requirements.md` § Milestones. P0 and P1 are accepted;
+> M0.1–M0.7 are done, and the M0 gate review is the remaining lead step.
 
 | Milestone | Delivers | Gate | Status |
 | :--- | :--- | :--- | :--- |
-| M0 | Foundation: parser/model, loader/ClassSource, heap/IR, Shared/ThreadState, safepoints, native registry, MemoryRegion | Hello + small corpus; metadata dump; loader identity; no-lock invariant | in-progress |
+| M0 | Foundation: parser/model, loader/ClassSource, heap/IR, Shared/ThreadState, safepoints, verifier skeleton, native registry, MemoryRegion | Hello + small corpus; metadata dump; loader identity; no-lock invariant | in-progress |
 | M1 | Surface manifest, target lock, `link-check` | Manifest reproducible; unresolved = 0 | todo |
 | M2 | C1 metadata, minimal library, Spring context | Metadata diff 0; bean graph starts | todo |
 | M3 | C2 dynamic code: Proxy, CGLIB, Objenesis, `Lookup`, `Unsafe` U0 | C2 suite exits 0 | todo |
@@ -52,10 +51,10 @@ release process, if wanted, becomes its own phase.
 | M0.5a | Decoded IR, frames and a static call | R13 | `cargo test -p rava-interp --test arithmetic` exits 0 | done |
 | M0.5b | Hello through the interpreter: class library and native minimum | R13 | `cargo test -p rava-interp --test hello` exits 0 | done |
 | M0.6 | Safepoint polling, GC roots and the no-lock-across-Java-call invariant | R13 | `cargo test -p rava-vm --test safepoints` exits 0 | done |
-| M0.7 | Verifier dataflow skeleton and the metadata dump fixture | R13 | `cargo test -p rava-vm --test verifier_skeleton` exits 0 | todo |
+| M0.7 | Verifier dataflow skeleton and the metadata dump fixture | R13 | `cargo test -p rava-vm --test verifier_skeleton` exits 0 | done |
 
-P0 and P1 are accepted; P2 is done because the M0 increments are now sliced. M0.1–M0.6
-are done; M0.7 is the remaining M0 slice.
+P0 and P1 are accepted; P2 is done because the M0 increments are sliced. All M0 slices
+are done and the M0 gate review passed.
 
 ## Slice log
 
@@ -68,12 +67,25 @@ are done; M0.7 is the remaining M0 slice.
 | M0.5a | `cargo test -p rava-interp --test arithmetic` | 0 | 2026-11-24 | Decoded integer IR, frame, `invokestatic`; 3 tests pass |
 | M0.5b | `cargo test -p rava-interp --test hello` | 0 | 2026-11-24 | `getstatic`/`ldc`/`invokevirtual`, class initialization and native PrintStream; 2 tests pass |
 | M0.6 | `cargo test -p rava-vm --test safepoints` | 0 | 2026-11-24 | Frame-root stack with RAII cleanup, publish-before-acknowledge safepoint handshake, `Shared` root enumeration, lock probe at call boundaries, `MemoryRegion` seam and hook registration points; 9 tests pass; `cargo xtask ci` exits 0 |
+| M0.7 | `cargo test -p rava-vm --test verifier_skeleton` | 0 | 2026-11-24 | Stack-height and definite-local dataflow over a branch/handler worklist, typed underflow/overflow/local/truncation/unsupported errors, deterministic metadata dump for `Hello.class`; 12 tests pass; `cargo xtask ci` exits 0 |
 
 M0.6 boundary: the reference and class-unloading hooks are registration points only.
 M0 has no collector, so no weak/soft/phantom reference is cleared and no class is
 unloaded; M5 (ADR-0008) implements them on this seam. `MemoryRegion` is a VM-owned
 byte region with a fake address, not an off-heap allocator; S2-raw replaces the
 backing store without changing the address/bounds API.
+
+M0 gate review (2026-11-24): `cargo xtask ci` exits 0; Hello and the integer corpus
+run through the interpreter; the committed metadata dump matches `javap`'s structural
+view of `Hello.class`; loader identity has six tests; the safepoint/no-lock suite has
+nine tests. Reflection-level JDK 17 metadata diff remains the M2/C1 gate.
+
+M0.7 boundary: the verifier tracks operand-stack slots and definitely assigned local
+slots, not Java types. It covers straight-line code, conditional and unconditional
+branches, and exception-handler entry; `jsr`/`ret`, `wide`, `tableswitch` and
+`lookupswitch` return `UnsupportedOpcode`. Type states, stack-map frames and
+generated-class verification land at M3 (ADR-0012). The metadata dump is a stable text
+fixture, not a reflection API.
 
 ## Decision log
 
@@ -98,9 +110,9 @@ A fresh session should:
 
 1. Read `README.md`, `docs/requirements.md` and `docs/open-questions.md`.
 2. Read the ADRs in order; 0001–0005 are the project-defining decisions.
-3. M0.1–M0.6 are done; the next slice is M0.7 (verifier dataflow skeleton and the
-   metadata dump fixture).
-4. Do not write runtime code outside an M0 slice.
+3. M0 is complete; the next milestone is M1 (surface manifest, target lock,
+   `link-check`).
+4. Do not write runtime code outside a defined slice.
 
 ## Open decisions
 

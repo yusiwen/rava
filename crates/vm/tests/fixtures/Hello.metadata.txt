@@ -1,0 +1,19 @@
+class Hello
+version 52.0
+access_flags 0x0021
+super java/lang/Object
+interfaces 0
+fields 0
+methods 2
+  method <init>
+    descriptor ()V
+    access_flags 0x0001
+    attributes 1
+      Code length 47
+  method main
+    descriptor ([Ljava/lang/String;)V
+    access_flags 0x0009
+    attributes 1
+      Code length 67
+attributes 1
+  SourceFile length 2
