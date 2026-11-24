@@ -416,8 +416,9 @@ fn same_value(shared: &Shared, left: Value, right: Value) -> Result<bool, VmErro
     }
 }
 
-/// Natural ordering for `sorted()`: numbers numerically, strings by UTF-16 code unit.
-fn compare_values(shared: &Shared, left: Value, right: Value) -> Result<i32, VmError> {
+/// Natural ordering for `sorted()` and the natural-order comparators: numbers numerically,
+/// strings by UTF-16 code unit.
+pub(crate) fn compare_values(shared: &Shared, left: Value, right: Value) -> Result<i32, VmError> {
     match (left, right) {
         (Value::Int(left), Value::Int(right)) => Ok(left.cmp(&right) as i32),
         (Value::Long(left), Value::Long(right)) => Ok(left.cmp(&right) as i32),
@@ -1338,8 +1339,14 @@ fn collect(
     }
 }
 
-/// `Collection.removeIf(Predicate)`: rebuild the collection without the matching
-/// elements and report whether anything was removed.
+/// `Collection.removeIf(Predicate)`: remove the matching elements and report whether
+/// anything was removed.
+///
+/// A VM list or set is rebuilt in place. Any other receiver that implements `Collection`
+/// (a Java view object such as Spring's `ConcurrentReferenceHashMap$KeySet`) is handled by
+/// the JDK default method's semantics: walk the receiver's own `iterator()`, and call
+/// `Iterator.remove()` for every element the predicate matches. That keeps a view's
+/// removal visible through the receiver instead of snapshotting it into a detached set.
 fn collection_remove_if(
     shared: &Shared,
     thread: &ThreadState,
@@ -1348,7 +1355,9 @@ fn collection_remove_if(
     args: &[Value],
 ) -> Result<Option<Value>, VmError> {
     let predicate = reference_argument(args, 0, "Collection.removeIf")?;
-    let (elements, _) = collection_snapshot(shared, receiver, "Collection.removeIf")?;
+    let Some((elements, _is_set)) = collection_elements(shared, receiver)? else {
+        return remove_if_through_iterator(shared, thread, receiver, predicate);
+    };
     let mut kept = Vec::with_capacity(elements.len());
     let mut removed = false;
     for element in elements {
@@ -1372,6 +1381,76 @@ fn collection_remove_if(
     Ok(Some(Value::Int(i32::from(removed))))
 }
 
+/// The JDK default `Collection.removeIf` over a receiver's own `Iterator`.
+fn remove_if_through_iterator(
+    shared: &Shared,
+    thread: &ThreadState,
+    receiver: ObjRef,
+    predicate: ObjRef,
+) -> Result<Option<Value>, VmError> {
+    let iterator = call_instance(
+        shared,
+        thread,
+        receiver,
+        "iterator",
+        "()Ljava/util/Iterator;",
+        Vec::new(),
+    )?
+    .and_then(as_reference)
+    .ok_or_else(|| {
+        VmError::Native(format!(
+            "Collection.removeIf iterator() returned no iterator for {}",
+            reference_class_name(shared, receiver)
+        ))
+    })?;
+    let mut removed = false;
+    loop {
+        let has_next = call_instance(shared, thread, iterator, "hasNext", "()Z", Vec::new())?;
+        if !matches!(has_next, Some(Value::Int(value)) if value != 0) {
+            break;
+        }
+        let element = call_instance(
+            shared,
+            thread,
+            iterator,
+            "next",
+            "()Ljava/lang/Object;",
+            Vec::new(),
+        )?
+        .unwrap_or(Value::Ref(ObjRef::NULL));
+        if call_predicate(shared, thread, predicate, element)? {
+            call_instance(shared, thread, iterator, "remove", "()V", Vec::new())?;
+            removed = true;
+        }
+    }
+    Ok(Some(Value::Int(i32::from(removed))))
+}
+
+/// Run an instance method on a receiver, resolving it down the receiver's class chain.
+fn call_instance(
+    shared: &Shared,
+    thread: &ThreadState,
+    receiver: ObjRef,
+    name: &str,
+    descriptor: &str,
+    args: Vec<Value>,
+) -> Result<Option<Value>, VmError> {
+    let class = {
+        let heap = shared.heap();
+        heap.object_class(receiver).map_err(heap_error)?
+    };
+    let class = resolve_instance_class(shared, class, name, descriptor)?;
+    run_instance_method(shared, thread, class, name, descriptor, receiver, args)
+        .map_err(interp_to_vm)
+}
+
+fn as_reference(value: Value) -> Option<ObjRef> {
+    match value {
+        Value::Ref(reference) if !reference.is_null() => Some(reference),
+        _ => None,
+    }
+}
+
 // ---------------------------------------------------------------------------------
 // Spliterators
 // ---------------------------------------------------------------------------------
@@ -1388,14 +1467,45 @@ fn collection_snapshot(
     receiver: ObjRef,
     operation: &str,
 ) -> Result<(Vec<Value>, i32), VmError> {
-    let heap = shared.heap();
-    match heap.get(receiver).map_err(heap_error)? {
-        HeapObject::List(list) => Ok((list.elements.clone(), collection_characteristics(false))),
-        HeapObject::Set(set) => Ok((set.elements.clone(), collection_characteristics(true))),
-        _ => Err(VmError::Native(format!(
-            "{operation} receiver is not a collection"
+    match collection_elements(shared, receiver)? {
+        Some((elements, is_set)) => Ok((elements, collection_characteristics(is_set))),
+        None => Err(VmError::Native(format!(
+            "{operation} receiver is not a collection: {}",
+            reference_class_name(shared, receiver)
         ))),
     }
+}
+
+/// The elements of a VM list or set receiver, or `None` for any other object.
+///
+/// A Java class that implements `Collection` but is not a VM container (for example a
+/// view object over another map) is `None`; the caller decides whether to run the Java
+/// implementation or report a typed error.
+fn collection_elements(
+    shared: &Shared,
+    receiver: ObjRef,
+) -> Result<Option<(Vec<Value>, bool)>, VmError> {
+    let heap = shared.heap();
+    match heap.get(receiver).map_err(heap_error)? {
+        HeapObject::List(list) => Ok(Some((list.elements.clone(), false))),
+        HeapObject::Set(set) => Ok(Some((set.elements.clone(), true))),
+        _ => Ok(None),
+    }
+}
+
+/// The runtime class name of a reference, for a typed error message.
+///
+/// The heap guard is taken and released before the class table is read, so this does not
+/// hold one shared lock while acquiring another.
+fn reference_class_name(shared: &Shared, reference: ObjRef) -> String {
+    let class = {
+        let heap = shared.heap();
+        heap.object_class(reference).ok()
+    };
+    class
+        .and_then(|class| shared.entry(class))
+        .map(|entry| entry.name.clone())
+        .unwrap_or_else(|| reference.to_string())
 }
 
 /// `Collection.stream()`.

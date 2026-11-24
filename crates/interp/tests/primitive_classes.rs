@@ -705,10 +705,32 @@ fn int_value(value: Option<Value>) -> i32 {
     }
 }
 
-fn is_null(result: Result<Option<Value>, InterpError>) -> bool {
-    match result.unwrap_or_else(|error| panic!("lookup failed: {error}")) {
-        Some(Value::Ref(reference)) => reference.is_null(),
-        other => panic!("expected a reference result, found {other:?}"),
+/// Assert that a lookup raised `exception` with exactly `message`.
+fn assert_lookup_miss(
+    fixture: &Fixture,
+    result: Result<Option<Value>, InterpError>,
+    exception: &str,
+    message: &str,
+) {
+    match result {
+        Err(InterpError::Thrown(throwable)) => {
+            let class = fixture
+                .shared
+                .heap()
+                .object_class(throwable)
+                .expect("the throwable has a class");
+            assert_eq!(
+                fixture.shared.entry(class).expect("a loaded class").name,
+                exception,
+                "the lookup miss threw the wrong class"
+            );
+            assert_eq!(
+                fixture.shared.throwable_message(throwable).as_deref(),
+                Some(message),
+                "the lookup miss carried the wrong message"
+            );
+        }
+        other => panic!("expected a thrown {exception} ({message}), found {other:?}"),
     }
 }
 
@@ -1285,50 +1307,35 @@ fn named_lookup_matches_primitive_parameter_classes() {
     );
     assert_eq!(via_bytecode, set_value);
 
-    // A mismatched primitive descriptor is the documented null miss.
-    assert!(is_null(declared_method(
-        &fixture,
-        fixture.bean_object,
-        "setValue",
-        &[]
-    )));
-    assert!(is_null(declared_method(
-        &fixture,
-        fixture.bean_object,
-        "setValue",
-        &[fixture.string_object]
-    )));
-    assert!(is_null(declared_method(
-        &fixture,
-        fixture.bean_object,
-        "setValue",
-        &[long]
-    )));
-    assert!(is_null(declared_method(
-        &fixture,
-        fixture.bean_object,
-        "setValue",
-        &[int, int]
-    )));
-    assert!(
-        is_null(declared_method(
+    // A mismatched primitive descriptor raises NoSuchMethodException (M2.30), naming the
+    // receiver class and the exact parameter descriptors that were asked for.
+    for (parameters, message) in [
+        (Vec::new(), "Bean.setValue()"),
+        (
+            vec![fixture.string_object],
+            "Bean.setValue(Ljava/lang/String;)",
+        ),
+        (vec![long], "Bean.setValue(J)"),
+        (vec![int, int], "Bean.setValue(I, I)"),
+        (vec![void], "Bean.setValue(V)"),
+    ] {
+        assert_lookup_miss(
             &fixture,
-            fixture.bean_object,
-            "setValue",
-            &[void]
-        )),
-        "void.class never matches a parameter"
-    );
+            declared_method(&fixture, fixture.bean_object, "setValue", &parameters),
+            "java/lang/NoSuchMethodException",
+            message,
+        );
+    }
 
     let sum =
         ref_value(declared_method(&fixture, fixture.bean_object, "sum", &[int, int]).unwrap());
     assert_eq!(member_of(&fixture, sum).descriptor, "(II)I");
-    assert!(is_null(declared_method(
+    assert_lookup_miss(
         &fixture,
-        fixture.bean_object,
-        "sum",
-        &[int]
-    )));
+        declared_method(&fixture, fixture.bean_object, "sum", &[int]),
+        "java/lang/NoSuchMethodException",
+        "Bean.sum(I)",
+    );
 
     // A primitive and a reference parameter in one query build `(ILjava/lang/String;)V`,
     // and order matters: the reversed query is a miss.
@@ -1345,12 +1352,17 @@ fn named_lookup_matches_primitive_parameter_classes() {
         member_of(&fixture, mixed).descriptor,
         "(ILjava/lang/String;)V"
     );
-    assert!(is_null(declared_method(
+    assert_lookup_miss(
         &fixture,
-        fixture.bean_object,
-        "mixed",
-        &[fixture.string_object, int]
-    )));
+        declared_method(
+            &fixture,
+            fixture.bean_object,
+            "mixed",
+            &[fixture.string_object, int],
+        ),
+        "java/lang/NoSuchMethodException",
+        "Bean.mixed(Ljava/lang/String;, I)",
+    );
 
     // `getMethod` accepts the same primitive `Class[]`; the declaring class is the target.
     let inherited = ref_value(
@@ -1374,16 +1386,18 @@ fn named_lookup_matches_primitive_parameter_classes() {
     let default_constructor =
         ref_value(declared_constructor(&fixture, fixture.bean_object, &[]).unwrap());
     assert_eq!(member_of(&fixture, default_constructor).descriptor, "()V");
-    assert!(is_null(declared_constructor(
+    assert_lookup_miss(
         &fixture,
-        fixture.bean_object,
-        &[long]
-    )));
-    assert!(is_null(declared_constructor(
+        declared_constructor(&fixture, fixture.bean_object, &[long]),
+        "java/lang/NoSuchMethodException",
+        "Bean.<init>(J)",
+    );
+    assert_lookup_miss(
         &fixture,
-        fixture.bean_object,
-        &[int, int]
-    )));
+        declared_constructor(&fixture, fixture.bean_object, &[int, int]),
+        "java/lang/NoSuchMethodException",
+        "Bean.<init>(I, I)",
+    );
 
     // A named field query uses a name only, so it is unaffected by primitive types.
     let value = ref_value(
@@ -1398,10 +1412,25 @@ fn named_lookup_matches_primitive_parameter_classes() {
     );
     assert_eq!(member_of(&fixture, value).descriptor, "I");
 
-    // A primitive receiver declares nothing, so both member queries are misses.
-    assert!(is_null(declared_method(&fixture, int, "setValue", &[int])));
-    assert!(is_null(declared_constructor(&fixture, int, &[])));
-    assert!(is_null(declared_constructor(&fixture, void, &[])));
+    // A primitive receiver declares nothing, so its named lookups raise too.
+    assert_lookup_miss(
+        &fixture,
+        declared_method(&fixture, int, "setValue", &[int]),
+        "java/lang/NoSuchMethodException",
+        "int.setValue(I)",
+    );
+    assert_lookup_miss(
+        &fixture,
+        declared_constructor(&fixture, int, &[]),
+        "java/lang/NoSuchMethodException",
+        "int.<init>()",
+    );
+    assert_lookup_miss(
+        &fixture,
+        declared_constructor(&fixture, void, &[]),
+        "java/lang/NoSuchMethodException",
+        "void.<init>()",
+    );
 }
 
 #[test]

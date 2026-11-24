@@ -25,7 +25,9 @@
 //!
 //! A member object whose declaration is absent from its class file has no flags to
 //! report, so the predicate natives answer with a typed `VmError::Native` rather than a
-//! fabricated `false`; a named lookup miss stays `null`, the M2.14 behavior.
+//! fabricated `false`; a named lookup miss raises the JDK's
+//! `NoSuchMethodException`/`NoSuchFieldException` (M2.30), which this fixture's compiled
+//! catch clauses observe.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -33,7 +35,7 @@ use std::sync::Arc;
 use rava_interp::{InterpError, run_static_method};
 use rava_vm::{
     ClassId, DirectorySource, LoaderId, ObjRef, Shared, ThreadState, Value, VmError, arrays, boxed,
-    collections, instance, object, reflection, string,
+    collections, exceptions, instance, object, reflection, string,
 };
 
 const PROBE: &str = "demo/FlagsProbe";
@@ -85,6 +87,7 @@ fn fixture() -> Fixture {
     boxed::register_natives(&shared);
     arrays::register_natives(&shared);
     reflection::register_natives(&shared);
+    exceptions::register_natives(&shared);
     rava_interp::callbacks::register_natives(&shared);
     let loader = shared
         .add_loader(
@@ -481,16 +484,30 @@ fn a_member_missing_from_its_class_file_is_a_typed_native_error() {
 }
 
 #[test]
-fn a_named_lookup_miss_stays_null() {
+fn a_named_lookup_miss_is_caught_by_the_compiled_fixture() {
     let fixture = fixture();
-    match ok_call(
+    // `missingMethod` catches `NoSuchMethodException` and wraps it in an
+    // `IllegalStateException`; the catch is only reached when the lookup throws, so an
+    // uncaught `IllegalStateException` is the proof the typed miss crossed the native ABI.
+    match call(
         &fixture,
         "missingMethod",
         "()Ljava/lang/reflect/Method;",
         Vec::new(),
     ) {
-        Some(Value::Ref(reference)) => assert!(reference.is_null()),
-        other => panic!("expected a null Method, found {other:?}"),
+        Err(InterpError::Thrown(throwable)) => {
+            let class = fixture
+                .shared
+                .heap()
+                .object_class(throwable)
+                .expect("the throwable has a class");
+            assert_eq!(
+                fixture.shared.entry(class).expect("a loaded class").name,
+                "java/lang/IllegalStateException",
+                "the fixture's catch clause did not observe the lookup miss"
+            );
+        }
+        other => panic!("expected the caught lookup miss to be rethrown, found {other:?}"),
     }
 }
 

@@ -517,7 +517,44 @@ impl Shared {
                 return Ok(Some(Value::Ref(self.primitive_class(kind))));
             }
         }
+        // The VM does not run an enum class's `<clinit>`, which is where javac stores each
+        // constant, so a static field of the enum's own type resolves to the canonical
+        // enum-constant object. Compiled code that reads `TimeUnit.MILLISECONDS` (or any
+        // other enum constant) therefore sees a real object, and two reads of the same
+        // constant are reference-identical.
+        if let Some(value) = self.enum_static_constant(&entry, name, descriptor)? {
+            return Ok(Some(value));
+        }
         Ok(None)
+    }
+
+    /// The canonical enum object for a static constant field of an enum class.
+    ///
+    /// Only a static field whose descriptor is `L<this class>;` on an `ACC_ENUM` class is
+    /// treated as a constant: that is exactly the shape javac emits for one, and any
+    /// other absent static stays absent so the missing value is still reported.
+    fn enum_static_constant(
+        &self,
+        entry: &crate::loader::ClassEntry,
+        name: &str,
+        descriptor: &str,
+    ) -> Result<Option<Value>, VmError> {
+        let metadata = entry.metadata()?;
+        if !metadata.is_enum() {
+            return Ok(None);
+        }
+        let own_descriptor = format!("L{};", entry.name);
+        if descriptor != own_descriptor {
+            return Ok(None);
+        }
+        let Some(field) = metadata.field(name) else {
+            return Ok(None);
+        };
+        if !field.is_static() {
+            return Ok(None);
+        }
+        let object = self.enum_constant(entry.id, name)?;
+        Ok(Some(Value::Ref(object)))
     }
 
     /// The `java.lang.reflect.Type` object for one structural type, allocated on first

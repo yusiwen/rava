@@ -13,7 +13,10 @@
 //! query matches a field by name and an executable by name plus parameter descriptors,
 //! `get*` walks the superclass chain and interfaces while `getDeclared*` stays on the
 //! receiver, and every hit is the same cached member object the `getDeclared*`
-//! array queries return. M2.15 adds primitive class objects: `Class.forName("int")`
+//! array queries return. M2.30 makes a miss the JDK's typed exception: a field query
+//! throws `NoSuchFieldException` and a method or constructor query throws
+//! `NoSuchMethodException`, with the receiver class, member name and parameter
+//! descriptors in the message (see [`lookup_miss`]). M2.15 adds primitive class objects: `Class.forName("int")`
 //! returns the cached [`crate::HeapObject::PrimitiveClass`] object, `getName`,
 //! `getModifiers`, `isPrimitive`, `isArray`, `getSuperclass` and `getComponentType`
 //! answer for it, a primitive descriptor resolves to it in `Field.getType`,
@@ -73,6 +76,9 @@ const CONSTRUCTOR_MODIFIERS: u16 = 0x0007;
 /// `Class.getModifiers()` for an array class: `Modifier.PUBLIC | Modifier.ABSTRACT |
 /// Modifier.FINAL`, the same `0x0411` every primitive reports on the reference JDK.
 const ARRAY_MODIFIERS: u16 = 0x0411;
+
+/// `ACC_PUBLIC` (JVMS §4.1).
+const ACC_PUBLIC: u16 = 0x0001;
 
 /// `ACC_INTERFACE` (JVMS §4.1).
 const ACC_INTERFACE: u16 = 0x0200;
@@ -229,6 +235,12 @@ pub fn register_natives(shared: &Shared) {
         "getDeclaredClasses",
         "()[Ljava/lang/Class;",
         class_get_declared_classes,
+    );
+    shared.register_native(
+        "java/lang/Class",
+        "getClasses",
+        "()[Ljava/lang/Class;",
+        class_get_classes,
     );
     shared.register_native(
         "java/lang/Class",
@@ -1269,7 +1281,7 @@ fn class_get_declared_constructors(
 /// is the JDK's "declared as a member" rule. Each row's internal name is resolved through
 /// this class's defining loader and returned as its cached class object. A primitive or
 /// array class has no class file, so it declares no member class and gets an empty
-/// `Class[]`.
+/// `Class[]`. An empty result is an empty array, never a lookup exception.
 fn class_get_declared_classes(
     shared: &Shared,
     _thread: &ThreadState,
@@ -1277,41 +1289,92 @@ fn class_get_declared_classes(
     receiver: ObjRef,
     _args: &[Value],
 ) -> Result<Option<Value>, VmError> {
-    let class = match class_object_of(shared, receiver)? {
-        ClassObject::Named(class) => Some(class),
-        ClassObject::Primitive(_) | ClassObject::Array(_) => None,
+    let objects = match class_object_of(shared, receiver)? {
+        ClassObject::Named(class) => declared_class_objects(shared, class, false)?,
+        ClassObject::Primitive(_) | ClassObject::Array(_) => Vec::new(),
     };
+    let component = shared.load_library_class("java/lang/Class")?;
+    let array = allocate_reference_array(shared, ClassRef::Named(component), &objects)?;
+    Ok(Some(Value::Ref(array)))
+}
+
+/// `Class.getClasses()`: the public member classes of this class and its superclasses.
+///
+/// The JDK walks the superclass chain and keeps the public member classes; an interface
+/// does not follow its class file's `Object` superclass, so only its own members count.
+/// As with [`class_get_declared_classes`], a member class outside the C1 tree is skipped
+/// and an empty result is an empty array.
+fn class_get_classes(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    _args: &[Value],
+) -> Result<Option<Value>, VmError> {
     let mut objects = Vec::new();
-    if let Some(class) = class {
-        let (loader, binary_name, inner) = {
+    if let ClassObject::Named(class) = class_object_of(shared, receiver)? {
+        let is_interface = {
             let entry = shared
                 .entry(class)
                 .ok_or_else(|| VmError::Loader(format!("class id {} is not loaded", class.0)))?;
-            let metadata = entry.metadata()?;
-            (
-                entry.loader,
-                metadata.binary_name.clone(),
-                metadata.inner_classes,
-            )
+            entry.metadata()?.is_interface()
         };
-        for row in inner {
-            if row.outer_class.as_deref() != Some(binary_name.as_str()) {
-                continue;
-            }
-            let member = match shared.load_class(loader, &row.inner_class) {
-                Ok(member) => member,
-                // The C1 tree is the pinned manifest's subset of the JDK, so a member class
-                // outside it has no committed class file even though the JDK would return
-                // it. Skip only that row rather than failing the whole query.
-                Err(VmError::ClassNotFound { .. }) => continue,
-                Err(error) => return Err(error),
+        let mut current = Some(class);
+        while let Some(class) = current {
+            objects.extend(declared_class_objects(shared, class, true)?);
+            current = if is_interface {
+                None
+            } else {
+                shared.resolution_superclass(class)?
             };
-            objects.push(shared.class_object(member)?);
         }
     }
     let component = shared.load_library_class("java/lang/Class")?;
     let array = allocate_reference_array(shared, ClassRef::Named(component), &objects)?;
     Ok(Some(Value::Ref(array)))
+}
+
+/// The cached class objects of the member classes `class` declares.
+///
+/// `public_only` filters on the `InnerClasses` row's access flags, which is the
+/// declaration's public bit (the loaded class file's own header does not carry a member
+/// class's private/protected flags). A row whose class the C1 tree omits is skipped: the
+/// tree is the pinned manifest's subset, not the whole JDK.
+fn declared_class_objects(
+    shared: &Shared,
+    class: ClassId,
+    public_only: bool,
+) -> Result<Vec<ObjRef>, VmError> {
+    let (loader, binary_name, inner) = {
+        let entry = shared
+            .entry(class)
+            .ok_or_else(|| VmError::Loader(format!("class id {} is not loaded", class.0)))?;
+        let metadata = entry.metadata()?;
+        (
+            entry.loader,
+            metadata.binary_name.clone(),
+            metadata.inner_classes,
+        )
+    };
+    let mut objects = Vec::new();
+    for row in inner {
+        if row.outer_class.as_deref() != Some(binary_name.as_str()) {
+            continue;
+        }
+        if public_only && row.access_flags & ACC_PUBLIC == 0 {
+            continue;
+        }
+        let member = match shared.load_class(loader, &row.inner_class) {
+            Ok(member) => member,
+            // The C1 tree is the pinned manifest's subset of the JDK, so a member class
+            // outside it has no committed class file even though the JDK would return
+            // it. Skip only that row rather than failing the whole query.
+            Err(VmError::ClassNotFound { .. }) => continue,
+            Err(error) => return Err(error),
+        };
+        objects.push(shared.class_object(member)?);
+    }
+    Ok(objects)
 }
 
 /// Build a `Field[]`, `Method[]` or `Constructor[]` in class-file order.
@@ -1406,16 +1469,34 @@ struct FoundMember {
     descriptor: String,
 }
 
-/// The loaded class behind a member-query receiver, or `None` for a primitive or array.
+/// The exception a named lookup raises when it finds no member.
 ///
-/// A primitive or array class object declares no members, so a named lookup on it is a
-/// miss; the JDK's `NoSuchFieldException`/`NoSuchMethodException` is still represented as
-/// the documented `null` miss in this slice.
-fn named_receiver(shared: &Shared, receiver: ObjRef) -> Result<Option<ClassId>, VmError> {
-    Ok(match class_object_of(shared, receiver)? {
-        ClassObject::Named(class) => Some(class),
-        ClassObject::Primitive(_) | ClassObject::Array(_) => None,
-    })
+/// The JDK throws `NoSuchFieldException` for a field query and `NoSuchMethodException`
+/// for a method or constructor query. The message names the receiver class, the member
+/// name and, for an executable, the parameter descriptors. The throwable is a real
+/// `java.lang` object built through [`crate::exceptions::new_throwable`], so a compiled
+/// catch clause catches it, `getMessage()` reads the message, and a miss on a primitive or
+/// array class object (`int.class.getDeclaredMethod(...)`) behaves like the JDK too.
+fn lookup_miss(
+    shared: &Shared,
+    class: &ClassObject,
+    kind: MemberKind,
+    name: &str,
+    parameters: &[String],
+) -> Result<Option<Value>, VmError> {
+    let class_name = shared.class_ref_name(&class.class_ref())?;
+    let (exception, message) = match kind {
+        MemberKind::Field => (
+            "java/lang/NoSuchFieldException",
+            format!("{class_name}.{name}"),
+        ),
+        MemberKind::Method | MemberKind::Constructor => (
+            "java/lang/NoSuchMethodException",
+            format!("{class_name}.{name}({})", parameters.join(", ")),
+        ),
+    };
+    let throwable = crate::exceptions::new_throwable(shared, exception, message)?;
+    Err(VmError::Thrown(throwable))
 }
 
 fn class_get_declared_field(
@@ -1426,11 +1507,13 @@ fn class_get_declared_field(
     args: &[Value],
 ) -> Result<Option<Value>, VmError> {
     let name = lookup_name(shared, args, 0, "Class.getDeclaredField")?;
-    let Some(class) = named_receiver(shared, receiver)? else {
-        return Ok(Some(Value::Ref(ObjRef::NULL)));
-    };
-    let found = find_declared_field(shared, class, &name)?;
-    member_value(shared, found, MemberKind::Field)
+    let class = class_object_of(shared, receiver)?;
+    if let ClassObject::Named(class) = class {
+        if let Some(found) = find_declared_field(shared, class, &name)? {
+            return member_value(shared, found, MemberKind::Field);
+        }
+    }
+    lookup_miss(shared, &class, MemberKind::Field, &name, &[])
 }
 
 fn class_get_field(
@@ -1441,15 +1524,15 @@ fn class_get_field(
     args: &[Value],
 ) -> Result<Option<Value>, VmError> {
     let name = lookup_name(shared, args, 0, "Class.getField")?;
-    let Some(class) = named_receiver(shared, receiver)? else {
-        return Ok(Some(Value::Ref(ObjRef::NULL)));
-    };
-    for candidate in lookup_order(shared, class)? {
-        if let Some(found) = find_declared_field(shared, candidate, &name)? {
-            return member_value(shared, Some(found), MemberKind::Field);
+    let class = class_object_of(shared, receiver)?;
+    if let ClassObject::Named(class) = class {
+        for candidate in lookup_order(shared, class)? {
+            if let Some(found) = find_declared_field(shared, candidate, &name)? {
+                return member_value(shared, found, MemberKind::Field);
+            }
         }
     }
-    Ok(Some(Value::Ref(ObjRef::NULL)))
+    lookup_miss(shared, &class, MemberKind::Field, &name, &[])
 }
 
 fn class_get_declared_method(
@@ -1461,11 +1544,13 @@ fn class_get_declared_method(
 ) -> Result<Option<Value>, VmError> {
     let name = lookup_name(shared, args, 0, "Class.getDeclaredMethod")?;
     let parameters = parameter_class_descriptors(shared, args, 1, "Class.getDeclaredMethod")?;
-    let Some(class) = named_receiver(shared, receiver)? else {
-        return Ok(Some(Value::Ref(ObjRef::NULL)));
-    };
-    let found = find_declared_method(shared, class, &name, &parameters)?;
-    member_value(shared, found, MemberKind::Method)
+    let class = class_object_of(shared, receiver)?;
+    if let ClassObject::Named(class) = class {
+        if let Some(found) = find_declared_method(shared, class, &name, &parameters)? {
+            return member_value(shared, found, MemberKind::Method);
+        }
+    }
+    lookup_miss(shared, &class, MemberKind::Method, &name, &parameters)
 }
 
 fn class_get_method(
@@ -1477,15 +1562,15 @@ fn class_get_method(
 ) -> Result<Option<Value>, VmError> {
     let name = lookup_name(shared, args, 0, "Class.getMethod")?;
     let parameters = parameter_class_descriptors(shared, args, 1, "Class.getMethod")?;
-    let Some(class) = named_receiver(shared, receiver)? else {
-        return Ok(Some(Value::Ref(ObjRef::NULL)));
-    };
-    for candidate in lookup_order(shared, class)? {
-        if let Some(found) = find_declared_method(shared, candidate, &name, &parameters)? {
-            return member_value(shared, Some(found), MemberKind::Method);
+    let class = class_object_of(shared, receiver)?;
+    if let ClassObject::Named(class) = class {
+        for candidate in lookup_order(shared, class)? {
+            if let Some(found) = find_declared_method(shared, candidate, &name, &parameters)? {
+                return member_value(shared, found, MemberKind::Method);
+            }
         }
     }
-    Ok(Some(Value::Ref(ObjRef::NULL)))
+    lookup_miss(shared, &class, MemberKind::Method, &name, &parameters)
 }
 
 fn class_get_declared_constructor(
@@ -1496,11 +1581,19 @@ fn class_get_declared_constructor(
     args: &[Value],
 ) -> Result<Option<Value>, VmError> {
     let parameters = parameter_class_descriptors(shared, args, 0, "Class.getDeclaredConstructor")?;
-    let Some(class) = named_receiver(shared, receiver)? else {
-        return Ok(Some(Value::Ref(ObjRef::NULL)));
-    };
-    let found = find_declared_constructor(shared, class, &parameters)?;
-    member_value(shared, found, MemberKind::Constructor)
+    let class = class_object_of(shared, receiver)?;
+    if let ClassObject::Named(class) = class {
+        if let Some(found) = find_declared_constructor(shared, class, &parameters)? {
+            return member_value(shared, found, MemberKind::Constructor);
+        }
+    }
+    lookup_miss(
+        shared,
+        &class,
+        MemberKind::Constructor,
+        "<init>",
+        &parameters,
+    )
 }
 
 /// `Class.getConstructor`: constructors are not inherited, so the lookup is the declared
@@ -1514,11 +1607,19 @@ fn class_get_constructor(
     args: &[Value],
 ) -> Result<Option<Value>, VmError> {
     let parameters = parameter_class_descriptors(shared, args, 0, "Class.getConstructor")?;
-    let Some(class) = named_receiver(shared, receiver)? else {
-        return Ok(Some(Value::Ref(ObjRef::NULL)));
-    };
-    let found = find_declared_constructor(shared, class, &parameters)?;
-    member_value(shared, found, MemberKind::Constructor)
+    let class = class_object_of(shared, receiver)?;
+    if let ClassObject::Named(class) = class {
+        if let Some(found) = find_declared_constructor(shared, class, &parameters)? {
+            return member_value(shared, found, MemberKind::Constructor);
+        }
+    }
+    lookup_miss(
+        shared,
+        &class,
+        MemberKind::Constructor,
+        "<init>",
+        &parameters,
+    )
 }
 
 /// The `String` name argument of a field lookup.
@@ -1743,17 +1844,13 @@ fn parameter_match(descriptor: &str, parameters: &[String]) -> Result<bool, VmEr
 
 /// Turn a found member into its cached `Field`/`Method`/`Constructor` object.
 ///
-/// A miss is `null`, which is the result this slice documents for every lookup miss. The
-/// JDK throws `NoSuchFieldException`/`NoSuchMethodException`, but this slice does not
-/// synthesize exception objects, so `null` is the honest, testable result here.
+/// A miss never reaches this function: the six named lookups raise the JDK's
+/// `NoSuchFieldException`/`NoSuchMethodException` through [`lookup_miss`] instead.
 fn member_value(
     shared: &Shared,
-    found: Option<FoundMember>,
+    found: FoundMember,
     kind: MemberKind,
 ) -> Result<Option<Value>, VmError> {
-    let Some(found) = found else {
-        return Ok(Some(Value::Ref(ObjRef::NULL)));
-    };
     let reference = shared.reflect_member(found.class, kind, &found.name, &found.descriptor)?;
     Ok(Some(Value::Ref(reference)))
 }

@@ -112,6 +112,15 @@ pub fn register_natives(shared: &Shared) {
         "(Ljava/util/Map;)V",
         map_init_from,
     );
+    // A `TreeMap(Comparator)` is accepted for signature compatibility. This VM's maps are
+    // insertion-ordered, not sorted, so the comparator is validated but not retained; the
+    // no-argument `TreeMap()` constructor is part of `register_map_surface`.
+    shared.register_native(
+        TREE_MAP_CLASS,
+        "<init>",
+        "(Ljava/util/Comparator;)V",
+        map_init_comparator,
+    );
     shared.register_native(
         CONCURRENT_HASH_MAP_CLASS,
         "newKeySet",
@@ -530,6 +539,28 @@ fn map_init_capacity(
         return Err(VmError::Native(format!(
             "Map.<init>: negative capacity {capacity}"
         )));
+    }
+    let heap = shared.heap();
+    entries(&heap, receiver, "Map.<init>")?;
+    Ok(None)
+}
+
+/// `TreeMap.<init>(Comparator)V`: accept the ordering comparator.
+///
+/// The VM's maps are insertion-ordered (M2.13), so the comparator is validated as a
+/// non-null reference but not retained; sorted iteration is not modelled yet.
+fn map_init_comparator(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let comparator = reference_argument(args, 0, "Map.<init>")?;
+    if comparator.is_null() {
+        return Err(VmError::Native(
+            "Map.<init> received a null Comparator".to_owned(),
+        ));
     }
     let heap = shared.heap();
     entries(&heap, receiver, "Map.<init>")?;

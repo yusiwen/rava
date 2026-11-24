@@ -48,6 +48,25 @@ const THROWABLE_CLASSES: &[&str] = &[
     "java/util/ConcurrentModificationException",
 ];
 
+/// Allocate a throwable of `class_name` and record `message` as its detail message.
+///
+/// This is how a native raises a Java exception it has to synthesize itself: the class is
+/// loaded from the class library (so it has the same `ClassId` a compiled `catch` resolves
+/// to), an ordinary instance is allocated, and the message goes into the same side table
+/// [`throwable_init`] writes. No Java constructor runs — the C1 stubs have
+/// no `Code` — but the object then answers `getMessage`/`toString` and `athrow` matches it
+/// exactly like a constructed throwable.
+pub fn new_throwable(
+    shared: &Shared,
+    class_name: &str,
+    message: String,
+) -> Result<ObjRef, VmError> {
+    let class = shared.load_library_class(class_name)?;
+    let object = shared.allocate_instance(class)?;
+    shared.set_throwable_message(object, message);
+    Ok(object)
+}
+
 pub fn register_natives(shared: &Shared) {
     for &class in THROWABLE_CLASSES {
         for descriptor in [

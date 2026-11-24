@@ -12,7 +12,8 @@
 //! primitive class object, a named class object or a nested array class object. The
 //! documented boundaries are asserted too: a malformed array descriptor and a named
 //! component that the bootstrap loader does not define are typed errors, an array class
-//! declares no members, and a lookup miss is null.
+//! declares no members, and a lookup miss raises the JDK's typed
+//! `NoSuchFieldException`/`NoSuchMethodException` (M2.30).
 
 use std::path::PathBuf;
 
@@ -828,10 +829,32 @@ fn bool_value(value: Option<Value>) -> bool {
     int_value(value) != 0
 }
 
-fn is_null(result: Result<Option<Value>, InterpError>) -> bool {
-    match result.unwrap_or_else(|error| panic!("lookup failed: {error}")) {
-        Some(Value::Ref(reference)) => reference.is_null(),
-        other => panic!("expected a reference result, found {other:?}"),
+/// Assert that a lookup raised `exception` with exactly `message`.
+fn assert_lookup_miss(
+    fixture: &Fixture,
+    result: Result<Option<Value>, InterpError>,
+    exception: &str,
+    message: &str,
+) {
+    match result {
+        Err(InterpError::Thrown(throwable)) => {
+            let class = fixture
+                .shared
+                .heap()
+                .object_class(throwable)
+                .expect("the throwable has a class");
+            assert_eq!(
+                fixture.shared.entry(class).expect("a loaded class").name,
+                exception,
+                "the lookup miss threw the wrong class"
+            );
+            assert_eq!(
+                fixture.shared.throwable_message(throwable).as_deref(),
+                Some(message),
+                "the lookup miss carried the wrong message"
+            );
+        }
+        other => panic!("expected a thrown {exception} ({message}), found {other:?}"),
     }
 }
 
@@ -1601,43 +1624,49 @@ fn named_lookup_matches_array_parameter_classes() {
         ref_value(declared_method(&fixture, fixture.bean_object, "count", &[int_array]).unwrap());
     assert_eq!(member_of(&fixture, count).descriptor, "([I)I");
 
-    // Mismatches are the documented null miss.
-    assert!(is_null(declared_method(
+    // Mismatches raise NoSuchMethodException (M2.30), naming the receiver class and the
+    // exact array/primitive descriptors that were asked for.
+    assert_lookup_miss(
         &fixture,
-        fixture.bean_object,
-        "echo",
-        &[string_array]
-    )));
-    assert!(is_null(declared_method(
+        declared_method(&fixture, fixture.bean_object, "echo", &[string_array]),
+        "java/lang/NoSuchMethodException",
+        "Bean.echo([Ljava/lang/String;)",
+    );
+    assert_lookup_miss(
         &fixture,
-        fixture.bean_object,
-        "echo",
-        &[long_array]
-    )));
-    assert!(is_null(declared_method(
+        declared_method(&fixture, fixture.bean_object, "echo", &[long_array]),
+        "java/lang/NoSuchMethodException",
+        "Bean.echo([J)",
+    );
+    assert_lookup_miss(
         &fixture,
-        fixture.bean_object,
-        "echo",
-        &[int_primitive]
-    )));
-    assert!(is_null(declared_method(
+        declared_method(&fixture, fixture.bean_object, "echo", &[int_primitive]),
+        "java/lang/NoSuchMethodException",
+        "Bean.echo(I)",
+    );
+    assert_lookup_miss(
         &fixture,
-        fixture.bean_object,
-        "echo",
-        &[]
-    )));
-    assert!(is_null(declared_method(
+        declared_method(&fixture, fixture.bean_object, "echo", &[]),
+        "java/lang/NoSuchMethodException",
+        "Bean.echo()",
+    );
+    assert_lookup_miss(
         &fixture,
-        fixture.bean_object,
-        "echo",
-        &[int_array, int_array]
-    )));
-    assert!(is_null(declared_method(
+        declared_method(
+            &fixture,
+            fixture.bean_object,
+            "echo",
+            &[int_array, int_array],
+        ),
+        "java/lang/NoSuchMethodException",
+        "Bean.echo([I, [I)",
+    );
+    assert_lookup_miss(
         &fixture,
-        fixture.bean_object,
-        "count",
-        &[string_array]
-    )));
+        declared_method(&fixture, fixture.bean_object, "count", &[string_array]),
+        "java/lang/NoSuchMethodException",
+        "Bean.count([Ljava/lang/String;)",
+    );
 
     // `getMethod` accepts the same array `Class[]` and returns the same cached object.
     assert_eq!(
@@ -1665,23 +1694,27 @@ fn named_lookup_matches_array_parameter_classes() {
         member_of(&fixture, both_constructor).descriptor,
         "([I[Ljava/lang/String;)V"
     );
-    assert!(is_null(declared_constructor(
+    assert_lookup_miss(
         &fixture,
-        fixture.bean_object,
-        &[string_array]
-    )));
-    assert!(is_null(declared_constructor(
+        declared_constructor(&fixture, fixture.bean_object, &[string_array]),
+        "java/lang/NoSuchMethodException",
+        "Bean.<init>([Ljava/lang/String;)",
+    );
+    assert_lookup_miss(
         &fixture,
-        fixture.bean_object,
-        &[long_array]
-    )));
-    assert!(is_null(declared_constructor(
+        declared_constructor(&fixture, fixture.bean_object, &[long_array]),
+        "java/lang/NoSuchMethodException",
+        "Bean.<init>([J)",
+    );
+    assert_lookup_miss(
         &fixture,
-        fixture.bean_object,
-        &[int_array, int_array]
-    )));
+        declared_constructor(&fixture, fixture.bean_object, &[int_array, int_array]),
+        "java/lang/NoSuchMethodException",
+        "Bean.<init>([I, [I)",
+    );
 
-    // An array class declares no members, exactly as on the JDK.
+    // An array class declares no members, exactly as on the JDK, so its named lookups
+    // raise the same typed exceptions.
     let fields = ref_value(
         call_class(
             &fixture,
@@ -1693,24 +1726,30 @@ fn named_lookup_matches_array_parameter_classes() {
         .unwrap(),
     );
     assert!(array_elements(&fixture.shared, fields).is_empty());
-    assert!(is_null(declared_method(
+    assert_lookup_miss(
         &fixture,
-        int_array,
-        "echo",
-        &[int_array]
-    )));
-    assert!(is_null(declared_constructor(
+        declared_method(&fixture, int_array, "echo", &[int_array]),
+        "java/lang/NoSuchMethodException",
+        "[I.echo([I)",
+    );
+    assert_lookup_miss(
         &fixture,
-        int_array,
-        &[int_array]
-    )));
-    assert!(is_null(call_class(
+        declared_constructor(&fixture, int_array, &[int_array]),
+        "java/lang/NoSuchMethodException",
+        "[I.<init>([I)",
+    );
+    assert_lookup_miss(
         &fixture,
-        int_array,
-        "getDeclaredField",
-        DECLARED_FIELD,
-        vec![name_value(&fixture, "length")],
-    )));
+        call_class(
+            &fixture,
+            int_array,
+            "getDeclaredField",
+            DECLARED_FIELD,
+            vec![name_value(&fixture, "length")],
+        ),
+        "java/lang/NoSuchFieldException",
+        "[I.length",
+    );
 }
 
 #[test]

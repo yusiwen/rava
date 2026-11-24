@@ -29,6 +29,18 @@ use crate::{InterpError, lambda, run_instance_method};
 /// The `Function.apply(Object)Object` descriptor.
 const FUNCTION_APPLY: &str = "(Ljava/lang/Object;)Ljava/lang/Object;";
 
+/// The `BiFunction.apply(Object, Object)Object` descriptor.
+const BI_FUNCTION_APPLY: &str = "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;";
+
+/// `Map.replaceAll(BiFunction)V`.
+const MAP_REPLACE_ALL: &str = "(Ljava/util/function/BiFunction;)V";
+
+/// The `BiConsumer.accept(Object, Object)V` descriptor.
+const BI_CONSUMER_ACCEPT: &str = "(Ljava/lang/Object;Ljava/lang/Object;)V";
+
+/// `Map.forEach(BiConsumer)V`.
+const MAP_FOR_EACH: &str = "(Ljava/util/function/BiConsumer;)V";
+
 /// The `Comparator.compare(Object, Object)int` descriptor.
 const COMPARATOR_COMPARE: &str = "(Ljava/lang/Object;Ljava/lang/Object;)I";
 
@@ -62,6 +74,15 @@ const REVERSED_TARGET_NAME: &str = "reversed$";
 /// The reversed target's descriptor: the wrapped comparator plus the two compared values.
 const REVERSED_TARGET: &str = "(Ljava/util/Comparator;Ljava/lang/Object;Ljava/lang/Object;)I";
 
+/// The registry name of the native lambda target `Comparator.naturalOrder` returns.
+const NATURAL_ORDER_TARGET_NAME: &str = "naturalOrder$";
+
+/// The registry name of the native lambda target `Comparator.reverseOrder` returns.
+const REVERSE_ORDER_TARGET_NAME: &str = "reverseOrder$";
+
+/// A natural-order target's descriptor: the two compared values.
+const NATURAL_ORDER_TARGET: &str = "(Ljava/lang/Object;Ljava/lang/Object;)I";
+
 pub fn register_natives(shared: &Shared) {
     for class in [
         "java/util/concurrent/ConcurrentHashMap",
@@ -77,6 +98,30 @@ pub fn register_natives(shared: &Shared) {
             compute_if_absent,
         );
     }
+    // `Map.replaceAll` is a default method on `Map`, overridden by `HashMap`; the C1 stubs
+    // declare it on each concrete map class, so every declaration site is registered.
+    for class in [
+        "java/util/Map",
+        "java/util/HashMap",
+        "java/util/LinkedHashMap",
+        "java/util/TreeMap",
+        "java/util/IdentityHashMap",
+        "java/util/concurrent/ConcurrentHashMap",
+        "java/util/Hashtable",
+        "java/util/Properties",
+    ] {
+        shared.register_native(class, "replaceAll", MAP_REPLACE_ALL, map_replace_all);
+        shared.register_native(class, "forEach", MAP_FOR_EACH, map_for_each);
+    }
+    // `AbstractMap.isEmpty` is `size() == 0`. A custom Java map subclass that does not
+    // override it inherits this declaration, so the native asks the receiver's own
+    // `size()`; a VM map is served by its concrete class's registration instead.
+    shared.register_native(
+        "java/util/AbstractMap",
+        "isEmpty",
+        "()Z",
+        abstract_map_is_empty,
+    );
     shared.register_native(
         "java/util/Comparator",
         "comparingInt",
@@ -100,6 +145,30 @@ pub fn register_natives(shared: &Shared) {
         REVERSED_TARGET_NAME,
         REVERSED_TARGET,
         comparator_reversed_compare,
+    );
+    shared.register_native(
+        "java/util/Comparator",
+        "naturalOrder",
+        "()Ljava/util/Comparator;",
+        comparator_natural_order,
+    );
+    shared.register_native(
+        "java/util/Comparator",
+        NATURAL_ORDER_TARGET_NAME,
+        NATURAL_ORDER_TARGET,
+        comparator_natural_order_compare,
+    );
+    shared.register_native(
+        "java/util/Comparator",
+        "reverseOrder",
+        "()Ljava/util/Comparator;",
+        comparator_reverse_order,
+    );
+    shared.register_native(
+        "java/util/Comparator",
+        REVERSE_ORDER_TARGET_NAME,
+        NATURAL_ORDER_TARGET,
+        comparator_reverse_order_compare,
     );
     shared.register_native(
         "java/util/Arrays",
@@ -223,6 +292,199 @@ fn compute_if_absent(
         entries.push((key, computed));
     }
     Ok(Some(computed))
+}
+
+/// `Map.replaceAll(BiFunction)`: replace every value with `apply(key, value)`.
+///
+/// The entries are snapshotted before the callbacks run, so the function sees the map as
+/// it was when `replaceAll` was entered and the replacements are written back in the same
+/// order. A callback that throws leaves the throwable on the native ABI untouched, so a
+/// compiled caller's handler sees it exactly as on the JDK.
+fn map_replace_all(
+    shared: &Shared,
+    thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let function = reference_argument(args, 0, "Map.replaceAll")?;
+    if receiver.is_null() {
+        return Err(VmError::Native(
+            "Map.replaceAll was called on a null receiver".to_owned(),
+        ));
+    }
+    let entries = {
+        let heap = shared.heap();
+        heap.map(receiver)
+            .map_err(|error| {
+                VmError::Native(format!("Map.replaceAll receiver is not a map: {error}"))
+            })?
+            .to_vec()
+    };
+    let mut replaced = Vec::with_capacity(entries.len());
+    for (key, value) in entries {
+        let value = invoke_bi_apply(shared, thread, function, key, value)?;
+        replaced.push((key, value));
+    }
+    *shared.heap().map_mut(receiver).map_err(heap_error)? = replaced;
+    Ok(None)
+}
+
+/// Call a `BiFunction`, through a lambda object or the object's own `apply`.
+fn invoke_bi_apply(
+    shared: &Shared,
+    thread: &ThreadState,
+    function: ObjRef,
+    key: Value,
+    value: Value,
+) -> Result<Value, VmError> {
+    if function.is_null() {
+        return Err(VmError::Native(
+            "Map.replaceAll received a null BiFunction".to_owned(),
+        ));
+    }
+    let lambda = {
+        let heap = shared.heap();
+        match heap.get(function).map_err(heap_error)? {
+            HeapObject::Lambda(lambda) => Some(lambda.clone()),
+            _ => None,
+        }
+    };
+    if let Some(lambda) = lambda {
+        return lambda::invoke_sam(shared, thread, &lambda, vec![key, value])
+            .map_err(interp_to_vm)
+            .map(|value| value.unwrap_or(Value::Ref(ObjRef::NULL)));
+    }
+    let class = {
+        let heap = shared.heap();
+        heap.object_class(function).map_err(heap_error)?
+    };
+    let class = resolve_instance_class(shared, class, "apply", BI_FUNCTION_APPLY)?;
+    run_instance_method(
+        shared,
+        thread,
+        class,
+        "apply",
+        BI_FUNCTION_APPLY,
+        function,
+        vec![key, value],
+    )
+    .map_err(interp_to_vm)
+    .map(|value| value.unwrap_or(Value::Ref(ObjRef::NULL)))
+}
+
+/// `Map.forEach(BiConsumer)`: visit a snapshot of the entries.
+///
+/// The snapshot keeps the callback from observing a map that a previous callback mutated
+/// through the same receiver; nothing in this VM re-enters the map while the guard is
+/// held, because the guard is released before the first callback runs.
+fn map_for_each(
+    shared: &Shared,
+    thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let action = reference_argument(args, 0, "Map.forEach")?;
+    if receiver.is_null() {
+        return Err(VmError::Native(
+            "Map.forEach was called on a null receiver".to_owned(),
+        ));
+    }
+    let entries = {
+        let heap = shared.heap();
+        heap.map(receiver)
+            .map_err(|error| {
+                VmError::Native(format!("Map.forEach receiver is not a map: {error}"))
+            })?
+            .to_vec()
+    };
+    for (key, value) in entries {
+        invoke_bi_accept(shared, thread, action, key, value)?;
+    }
+    Ok(None)
+}
+
+/// Call a `BiConsumer`, through a lambda object or the object's own `accept`.
+fn invoke_bi_accept(
+    shared: &Shared,
+    thread: &ThreadState,
+    action: ObjRef,
+    key: Value,
+    value: Value,
+) -> Result<(), VmError> {
+    if action.is_null() {
+        return Err(VmError::Native(
+            "Map.forEach received a null BiConsumer".to_owned(),
+        ));
+    }
+    let lambda = {
+        let heap = shared.heap();
+        match heap.get(action).map_err(heap_error)? {
+            HeapObject::Lambda(lambda) => Some(lambda.clone()),
+            _ => None,
+        }
+    };
+    if let Some(lambda) = lambda {
+        lambda::invoke_sam(shared, thread, &lambda, vec![key, value]).map_err(interp_to_vm)?;
+        return Ok(());
+    }
+    let class = {
+        let heap = shared.heap();
+        heap.object_class(action).map_err(heap_error)?
+    };
+    let class = resolve_instance_class(shared, class, "accept", BI_CONSUMER_ACCEPT)?;
+    run_instance_method(
+        shared,
+        thread,
+        class,
+        "accept",
+        BI_CONSUMER_ACCEPT,
+        action,
+        vec![key, value],
+    )
+    .map_err(interp_to_vm)?;
+    Ok(())
+}
+
+/// `AbstractMap.isEmpty`: `size() == 0`, asked of the receiver's own `size()`.
+fn abstract_map_is_empty(
+    shared: &Shared,
+    thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    _args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    if receiver.is_null() {
+        return Err(VmError::Native(
+            "AbstractMap.isEmpty was called on a null receiver".to_owned(),
+        ));
+    }
+    let size = call_instance(shared, thread, receiver, "size", "()I", Vec::new())?;
+    match size {
+        Some(Value::Int(value)) => Ok(Some(Value::Int(i32::from(value == 0)))),
+        _ => Err(VmError::Native(
+            "AbstractMap.isEmpty: size() did not return an int".to_owned(),
+        )),
+    }
+}
+
+/// Run an instance method on a receiver, resolving it down the receiver's class chain.
+fn call_instance(
+    shared: &Shared,
+    thread: &ThreadState,
+    receiver: ObjRef,
+    name: &str,
+    descriptor: &str,
+    args: Vec<Value>,
+) -> Result<Option<Value>, VmError> {
+    let class = {
+        let heap = shared.heap();
+        heap.object_class(receiver).map_err(heap_error)?
+    };
+    let class = resolve_instance_class(shared, class, name, descriptor)?;
+    run_instance_method(shared, thread, class, name, descriptor, receiver, args)
+        .map_err(interp_to_vm)
 }
 
 /// `Iterable.forEach(Consumer)`: visit a snapshot of a list or set.
@@ -592,4 +854,88 @@ fn comparator_reversed_compare(
     let ordering = invoke_compare(shared, thread, inner, Value::Ref(left), Value::Ref(right))?;
     // `Collections.reverseOrder` negates the result, which wraps like Java's `-`.
     Ok(Some(Value::Int(ordering.wrapping_neg())))
+}
+
+/// `Comparator.naturalOrder()`: a comparator over the two values' natural ordering.
+///
+/// Like `comparingInt`, the JDK's returned comparator has a synthetic body that has no
+/// class file here, so it is a lambda whose [`LambdaTargetKind::Native`] target compares
+/// the two values through the same natural-order rule `Stream.sorted()` uses.
+fn comparator_natural_order(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    _args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let comparator = shared.load_library_class("java/util/Comparator")?;
+    let lambda = shared.allocate_lambda(LambdaObject {
+        interface: comparator,
+        sam_name: "compare".to_owned(),
+        sam_descriptor: COMPARATOR_INT_COMPARE.to_owned(),
+        instantiated_descriptor: COMPARATOR_INT_COMPARE.to_owned(),
+        target: LambdaTarget {
+            class: comparator,
+            name: NATURAL_ORDER_TARGET_NAME.to_owned(),
+            descriptor: NATURAL_ORDER_TARGET.to_owned(),
+            kind: LambdaTargetKind::Native,
+        },
+        captured: Vec::new(),
+    });
+    Ok(Some(Value::Ref(lambda)))
+}
+
+/// The body of a natural-order comparator.
+fn comparator_natural_order_compare(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let left = args.first().copied().unwrap_or(Value::Ref(ObjRef::NULL));
+    let right = args.get(1).copied().unwrap_or(Value::Ref(ObjRef::NULL));
+    Ok(Some(Value::Int(crate::streams::compare_values(
+        shared, left, right,
+    )?)))
+}
+
+/// `Comparator.reverseOrder()`: the natural ordering, negated.
+fn comparator_reverse_order(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    _args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let comparator = shared.load_library_class("java/util/Comparator")?;
+    let lambda = shared.allocate_lambda(LambdaObject {
+        interface: comparator,
+        sam_name: "compare".to_owned(),
+        sam_descriptor: COMPARATOR_INT_COMPARE.to_owned(),
+        instantiated_descriptor: COMPARATOR_INT_COMPARE.to_owned(),
+        target: LambdaTarget {
+            class: comparator,
+            name: REVERSE_ORDER_TARGET_NAME.to_owned(),
+            descriptor: NATURAL_ORDER_TARGET.to_owned(),
+            kind: LambdaTargetKind::Native,
+        },
+        captured: Vec::new(),
+    });
+    Ok(Some(Value::Ref(lambda)))
+}
+
+/// The body of a reverse-order comparator.
+fn comparator_reverse_order_compare(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let left = args.first().copied().unwrap_or(Value::Ref(ObjRef::NULL));
+    let right = args.get(1).copied().unwrap_or(Value::Ref(ObjRef::NULL));
+    Ok(Some(Value::Int(
+        crate::streams::compare_values(shared, left, right)?.wrapping_neg(),
+    )))
 }

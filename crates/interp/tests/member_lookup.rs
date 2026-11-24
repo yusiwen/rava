@@ -7,11 +7,13 @@
 //! bytecode client, so the virtual-dispatch path from a `Class` receiver through the native
 //! registry is exercised as well as the direct native calls.
 //!
-//! Lookup misses are `null` in this slice (the JDK throws `NoSuchFieldException` or
-//! `NoSuchMethodException`; exception synthesis does not exist yet). M2.15 added the
-//! primitive parameter classes and M2.16 the array ones; a class whose binary name is a
-//! primitive keyword is still a typed error because it is not a class object of that
-//! shape. Both outcomes are asserted exactly.
+//! A lookup miss is the JDK's typed exception (M2.30): a field query raises
+//! `java.lang.NoSuchFieldException` and a method or constructor query raises
+//! `java.lang.NoSuchMethodException`, each with the receiver class, member name and
+//! parameter descriptors in its message. M2.15 added the primitive parameter classes and
+//! M2.16 the array ones; a class whose binary name is a primitive keyword is still a typed
+//! error because it is not a class object of that shape. Both outcomes are asserted
+//! exactly.
 
 use std::path::PathBuf;
 
@@ -532,10 +534,32 @@ fn assert_member(
     assert_eq!(view.descriptor, descriptor, "member descriptor");
 }
 
-fn is_null(result: Result<Option<Value>, InterpError>) -> bool {
-    match result.unwrap_or_else(|error| panic!("lookup failed: {error}")) {
-        Some(Value::Ref(reference)) => reference.is_null(),
-        other => panic!("expected a reference result, found {other:?}"),
+/// Assert that a lookup raised `exception` with exactly `message`.
+fn assert_lookup_miss(
+    fixture: &Fixture,
+    result: Result<Option<Value>, InterpError>,
+    exception: &str,
+    message: &str,
+) {
+    match result {
+        Err(InterpError::Thrown(throwable)) => {
+            let class = fixture
+                .shared
+                .heap()
+                .object_class(throwable)
+                .expect("the throwable has a class");
+            assert_eq!(
+                fixture.shared.entry(class).expect("a loaded class").name,
+                exception,
+                "the lookup miss threw the wrong class"
+            );
+            assert_eq!(
+                fixture.shared.throwable_message(throwable).as_deref(),
+                Some(message),
+                "the lookup miss carried the wrong message"
+            );
+        }
+        other => panic!("expected a thrown {exception} ({message}), found {other:?}"),
     }
 }
 
@@ -624,17 +648,19 @@ fn declared_and_inherited_field_lookup() {
         "Ljava/lang/String;",
     );
 
-    // A miss is null in this slice, as documented.
-    assert!(is_null(declared_field(
+    // A miss raises the JDK's NoSuchFieldException, naming the receiver class and field.
+    assert_lookup_miss(
         &fixture,
-        fixture.bean_object,
-        "missing"
-    )));
-    assert!(is_null(inherited_field(
+        declared_field(&fixture, fixture.bean_object, "missing"),
+        "java/lang/NoSuchFieldException",
+        "LookupBean.missing",
+    );
+    assert_lookup_miss(
         &fixture,
-        fixture.child_object,
-        "missing"
-    )));
+        inherited_field(&fixture, fixture.child_object, "missing"),
+        "java/lang/NoSuchFieldException",
+        "LookupChild.missing",
+    );
 }
 
 #[test]
@@ -680,14 +706,11 @@ fn declared_and_inherited_method_lookup() {
         get_value,
         "getMethod reports the inherited member, declared on the superclass"
     );
-    assert!(
-        is_null(declared_method(
-            &fixture,
-            fixture.child_object,
-            "getValue",
-            &[]
-        )),
-        "getDeclaredMethod does not see an inherited method"
+    assert_lookup_miss(
+        &fixture,
+        declared_method(&fixture, fixture.child_object, "getValue", &[]),
+        "java/lang/NoSuchMethodException",
+        "LookupChild.getValue()",
     );
 
     // A reference parameter is matched by its class object, so an overload is selected by
@@ -706,18 +729,23 @@ fn declared_and_inherited_method_lookup() {
         "setLabel",
         "(Ljava/lang/String;)V",
     );
-    assert!(is_null(declared_method(
+    assert_lookup_miss(
         &fixture,
-        fixture.bean_object,
-        "setLabel",
-        &[]
-    )));
-    assert!(is_null(declared_method(
+        declared_method(&fixture, fixture.bean_object, "setLabel", &[]),
+        "java/lang/NoSuchMethodException",
+        "LookupBean.setLabel()",
+    );
+    assert_lookup_miss(
         &fixture,
-        fixture.bean_object,
-        "setLabel",
-        &[fixture.object_object]
-    )));
+        declared_method(
+            &fixture,
+            fixture.bean_object,
+            "setLabel",
+            &[fixture.object_object],
+        ),
+        "java/lang/NoSuchMethodException",
+        "LookupBean.setLabel(Ljava/lang/Object;)",
+    );
 
     // An interface method that the class does not declare is still found by getMethod.
     let contract = member_ref(inherited_method(
@@ -733,23 +761,17 @@ fn declared_and_inherited_method_lookup() {
         "contract",
         "()Ljava/lang/String;",
     );
-    assert!(
-        is_null(declared_method(
-            &fixture,
-            fixture.child_object,
-            "contract",
-            &[]
-        )),
-        "getDeclaredMethod does not see an interface method"
+    assert_lookup_miss(
+        &fixture,
+        declared_method(&fixture, fixture.child_object, "contract", &[]),
+        "java/lang/NoSuchMethodException",
+        "LookupChild.contract()",
     );
-    assert!(
-        is_null(inherited_method(
-            &fixture,
-            fixture.bean_object,
-            "contract",
-            &[]
-        )),
-        "a class that does not implement the interface does not find its method"
+    assert_lookup_miss(
+        &fixture,
+        inherited_method(&fixture, fixture.bean_object, "contract", &[]),
+        "java/lang/NoSuchMethodException",
+        "LookupBean.contract()",
     );
 
     // The superclass chain includes Object.
@@ -768,18 +790,23 @@ fn declared_and_inherited_method_lookup() {
     );
 
     // The return type is not part of a reflective method query.
-    assert!(is_null(inherited_method(
+    assert_lookup_miss(
         &fixture,
-        fixture.bean_object,
-        "getValue",
-        &[fixture.string_object]
-    )));
-    assert!(is_null(declared_method(
+        inherited_method(
+            &fixture,
+            fixture.bean_object,
+            "getValue",
+            &[fixture.string_object],
+        ),
+        "java/lang/NoSuchMethodException",
+        "LookupBean.getValue(Ljava/lang/String;)",
+    );
+    assert_lookup_miss(
         &fixture,
-        fixture.bean_object,
-        "missing",
-        &[]
-    )));
+        declared_method(&fixture, fixture.bean_object, "missing", &[]),
+        "java/lang/NoSuchMethodException",
+        "LookupBean.missing()",
+    );
 }
 
 #[test]
@@ -823,33 +850,42 @@ fn declared_and_inherited_constructor_lookup() {
 
     // Constructors are not inherited: the subclass declares none, so both queries miss
     // even though the superclass has a no-arg constructor.
-    assert!(is_null(declared_constructor(
+    assert_lookup_miss(
         &fixture,
-        fixture.child_object,
-        &[]
-    )));
-    assert!(is_null(inherited_constructor(
+        declared_constructor(&fixture, fixture.child_object, &[]),
+        "java/lang/NoSuchMethodException",
+        "LookupChild.<init>()",
+    );
+    assert_lookup_miss(
         &fixture,
-        fixture.child_object,
-        &[]
-    )));
-    assert!(is_null(declared_constructor(
+        inherited_constructor(&fixture, fixture.child_object, &[]),
+        "java/lang/NoSuchMethodException",
+        "LookupChild.<init>()",
+    );
+    assert_lookup_miss(
         &fixture,
-        fixture.contract_object,
-        &[]
-    )));
+        declared_constructor(&fixture, fixture.contract_object, &[]),
+        "java/lang/NoSuchMethodException",
+        "LookupContract.<init>()",
+    );
 
     // Parameter lists must match exactly.
-    assert!(is_null(declared_constructor(
+    assert_lookup_miss(
         &fixture,
-        fixture.bean_object,
-        &[fixture.object_object]
-    )));
-    assert!(is_null(declared_constructor(
+        declared_constructor(&fixture, fixture.bean_object, &[fixture.object_object]),
+        "java/lang/NoSuchMethodException",
+        "LookupBean.<init>(Ljava/lang/Object;)",
+    );
+    assert_lookup_miss(
         &fixture,
-        fixture.bean_object,
-        &[fixture.string_object, fixture.string_object]
-    )));
+        declared_constructor(
+            &fixture,
+            fixture.bean_object,
+            &[fixture.string_object, fixture.string_object],
+        ),
+        "java/lang/NoSuchMethodException",
+        "LookupBean.<init>(Ljava/lang/String;, Ljava/lang/String;)",
+    );
 }
 
 #[test]
