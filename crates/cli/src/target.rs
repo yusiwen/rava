@@ -19,6 +19,12 @@ pub const TARGET_LOCK: &str = "compat/targets.toml";
 /// Only schema 1 is understood; a new layout must bump the number.
 const SUPPORTED_SCHEMA: i64 = 1;
 
+/// Default tree for the M2.2 JDK 17 signature stubs when `[c1]` is absent.
+pub const DEFAULT_C1_PATH: &str = "stdlib/c1/classes";
+
+/// Default list of manifest owners JDK 17 does not define when `[c1]` is absent.
+pub const DEFAULT_C1_UNREFERENCED: &str = "compat/surface/c1-unreferenced.txt";
+
 /// A missing or inconsistent lock, reported to the caller as a message.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LockError(String);
@@ -53,6 +59,8 @@ pub struct TargetLock {
     pub jar_count: usize,
     pub manifest_path: String,
     pub stubs_path: String,
+    pub c1_path: String,
+    pub c1_unreferenced: String,
 }
 
 impl TargetLock {
@@ -74,6 +82,14 @@ impl TargetLock {
         let jars = table(&document, "jars")?;
         let manifest = table(&document, "manifest")?;
         let stubs = table(&document, "stubs")?;
+        let c1 = document.get("c1").and_then(|value| value.as_table());
+        let (c1_path, c1_unreferenced) = match c1 {
+            Some(c1) => (string(c1, "c1", "path")?, string(c1, "c1", "unreferenced")?),
+            None => (
+                DEFAULT_C1_PATH.to_owned(),
+                DEFAULT_C1_UNREFERENCED.to_owned(),
+            ),
+        };
 
         let lock = Self {
             schema,
@@ -91,6 +107,8 @@ impl TargetLock {
             jar_count: count(jars, "jars", "count")?,
             manifest_path: string(manifest, "manifest", "path")?,
             stubs_path: string(stubs, "stubs", "path")?,
+            c1_path,
+            c1_unreferenced,
         };
         lock.validate()?;
         Ok(lock)
@@ -136,6 +154,8 @@ impl TargetLock {
             ("jars.lock", &self.jars_lock),
             ("manifest.path", &self.manifest_path),
             ("stubs.path", &self.stubs_path),
+            ("c1.path", &self.c1_path),
+            ("c1.unreferenced", &self.c1_unreferenced),
         ] {
             if !is_safe_relative(value) {
                 return Err(LockError::new(format!(
@@ -290,6 +310,8 @@ fn report(root: &Path) -> Result<String, LockError> {
     line(&mut output, "jar count", &jar_lock.count.to_string());
     line(&mut output, "manifest", &lock.manifest_path);
     line(&mut output, "stubs", &lock.stubs_path);
+    line(&mut output, "c1 stubs", &lock.c1_path);
+    line(&mut output, "c1 unreferenced", &lock.c1_unreferenced);
     output.push_str("target lock: ok\n");
     Ok(output)
 }
@@ -537,6 +559,8 @@ path = "stdlib/classes"
         assert_eq!(lock.jar_count, 2);
         assert_eq!(lock.manifest_path, "compat/surface/test.txt");
         assert_eq!(lock.stubs_path, "stdlib/classes");
+        assert_eq!(lock.c1_path, "stdlib/c1/classes");
+        assert_eq!(lock.c1_unreferenced, "compat/surface/c1-unreferenced.txt");
     }
 
     #[test]

@@ -24,7 +24,8 @@ documents are added when there is something to record.
 | [`open-questions.md`](open-questions.md) | state | all resolved answers Q1–Q18; a decision record |
 | [`adr/`](adr/) | decisions | 0001–0012, one decision per record |
 | [`adr/README.md`](adr/README.md) | index | the ADR table and the format rules |
-| [`../stdlib/README.md`](../stdlib/README.md) | state | the generated signature-only stub library, and what M2 replaces |
+| [`../stdlib/README.md`](../stdlib/README.md) | state | the two generated class libraries, and what each one is for |
+| [`../stdlib/c1/README.md`](../stdlib/c1/README.md) | state | the M2.2 JDK 17 C1 signature tree, its normalization boundary and its gates |
 
 ## Rule
 

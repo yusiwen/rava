@@ -16,6 +16,43 @@
 
 use crate::error::Error;
 
+/// Encodes one `CONSTANT_Utf8` payload.
+///
+/// The inverse of [`decode`] for every string a Rust `String` can hold: NUL becomes
+/// `C0 80` and a supplementary code point becomes its two surrogate halves. A string
+/// that [`decode`] produced from a lone surrogate holds U+FFFD, so it re-encodes as the
+/// replacement character rather than as the original surrogate.
+pub fn encode(text: &str) -> Vec<u8> {
+    let mut out = Vec::with_capacity(text.len());
+    for character in text.chars() {
+        let code = character as u32;
+        match code {
+            0 => out.extend_from_slice(&[0xC0, 0x80]),
+            0x0001..=0x007F => out.push(code as u8),
+            0x0080..=0x07FF => {
+                out.push(0xC0 | (code >> 6) as u8);
+                out.push(0x80 | (code & 0x3F) as u8);
+            }
+            0x0800..=0xFFFF => {
+                out.push(0xE0 | (code >> 12) as u8);
+                out.push(0x80 | ((code >> 6) & 0x3F) as u8);
+                out.push(0x80 | (code & 0x3F) as u8);
+            }
+            _ => {
+                let adjusted = code - 0x1_0000;
+                let high = 0xD800 | (adjusted >> 10);
+                let low = 0xDC00 | (adjusted & 0x3FF);
+                for unit in [high, low] {
+                    out.push(0xE0 | (unit >> 12) as u8);
+                    out.push(0x80 | ((unit >> 6) & 0x3F) as u8);
+                    out.push(0x80 | (unit & 0x3F) as u8);
+                }
+            }
+        }
+    }
+    out
+}
+
 /// Decodes one `CONSTANT_Utf8` payload.
 ///
 /// `index` is the constant pool index, carried only so the error names the entry.
@@ -133,6 +170,30 @@ mod tests {
         // A high surrogate followed by something that is not a low surrogate is lossy too.
         let broken = [0xED, 0xA0, 0xBD, 0x41];
         assert_eq!(decode(&broken, 6).unwrap(), "\u{FFFD}A");
+    }
+
+    #[test]
+    fn encode_round_trips_every_decoded_string() {
+        for text in [
+            "",
+            "java/lang/Object",
+            "a\0b",
+            "caf\u{e9}",
+            "\u{1F600}",
+            "lone \u{FFFD}",
+        ] {
+            assert_eq!(decode(&encode(text), 1).unwrap(), text);
+        }
+    }
+
+    #[test]
+    fn encodes_nul_and_supplementary_characters_the_class_file_way() {
+        assert_eq!(encode("a\0b"), b"a\xC0\x80b");
+        assert_eq!(
+            encode("\u{1F600}"),
+            vec![0xED, 0xA0, 0xBD, 0xED, 0xB8, 0x80]
+        );
+        assert!(!encode("a\0b").contains(&0), "no zero byte may appear");
     }
 
     #[test]

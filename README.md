@@ -17,8 +17,13 @@ metadata model in `rava-classfile` (annotations of every element-value kind, par
 and type annotations, generic signatures, records, sealed permits, nestmates, inner and
 enclosing classes, exceptions and parameter names) with every raw attribute payload
 retained, a normalized text dump, committed Java 17 fixtures and golden dumps, plus
-typed errors for malformed payloads. **M2.2 (JDK 17 signature stubs and the zero-diff
-metadata check) is next.**
+typed errors for malformed payloads. **M2.2 is done (2026-11-24):** a separate JDK 17
+signature stub tree under `stdlib/c1/classes/` (980 class files, 952 projected from the
+host JDK's `lib/ct.sym` release-17 signatures and 28 header-only placeholders for
+owners Java 17 does not define) with a faithful class-file writer, and a normalized
+metadata check whose diff is 0 across the 952 referenced classes. `stdlib/classes/` is
+unchanged and the M1 gate still passes. **M2.3 (promote the C1 tree to the runtime
+library) is next.**
 
 ## What this project is
 
@@ -104,6 +109,10 @@ only when they pass:
 cargo run -p rava-cli -- compat check
 ```
 
+It reads the already-fetched `compat/jars/` (the manifest stage scans the pinned
+class files) but needs no network. It does not re-hash the jars; that stays with
+`bash compat/fetch-jars.sh --check`.
+
 The C1 metadata model and its normalized dump are tested against committed Java 17
 fixtures (no JDK needed at test time):
 
@@ -111,12 +120,22 @@ fixtures (no JDK needed at test time):
 cargo test -p rava-classfile --test metadata_model
 ```
 
-It reads the already-fetched `compat/jars/` (the manifest stage scans the pinned
-class files) but needs no network. It does not re-hash the jars; that stays with
-`bash compat/fetch-jars.sh --check`.
+The JDK 17 C1 signature stubs are generated from the host `ct.sym` and checked against
+it. The reference is found through `--ct-sym <path>`, `RAVA_CT_SYM`, or `JAVA_HOME`;
+the local acceptance uses the JDK 25 archive at
+`$JAVA_HOME/lib/ct.sym` (for example
+`/home/yusiwen/.local/share/mise/installs/java/zulu-25/lib/ct.sym`). The check needs no
+jars and no execution, and the test suite needs no JDK:
 
-`stdlib/classes/` is a generated deliverable, not the runtime class library; see
-[`stdlib/README.md`](stdlib/README.md) for what the stubs do and do not contain.
+```sh
+cargo run -p rava-cli -- compat c1-stubs
+cargo run -p rava-cli -- compat metadata --check
+```
+
+`stdlib/classes/` and `stdlib/c1/classes/` are generated deliverables, not the runtime
+class library; see [`stdlib/README.md`](stdlib/README.md) and
+[`stdlib/c1/README.md`](stdlib/c1/README.md) for what each tree does and does not
+contain.
 
 `bash compat/fetch-jars.sh` (re)fetches the jars from Maven Central and needs
 `JAVA_HOME` and Maven; `--check` verifies the existing directory without fetching.

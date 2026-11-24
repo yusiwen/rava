@@ -3,8 +3,10 @@
 //! Deliberately dependency-light: M1 needs only the `compat` commands, so argument
 //! handling is a small match instead of a CLI framework.
 
+mod c1;
 mod check;
 mod compat;
+mod ct_sym;
 mod manifest;
 mod stubs;
 mod surface;
@@ -43,4 +45,6 @@ fn print_usage() {
     println!("  compat stubs       write the signature-only stub class library");
     println!("  compat link-check  resolve the manifest against the stub class library");
     println!("  compat check       run the local M1 compatibility gate");
+    println!("  compat c1-stubs    write the JDK 17 C1 signature stub library");
+    println!("  compat metadata    scan or --check the C1 metadata against ct.sym");
 }

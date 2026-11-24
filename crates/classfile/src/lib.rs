@@ -24,6 +24,7 @@ pub mod metadata;
 pub mod model;
 pub mod mutf8;
 pub mod reader;
+pub mod writer;
 
 pub use assembler::{Assembler, Label};
 pub use builder::ClassBuilder;

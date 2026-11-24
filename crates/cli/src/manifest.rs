@@ -386,6 +386,8 @@ mod tests {
             jar_count: 35,
             manifest_path: "compat/surface/test.txt".to_owned(),
             stubs_path: "stdlib/classes".to_owned(),
+            c1_path: target::DEFAULT_C1_PATH.to_owned(),
+            c1_unreferenced: target::DEFAULT_C1_UNREFERENCED.to_owned(),
         }
     }
 

@@ -1,0 +1,38 @@
+# Manifest owners that Java 17 does not define, so the C1 metadata gate has no
+# release-17 ct.sym signature to compare them with.
+#
+# Generated once from the host JDK 25 lib/ct.sym release-17 view; `rava compat
+# c1-stubs` fails when this list and the archive disagree. Each owner below gets a
+# header-only placeholder in stdlib/c1/classes and is excluded from
+# `rava compat metadata --check`.
+#
+# owners: 28
+
+java/lang/Thread$Builder
+java/lang/Thread$Builder$OfVirtual
+javax/annotation/Resource
+javax/cache/CacheManager
+javax/cache/Caching
+javax/cache/configuration/Configuration
+javax/cache/configuration/MutableConfiguration
+javax/cache/spi/CachingProvider
+javax/money/CurrencyUnit
+javax/money/Monetary
+javax/money/MonetaryAmount
+javax/money/MonetaryAmountFactory
+javax/money/format/MonetaryAmountFormat
+javax/money/format/MonetaryFormats
+javax/wsdl/Definition
+javax/wsdl/Port
+javax/wsdl/Service
+javax/wsdl/extensions/ExtensibilityElement
+javax/wsdl/extensions/soap/SOAPAddress
+javax/wsdl/factory/WSDLFactory
+javax/wsdl/xml/WSDLReader
+javax/xml/rpc/Service
+javax/xml/rpc/ServiceException
+javax/xml/rpc/ServiceFactory
+javax/xml/rpc/handler/Handler
+javax/xml/rpc/handler/HandlerChain
+javax/xml/rpc/handler/HandlerInfo
+javax/xml/rpc/handler/HandlerRegistry

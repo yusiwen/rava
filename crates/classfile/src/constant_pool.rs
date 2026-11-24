@@ -57,6 +57,22 @@ impl ReferenceKind {
             other => Self::Unknown(other),
         }
     }
+
+    /// The encoded byte, the inverse of [`Self::from_byte`].
+    pub fn as_byte(self) -> u8 {
+        match self {
+            Self::GetField => 1,
+            Self::GetStatic => 2,
+            Self::PutField => 3,
+            Self::PutStatic => 4,
+            Self::InvokeVirtual => 5,
+            Self::InvokeStatic => 6,
+            Self::InvokeSpecial => 7,
+            Self::NewInvokeSpecial => 8,
+            Self::InvokeInterface => 9,
+            Self::Unknown(other) => other,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]

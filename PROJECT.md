@@ -5,8 +5,8 @@
 **License:** MIT
 **Started:** 2026-11-22
 
-> Ledger. P0 and P1 were accepted on 2026-11-23. M1 is complete; M2 is in progress.
-> Keep this file honest and terse.
+> Ledger. P0 and P1 were accepted on 2026-11-23. M1 is complete; M2 is in progress
+> (M2.1 and M2.2 done). Keep this file honest and terse.
 
 ## Phase status
 
@@ -26,7 +26,7 @@ release process, if wanted, becomes its own phase.
 
 > Gates are defined in `docs/requirements.md` § Milestones. P0 and P1 are accepted;
 > M0 and M1 are complete, and both gate reviews have passed. M2 is in progress, with
-> M2.1 done.
+> M2.1 and M2.2 done.
 
 | Milestone | Delivers | Gate | Status |
 | :--- | :--- | :--- | :--- |
@@ -58,10 +58,10 @@ release process, if wanted, becomes its own phase.
 | M1.3 | Stub library surface and zero-unresolved link-check | R2 | `cargo run -p rava-cli -- compat link-check` exits 0 | done |
 | M1.4 | Manifest reproducibility and M1 gate review | R1, R2 | `cargo run -p rava-cli -- compat check` exits 0 | done |
 | M2.1 | C1 metadata model and normalized dump | R3 | `cargo test -p rava-classfile --test metadata_model` exits 0 | done |
-| M2.2 | JDK 17 signature stubs and zero metadata diff | R3 | `cargo run -p rava-cli -- compat metadata --check` exits 0 | todo |
+| M2.2 | JDK 17 signature stubs and zero metadata diff | R3 | `cargo run -p rava-cli -- compat metadata --check` exits 0 | done |
 
 P0 and P1 are accepted; P2 is done because the M2 increments are sliced. All M0 and
-M1 slices are done, and both gate reviews passed. M2.1 is done; M2.2 is next.
+M1 slices are done, and both gate reviews passed. M2.1 and M2.2 are done; M2.3 is next.
 
 ## Slice log
 
@@ -80,6 +80,7 @@ M1 slices are done, and both gate reviews passed. M2.1 is done; M2.2 is next.
 | M1.3 | `cargo run -p rava-cli -- compat link-check` | 0 | 2026-11-24 | `rava compat stubs` writes 980 signature-only class files under `stdlib/classes/` from the committed manifest (177 fields, 3,626 methods, 1,048 interface methods); regeneration is byte-identical; link-check resolves all 980 classes and 4,851 member records with `unresolved 0`; `cargo test -p rava-cli` passes 41 tests; `cargo xtask ci` exits 0 |
 | M1.4 | `cargo run -p rava-cli -- compat check` | 0 | 2026-11-24 | `compat check` passes all four stages: the target lock and its 35-jar set agree; the manifest regenerates byte-identically at 980 classes, 177 fields, 3,626 methods and 1,048 interface methods; link-check resolves 980 classes and 4,851 member records with `unresolved 0`; a temporary regeneration of `stdlib/classes` is byte-identical across all 980 class files and the committed tree is not rewritten; `cargo test -p rava-cli` passes 54 tests; `cargo xtask ci` exits 0 |
 | M2.1 | `cargo test -p rava-classfile --test metadata_model` | 0 | 2026-11-24 | `rava-classfile`'s `metadata` module decodes the C1 attributes ADR-0006 lists into a typed model: access flags, binary name, superclass, interfaces, `Signature`, visible/invisible annotations with every element-value tag and repeatable containers as encoded, parameter and type annotations (all `target_info` variants and all four `type_path` kinds), nest host/members, permitted subclasses, inner and enclosing classes, `Record` components with their own annotations, `SourceFile`, `ConstantValue`, `Deprecated`, `Exceptions`, `MethodParameters`, `AnnotationDefault`; every attribute payload is still copied verbatim, so an undecoded attribute is retained; malformed payloads return `Error::BadAttribute` with a structured cause; a normalized dump with committed golden files for `Kitchen` and `Defaults`; 29 new tests, 43 `rava-classfile` tests; `cargo xtask ci` exits 0 |
+| M2.2 | `cargo run -p rava-cli -- compat metadata --check` | 0 | 2026-11-24 | `stdlib/c1/classes/` holds 980 committed class files: 952 projected from the host JDK 25 `lib/ct.sym` release-17 view (1,104 fields, 13,008 methods, class-file version 61.0) and 28 header-only placeholders for manifest owners Java 17 does not define, listed in `compat/surface/c1-unreferenced.txt`; the normalized M2.1 metadata dump has 0 differences across the 952 referenced classes, the only normalization being the class-file version line (ct.sym stores 69); `stdlib/classes` is untouched and `compat check` still resolves 980 classes and 4,851 member records with `unresolved 0`; `cargo test -p rava-cli` passes 67 tests; `cargo xtask ci` exits 0 |
 
 M0.6 boundary: the reference and class-unloading hooks are registration points only.
 M0 has no collector, so no weak/soft/phantom reference is cleared and no class is
@@ -126,8 +127,9 @@ methods are `public abstract` with no `Code` attribute. `<init>` records carry a
 minimal concrete body because JVMS §4.6 forbids an abstract constructor; `<clinit>`
 is a no-op. The class header is synthetic: every class extends `java/lang/Object`,
 and JDK 17 access flags, real superclasses and interface lists from `ct.sym` are not
-preserved, so C1 metadata is not claimed. M2 replaces the stubs with the real library
-and fills behaviour and metadata. `compat link-check` resolves each record against
+preserved, so C1 metadata is not claimed. M2.2 adds the JDK 17 metadata stubs in a
+separate tree (`stdlib/c1/classes/`), and M2.3 promotes that tree to the runtime
+library; this M1 tree is not rewritten. `compat link-check` resolves each record against
 the declarations on its owner; it does not walk superclasses or interfaces. It parses
 the committed manifest and the stub class files only; it never reads the pinned jars,
 never loads or executes a class, and never generates a missing stub.
@@ -145,7 +147,8 @@ exits 0. M2 (C1 metadata, the minimal library and the Spring context) is next.
 
 M2.1 boundary: the model decodes the C1 attributes from a parsed `ClassFile`. A generic
 `Signature` is retained as the encoded string; the generic `Type` graph and the
-reflective API that reads the model are M2.2 work, so no reflection native exists yet.
+reflective API that reads the model are later M2 work, so no reflection native exists
+yet.
 Every attribute payload is also copied verbatim onto the class, field, method and record
 component, so an attribute the model does not decode is never lost; `Code` stays the
 interpreter's view and is not metadata. Code-level type annotations (`localvar`, `catch`,
@@ -154,6 +157,26 @@ live inside `Code` and reflection does not expose them. The dump is a stable tex
 fixture, not a reflection API: it keeps class-file order for members, interfaces and
 annotations, sorts nest members, permitted subclasses and inner classes, and emits no
 host path, timestamp or hash.
+
+M2.2 boundary: `stdlib/c1/classes/` is a second committed tree, separate from
+`stdlib/classes/`; the M1 tree is unchanged and its gate still passes. 952 classes are
+projected from the host JDK's `lib/ct.sym` release-17 entries: the signature is parsed
+with `rava-classfile`, the class-file version is set to the pinned 61.0, and the class is
+re-emitted with the constant pool at its original indices and every attribute payload
+verbatim. The 28 manifest owners Java 17 does not define (the `Thread$Builder` classes,
+JCache, Moneta, WSDL and the Java EE `javax.annotation.Resource`) are listed in
+`compat/surface/c1-unreferenced.txt` and get header-only placeholders; the generator
+fails, naming the owners, when the archive and that list disagree. `rava compat metadata
+--check` re-reads the release-17 signature and compares the M2.1 normalized dump with
+the committed stub: 952 classes compared, 0 differences. The only normalization is the
+class-file version line, because ct.sym stores the host JDK's version (69) while the tree
+is pinned to 61.0; ordering, annotations, signatures and raw attributes are not
+normalized. There is no `Code`, no verifier work and no reflection native: this slice
+establishes the metadata shape and the diff, not behaviour. Generic signatures are
+retained as strings, not turned into a `Type` graph. The writer round-trips every
+committed M2.1 fixture byte-for-byte; a lone surrogate in a string constant would not
+round-trip, because the model decodes it lossily. M2.3 promotes this tree to the runtime
+library.
 
 ## Decision log
 
@@ -179,8 +202,9 @@ A fresh session should:
 1. Read `README.md`, `docs/requirements.md` and `docs/open-questions.md`.
 2. Read the ADRs in order; 0001–0005 are the project-defining decisions.
 3. M0 and M1 are complete. M2.1 landed the typed C1 metadata model and its normalized
-   dump (`cargo test -p rava-classfile --test metadata_model`); M2.2 is next: the JDK 17
-   signature stubs and the zero-diff `rava compat metadata --check` gate.
+   dump (`cargo test -p rava-classfile --test metadata_model`). M2.2 landed the JDK 17
+   signature stubs in `stdlib/c1/classes/` and the zero-diff `rava compat metadata
+   --check` gate. M2.3 is next: promote that tree to the runtime library.
 4. Do not write runtime code outside a defined slice.
 
 ## Open decisions

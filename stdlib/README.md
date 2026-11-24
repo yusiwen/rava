@@ -1,9 +1,21 @@
+# stdlib — generated class libraries
+
+`stdlib/` holds two generated, committed trees with different jobs:
+
+- `stdlib/classes/` (M1.3, this README): signature-only surface stubs from the
+  committed manifest. The M1 gate links the manifest against it. It stays in place
+  unchanged; M2.2 added the C1 tree beside it.
+- `stdlib/c1/classes/` (M2.2): JDK 17 signature stubs with real metadata, regenerated
+  from the host `ct.sym`. See [`c1/README.md`](c1/README.md). M2.3 promotes this tree
+  to the runtime library.
+
+The rest of this document describes the M1.3 tree only.
+
 # stdlib/classes — signature-only stubs (M1.3)
 
 This directory is **generated** by `rava compat stubs` from the committed surface
 manifest (`compat/surface/spring-boot-3.5.16.txt`). It is a signature-only stub
-library, not the rava runtime class library. M2 replaces it with real library classes
-and semantics.
+library, not the rava runtime class library.
 
 The committed tree has 980 class files and declares 177 fields and 4,674 methods,
 which is every one of the 3,626 method and 1,048 interface-method records in the
@@ -31,7 +43,7 @@ What the stubs do **not** contain:
 - JDK 17 access flags, real superclasses or interface lists. Every class extends
   `java/lang/Object`; interface-ness is inferred only from interface-method records.
 - Annotations, generic signatures, records, sealed permits, nestmates, parameter names
-  or the C1 metadata contract. Those are M2 work.
+  or the C1 metadata contract. Those belong to the M2.2 C1 tree above, not here.
 
 Do not edit this tree by hand. Regenerate it after a manifest change:
 
