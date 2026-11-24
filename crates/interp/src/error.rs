@@ -30,6 +30,26 @@ pub enum InterpError {
         name: String,
         descriptor: String,
     },
+    /// A static field opcode named a field that is not `ACC_STATIC`.
+    InstanceFieldAccess {
+        class: String,
+        name: String,
+        descriptor: String,
+    },
+    /// A `putstatic` value's kind does not match the field's descriptor.
+    FieldValueMismatch {
+        class: String,
+        name: String,
+        descriptor: String,
+    },
+    /// `checkcast` rejected a value that is not assignable to its target type.
+    ///
+    /// The JVM throws a `ClassCastException`; this slice has no exception-object
+    /// synthesis, so the mismatch is a typed error instead.
+    ClassCast {
+        expected: String,
+        found: String,
+    },
     NotAssignable {
         expected: String,
         found: String,
@@ -107,6 +127,25 @@ impl fmt::Display for InterpError {
                 f,
                 "static field {class}.{name}:{descriptor} was accessed with an instance field opcode"
             ),
+            Self::InstanceFieldAccess {
+                class,
+                name,
+                descriptor,
+            } => write!(
+                f,
+                "instance field {class}.{name}:{descriptor} was accessed with a static field opcode"
+            ),
+            Self::FieldValueMismatch {
+                class,
+                name,
+                descriptor,
+            } => write!(
+                f,
+                "value on the operand stack does not match field {class}.{name}:{descriptor}"
+            ),
+            Self::ClassCast { expected, found } => {
+                write!(f, "cannot cast {found} to {expected}")
+            }
             Self::NotAssignable { expected, found } => {
                 write!(f, "{found} is not assignable to {expected}")
             }

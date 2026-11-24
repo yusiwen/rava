@@ -33,6 +33,16 @@
 //! count and u1 reserved zero byte are decoded, and the interface method runs through the
 //! receiver's runtime class or the lambda representation. `pop` (`0x57`) is decoded only
 //! because a fixture that discards `List.add`'s boolean return needs it.
+//!
+//! M2.21 adds the static-field write and the reference-type surface: `putstatic`
+//! (`0xb3`), `checkcast` (`0xc0`), `instanceof` (`0xc1`), the numeric `ldc`/`ldc_w`
+//! constants, `ldc2_w` (`0x14`) for `long`/`double`, and the `lreturn`/`freturn`/
+//! `dreturn` and `lcmp`/`fcmp<op>`/`dcmp<op>` instructions those constants need to be
+//! returned and compared. It also adds `tableswitch` (`0xaa`) and `lookupswitch`
+//! (`0xab`): their padding is checked against the alignment the JVMS requires, and the
+//! default and case targets become instruction indices through the same two-pass
+//! boundary map as every other branch. A `lookupswitch` whose keys are not strictly
+//! ascending is a decode error, as is a target that is not an instruction boundary.
 
 use std::collections::HashMap;
 
@@ -121,7 +131,22 @@ pub enum Instr {
     /// `ldc`/`ldc_w` of a `CONSTANT_Class`: the class name or descriptor, resolved
     /// through the executing frame's loader when the instruction runs.
     LdcClass(String),
+    /// `ldc`/`ldc_w` of a `CONSTANT_Integer`.
+    LdcInt(i32),
+    /// `ldc`/`ldc_w` of a `CONSTANT_Float`.
+    LdcFloat(f32),
+    /// `ldc2_w` of a `CONSTANT_Long`.
+    LdcLong(i64),
+    /// `ldc2_w` of a `CONSTANT_Double`.
+    LdcDouble(f64),
     GetStatic {
+        class: String,
+        name: String,
+        descriptor: String,
+    },
+    /// `putstatic`: write a static field. The owner is resolved through the executing
+    /// frame's loader and the value is stored in that class's statics table.
+    PutStatic {
         class: String,
         name: String,
         descriptor: String,
@@ -198,9 +223,49 @@ pub enum Instr {
     IfACmpNe(usize),
     IfNull(usize),
     IfNonNull(usize),
+    /// `tableswitch`: `low` is the first case key, so case `i` is `low + i` and its
+    /// target is `targets[i]`. `default` is the target for every other key.
+    TableSwitch {
+        default: usize,
+        low: i32,
+        targets: Vec<usize>,
+    },
+    /// `lookupswitch`: `keys` is strictly ascending and `targets[i]` is key `keys[i]`'s
+    /// target. `default` is the target for every other key.
+    LookupSwitch {
+        default: usize,
+        keys: Vec<i32>,
+        targets: Vec<usize>,
+    },
+    /// `checkcast`: the class operand's name, resolved through the executing frame's
+    /// loader when the instruction runs.
+    CheckCast {
+        class: String,
+    },
+    /// `instanceof`: the class operand's name, resolved through the executing frame's
+    /// loader when the instruction runs.
+    InstanceOf {
+        class: String,
+    },
+    /// `lcmp`: compare two `long` values and push -1, 0 or 1.
+    LCmp,
+    /// `fcmpl`: compare two `float` values, pushing -1 for NaN.
+    FCmpL,
+    /// `fcmpg`: compare two `float` values, pushing 1 for NaN.
+    FCmpG,
+    /// `dcmpl`: compare two `double` values, pushing -1 for NaN.
+    DCmpL,
+    /// `dcmpg`: compare two `double` values, pushing 1 for NaN.
+    DCmpG,
     /// `athrow`: pop a reference and throw it; `0xbf`.
     Athrow,
     IReturn,
+    /// `lreturn`: return a `long` value.
+    LReturn,
+    /// `freturn`: return a `float` value.
+    FReturn,
+    /// `dreturn`: return a `double` value.
+    DReturn,
     AReturn,
     Return,
 }
@@ -213,6 +278,28 @@ pub struct DecodedMethod {
     pub handlers: Vec<ExceptionHandler>,
     pub max_stack: u16,
     pub max_locals: u16,
+}
+
+/// A control-flow target waiting for the second decode pass.
+///
+/// Every target is recorded as a byte offset and patched to an instruction index after
+/// the whole method has been decoded. A switch contributes one default fixup and one
+/// fixup per case; a branch contributes one.
+#[derive(Debug, Clone, Copy)]
+enum Fixup {
+    Branch {
+        instruction: usize,
+        target: usize,
+    },
+    SwitchDefault {
+        instruction: usize,
+        target: usize,
+    },
+    SwitchCase {
+        instruction: usize,
+        case: usize,
+        target: usize,
+    },
 }
 
 pub fn decode(file: &ClassFile, attribute_data: &[u8]) -> Result<DecodedMethod, InterpError> {
@@ -240,8 +327,9 @@ pub fn decode(file: &ClassFile, attribute_data: &[u8]) -> Result<DecodedMethod, 
     // The byte offset of each decoded instruction, used to turn a branch's signed byte
     // offset into the instruction index the dispatch loop jumps to.
     let mut starts = Vec::new();
-    // `(instruction index, target byte offset)` for every branch decoded this pass.
-    let mut fixups: Vec<(usize, usize)> = Vec::new();
+    // `(instruction index, target byte offset)` for every control-flow instruction
+    // decoded this pass.
+    let mut fixups: Vec<Fixup> = Vec::new();
     let mut pc = 0usize;
     while pc < code.len() {
         let opcode_pc = pc;
@@ -353,58 +441,148 @@ pub fn decode(file: &ClassFile, attribute_data: &[u8]) -> Result<DecodedMethod, 
             0x99..=0x9e => {
                 let offset = branch_offset(code, pc)?;
                 pc += 2;
-                fixups.push((instructions.len(), target_offset(opcode_pc, offset)?));
+                fixups.push(Fixup::Branch {
+                    instruction: instructions.len(),
+                    target: target_offset(opcode_pc, offset)?,
+                });
                 Instr::If(CONDITIONS[usize::from(opcode - 0x99)], 0)
             }
             0x9f..=0xa4 => {
                 let offset = branch_offset(code, pc)?;
                 pc += 2;
-                fixups.push((instructions.len(), target_offset(opcode_pc, offset)?));
+                fixups.push(Fixup::Branch {
+                    instruction: instructions.len(),
+                    target: target_offset(opcode_pc, offset)?,
+                });
                 Instr::IfICmp(CONDITIONS[usize::from(opcode - 0x9f)], 0)
             }
             0xa5 => {
                 let offset = branch_offset(code, pc)?;
                 pc += 2;
-                fixups.push((instructions.len(), target_offset(opcode_pc, offset)?));
+                fixups.push(Fixup::Branch {
+                    instruction: instructions.len(),
+                    target: target_offset(opcode_pc, offset)?,
+                });
                 Instr::IfACmpEq(0)
             }
             0xa6 => {
                 let offset = branch_offset(code, pc)?;
                 pc += 2;
-                fixups.push((instructions.len(), target_offset(opcode_pc, offset)?));
+                fixups.push(Fixup::Branch {
+                    instruction: instructions.len(),
+                    target: target_offset(opcode_pc, offset)?,
+                });
                 Instr::IfACmpNe(0)
             }
             0xa7 => {
                 let offset = branch_offset(code, pc)?;
                 pc += 2;
-                fixups.push((instructions.len(), target_offset(opcode_pc, offset)?));
+                fixups.push(Fixup::Branch {
+                    instruction: instructions.len(),
+                    target: target_offset(opcode_pc, offset)?,
+                });
                 Instr::Goto(0)
+            }
+            0xaa => {
+                let table = decode_tableswitch(code, opcode_pc)?;
+                pc = table.next_pc;
+                let instruction = instructions.len();
+                fixups.push(Fixup::SwitchDefault {
+                    instruction,
+                    target: switch_target(opcode_pc, table.default)?,
+                });
+                for (case, offset) in table.offsets.iter().enumerate() {
+                    fixups.push(Fixup::SwitchCase {
+                        instruction,
+                        case,
+                        target: switch_target(opcode_pc, *offset)?,
+                    });
+                }
+                Instr::TableSwitch {
+                    default: 0,
+                    low: table.low,
+                    targets: vec![0; table.offsets.len()],
+                }
+            }
+            0xab => {
+                let lookup = decode_lookupswitch(code, opcode_pc)?;
+                pc = lookup.next_pc;
+                let instruction = instructions.len();
+                fixups.push(Fixup::SwitchDefault {
+                    instruction,
+                    target: switch_target(opcode_pc, lookup.default)?,
+                });
+                for (case, offset) in lookup.offsets.iter().enumerate() {
+                    fixups.push(Fixup::SwitchCase {
+                        instruction,
+                        case,
+                        target: switch_target(opcode_pc, *offset)?,
+                    });
+                }
+                Instr::LookupSwitch {
+                    default: 0,
+                    keys: lookup.keys,
+                    targets: vec![0; lookup.offsets.len()],
+                }
+            }
+            0xc0 => {
+                let index = u16::from_be_bytes([byte(code, pc)?, byte(code, pc + 1)?]);
+                pc += 2;
+                Instr::CheckCast {
+                    class: resolve_class(file, index)?,
+                }
+            }
+            0xc1 => {
+                let index = u16::from_be_bytes([byte(code, pc)?, byte(code, pc + 1)?]);
+                pc += 2;
+                Instr::InstanceOf {
+                    class: resolve_class(file, index)?,
+                }
             }
             0xc6 => {
                 let offset = branch_offset(code, pc)?;
                 pc += 2;
-                fixups.push((instructions.len(), target_offset(opcode_pc, offset)?));
+                fixups.push(Fixup::Branch {
+                    instruction: instructions.len(),
+                    target: target_offset(opcode_pc, offset)?,
+                });
                 Instr::IfNull(0)
             }
             0xc7 => {
                 let offset = branch_offset(code, pc)?;
                 pc += 2;
-                fixups.push((instructions.len(), target_offset(opcode_pc, offset)?));
+                fixups.push(Fixup::Branch {
+                    instruction: instructions.len(),
+                    target: target_offset(opcode_pc, offset)?,
+                });
                 Instr::IfNonNull(0)
             }
+            0x94 => Instr::LCmp,
+            0x95 => Instr::FCmpL,
+            0x96 => Instr::FCmpG,
+            0x97 => Instr::DCmpL,
+            0x98 => Instr::DCmpG,
             0xac => Instr::IReturn,
+            0xad => Instr::LReturn,
+            0xae => Instr::FReturn,
+            0xaf => Instr::DReturn,
             0xb0 => Instr::AReturn,
             0xb1 => Instr::Return,
             0xbf => Instr::Athrow,
             0x12 => {
                 let index = u16::from(byte(code, pc)?);
                 pc += 1;
-                resolve_ldc(file, index)?
+                resolve_ldc(file, index, false)?
             }
             0x13 => {
                 let index = u16::from_be_bytes([byte(code, pc)?, byte(code, pc + 1)?]);
                 pc += 2;
-                resolve_ldc(file, index)?
+                resolve_ldc(file, index, false)?
+            }
+            0x14 => {
+                let index = u16::from_be_bytes([byte(code, pc)?, byte(code, pc + 1)?]);
+                pc += 2;
+                resolve_ldc(file, index, true)?
             }
             0xb2 => {
                 let index = u16::from_be_bytes([byte(code, pc)?, byte(code, pc + 1)?]);
@@ -431,6 +609,16 @@ pub fn decode(file: &ClassFile, attribute_data: &[u8]) -> Result<DecodedMethod, 
                 pc += 2;
                 let (class, name, descriptor) = resolve_field(file, index)?;
                 Instr::PutField {
+                    class,
+                    name,
+                    descriptor,
+                }
+            }
+            0xb3 => {
+                let index = u16::from_be_bytes([byte(code, pc)?, byte(code, pc + 1)?]);
+                pc += 2;
+                let (class, name, descriptor) = resolve_field(file, index)?;
+                Instr::PutStatic {
                     class,
                     name,
                     descriptor,
@@ -532,26 +720,67 @@ pub fn decode(file: &ClassFile, attribute_data: &[u8]) -> Result<DecodedMethod, 
     for (index, start) in starts.iter().enumerate() {
         boundaries.insert(*start, index);
     }
-    for (index, target) in fixups {
-        let target_index = boundaries.get(&target).copied().ok_or_else(|| {
-            InterpError::Decode(format!(
-                "branch target byte {target} is not an instruction boundary"
-            ))
-        })?;
-        instructions[index] = match &instructions[index] {
-            Instr::Goto(_) => Instr::Goto(target_index),
-            Instr::If(condition, _) => Instr::If(*condition, target_index),
-            Instr::IfICmp(condition, _) => Instr::IfICmp(*condition, target_index),
-            Instr::IfACmpEq(_) => Instr::IfACmpEq(target_index),
-            Instr::IfACmpNe(_) => Instr::IfACmpNe(target_index),
-            Instr::IfNull(_) => Instr::IfNull(target_index),
-            Instr::IfNonNull(_) => Instr::IfNonNull(target_index),
-            _ => {
-                return Err(InterpError::Decode(
-                    "branch fixup without a branch instruction".to_owned(),
-                ));
+    for fixup in fixups {
+        match fixup {
+            Fixup::Branch {
+                instruction,
+                target,
+            } => {
+                let target_index = boundary_index(&boundaries, target, "branch")?;
+                instructions[instruction] = match &instructions[instruction] {
+                    Instr::Goto(_) => Instr::Goto(target_index),
+                    Instr::If(condition, _) => Instr::If(*condition, target_index),
+                    Instr::IfICmp(condition, _) => Instr::IfICmp(*condition, target_index),
+                    Instr::IfACmpEq(_) => Instr::IfACmpEq(target_index),
+                    Instr::IfACmpNe(_) => Instr::IfACmpNe(target_index),
+                    Instr::IfNull(_) => Instr::IfNull(target_index),
+                    Instr::IfNonNull(_) => Instr::IfNonNull(target_index),
+                    _ => {
+                        return Err(InterpError::Decode(
+                            "branch fixup without a branch instruction".to_owned(),
+                        ));
+                    }
+                };
             }
-        };
+            Fixup::SwitchDefault {
+                instruction,
+                target,
+            } => {
+                let target_index = boundary_index(&boundaries, target, "switch")?;
+                match &mut instructions[instruction] {
+                    Instr::TableSwitch { default, .. } | Instr::LookupSwitch { default, .. } => {
+                        *default = target_index;
+                    }
+                    _ => {
+                        return Err(InterpError::Decode(
+                            "switch fixup without a switch instruction".to_owned(),
+                        ));
+                    }
+                }
+            }
+            Fixup::SwitchCase {
+                instruction,
+                case,
+                target,
+            } => {
+                let target_index = boundary_index(&boundaries, target, "switch")?;
+                match &mut instructions[instruction] {
+                    Instr::TableSwitch { targets, .. } | Instr::LookupSwitch { targets, .. } => {
+                        let slot = targets.get_mut(case).ok_or_else(|| {
+                            InterpError::Decode(format!(
+                                "switch case {case} is outside its own jump table"
+                            ))
+                        })?;
+                        *slot = target_index;
+                    }
+                    _ => {
+                        return Err(InterpError::Decode(
+                            "switch fixup without a switch instruction".to_owned(),
+                        ));
+                    }
+                }
+            }
+        }
     }
 
     // The exception table follows the code array in the `Code` attribute. It is
@@ -635,6 +864,19 @@ fn instruction_index(
         })
 }
 
+/// A control-flow byte target as an instruction index.
+fn boundary_index(
+    boundaries: &HashMap<usize, usize>,
+    target: usize,
+    kind: &str,
+) -> Result<usize, InterpError> {
+    boundaries.get(&target).copied().ok_or_else(|| {
+        InterpError::Decode(format!(
+            "{kind} target byte {target} is not an instruction boundary"
+        ))
+    })
+}
+
 /// A big-endian `u16` from the `Code` payload, advancing `offset`.
 fn table_u2(data: &[u8], offset: &mut usize) -> Result<u16, InterpError> {
     let end = offset
@@ -705,23 +947,191 @@ fn target_offset(opcode_pc: usize, offset: i16) -> Result<usize, InterpError> {
     })
 }
 
-/// Resolve `ldc`/`ldc_w`'s constant-pool index to its instruction.
+/// A decoded `tableswitch` operand block, still in byte offsets.
+struct Tableswitch {
+    default: i32,
+    low: i32,
+    offsets: Vec<i32>,
+    /// The byte offset of the first instruction after the switch.
+    next_pc: usize,
+}
+
+/// A decoded `lookupswitch` operand block, still in byte offsets.
+struct Lookupswitch {
+    default: i32,
+    keys: Vec<i32>,
+    offsets: Vec<i32>,
+    /// The byte offset of the first instruction after the switch.
+    next_pc: usize,
+}
+
+/// The absolute byte offset a `tableswitch`/`lookupswitch` operand targets.
 ///
-/// Only the two kinds this VM can push are decoded: a `CONSTANT_String` (interned when
-/// it executes) and a `CONSTANT_Class` (a class literal, resolved through the executing
-/// frame's loader). A numeric constant and every other kind are a typed decode error;
-/// the numeric forms need `ldc2_w` or a value representation this slice does not have.
-fn resolve_ldc(file: &ClassFile, index: u16) -> Result<Instr, InterpError> {
+/// Switch offsets are signed 32-bit values relative to the opcode's own address, unlike
+/// the signed 16-bit offsets of the ordinary branch instructions.
+fn switch_target(opcode_pc: usize, offset: i32) -> Result<usize, InterpError> {
+    let opcode_pc = isize::try_from(opcode_pc)
+        .map_err(|_| InterpError::Decode("code offset does not fit an isize".to_owned()))?;
+    let target = opcode_pc
+        + isize::try_from(offset).map_err(|_| {
+            InterpError::Decode(format!(
+                "switch at byte {opcode_pc} has an offset wider than an isize"
+            ))
+        })?;
+    usize::try_from(target).map_err(|_| {
+        InterpError::Decode(format!(
+            "switch at byte {opcode_pc} targets {target}, before the code start"
+        ))
+    })
+}
+
+/// The first operand byte of a switch, after its alignment padding.
+///
+/// JVMS §6.5 requires the operand to begin on a four-byte boundary measured from the
+/// start of the code array and calls the intervening bytes null padding. A padding byte
+/// that is not zero is therefore malformed, not something to ignore.
+fn switch_operand_start(
+    code: &[u8],
+    opcode_pc: usize,
+    mnemonic: &str,
+) -> Result<usize, InterpError> {
+    let after_opcode = opcode_pc + 1;
+    let padding = (4 - (after_opcode % 4)) % 4;
+    for index in 0..padding {
+        let value = byte(code, after_opcode + index)?;
+        if value != 0 {
+            return Err(InterpError::Decode(format!(
+                "{mnemonic} at byte {opcode_pc} has non-zero padding byte 0x{value:02x}"
+            )));
+        }
+    }
+    Ok(after_opcode + padding)
+}
+
+/// A big-endian signed 32-bit value from the code array.
+fn i32_at(code: &[u8], offset: usize) -> Result<i32, InterpError> {
+    Ok(i32::from_be_bytes([
+        byte(code, offset)?,
+        byte(code, offset + 1)?,
+        byte(code, offset + 2)?,
+        byte(code, offset + 3)?,
+    ]))
+}
+
+/// Decode a `tableswitch` (`0xaa`) operand block.
+///
+/// The jump table is one entry per key in `low..=high`; the table must fit in the code
+/// array, and `high` below `low` is malformed rather than an empty table.
+fn decode_tableswitch(code: &[u8], opcode_pc: usize) -> Result<Tableswitch, InterpError> {
+    let operand = switch_operand_start(code, opcode_pc, "tableswitch")?;
+    let default = i32_at(code, operand)?;
+    let low = i32_at(code, operand + 4)?;
+    let high = i32_at(code, operand + 8)?;
+    if high < low {
+        return Err(InterpError::Decode(format!(
+            "tableswitch at byte {opcode_pc} has high {high} below low {low}"
+        )));
+    }
+    let count = i64::from(high) - i64::from(low) + 1;
+    let table_start = operand + 12;
+    let available = code.len().saturating_sub(table_start);
+    let needed = count
+        .checked_mul(4)
+        .ok_or_else(|| InterpError::Decode("tableswitch jump table overflows".to_owned()))?;
+    if needed > i64::try_from(available).unwrap_or(i64::MAX) {
+        return Err(InterpError::Decode(format!(
+            "tableswitch at byte {opcode_pc} is truncated: {count} jump offsets need {needed} bytes, {available} remain"
+        )));
+    }
+    let count = usize::try_from(count)
+        .map_err(|_| InterpError::Decode("tableswitch jump table is too large".to_owned()))?;
+    let mut offsets = Vec::with_capacity(count);
+    for index in 0..count {
+        offsets.push(i32_at(code, table_start + index * 4)?);
+    }
+    Ok(Tableswitch {
+        default,
+        low,
+        offsets,
+        next_pc: table_start + count * 4,
+    })
+}
+
+/// Decode a `lookupswitch` (`0xab`) operand block.
+///
+/// The `(match, offset)` pairs must be strictly ascending by `match`: a sorted table is
+/// what JVMS §6.5.lookupswitch requires, so an unsorted or duplicate key is a malformed
+/// switch, not something to search linearly.
+fn decode_lookupswitch(code: &[u8], opcode_pc: usize) -> Result<Lookupswitch, InterpError> {
+    let operand = switch_operand_start(code, opcode_pc, "lookupswitch")?;
+    let default = i32_at(code, operand)?;
+    let pairs = i32_at(code, operand + 4)?;
+    if pairs < 0 {
+        return Err(InterpError::Decode(format!(
+            "lookupswitch at byte {opcode_pc} has a negative pair count {pairs}"
+        )));
+    }
+    let count = usize::try_from(pairs)
+        .map_err(|_| InterpError::Decode("lookupswitch pair count is too large".to_owned()))?;
+    let pairs_start = operand + 8;
+    let available = code.len().saturating_sub(pairs_start);
+    let needed = count
+        .checked_mul(8)
+        .ok_or_else(|| InterpError::Decode("lookupswitch table overflows".to_owned()))?;
+    if needed > available {
+        return Err(InterpError::Decode(format!(
+            "lookupswitch at byte {opcode_pc} is truncated: {count} pairs need {needed} bytes, {available} remain"
+        )));
+    }
+    let mut keys = Vec::with_capacity(count);
+    let mut offsets = Vec::with_capacity(count);
+    let mut previous: Option<i32> = None;
+    for index in 0..count {
+        let pair = pairs_start + index * 8;
+        let key = i32_at(code, pair)?;
+        if let Some(previous) = previous {
+            if key <= previous {
+                return Err(InterpError::Decode(format!(
+                    "lookupswitch at byte {opcode_pc} has key {key} after {previous}: keys must be strictly ascending"
+                )));
+            }
+        }
+        previous = Some(key);
+        keys.push(key);
+        offsets.push(i32_at(code, pair + 4)?);
+    }
+    Ok(Lookupswitch {
+        default,
+        keys,
+        offsets,
+        next_pc: pairs_start + count * 8,
+    })
+}
+
+/// Resolve `ldc`/`ldc_w`/`ldc2_w`'s constant-pool index to its instruction.
+///
+/// The one-slot forms (`ldc`, `ldc_w`) decode a `CONSTANT_String` (interned when it
+/// executes), a `CONSTANT_Class` (a class literal, resolved through the executing
+/// frame's loader), a `CONSTANT_Integer` or a `CONSTANT_Float`. `ldc2_w` decodes a
+/// `CONSTANT_Long` or `CONSTANT_Double`. Any other pairing is a typed decode error: a
+/// `long`/`double` through `ldc` is not a legal encoding, and this slice has no
+/// `MethodType`/`MethodHandle`/`Dynamic` value.
+fn resolve_ldc(file: &ClassFile, index: u16, wide: bool) -> Result<Instr, InterpError> {
     let constant = file.constant_pool.get(index)?;
-    match constant {
-        Constant::String { string_index } => Ok(Instr::LdcString(
+    match (wide, constant) {
+        (false, Constant::String { string_index }) => Ok(Instr::LdcString(
             file.constant_pool.utf8(*string_index)?.to_owned(),
         )),
-        Constant::Class { name_index } => Ok(Instr::LdcClass(
+        (false, Constant::Class { name_index }) => Ok(Instr::LdcClass(
             file.constant_pool.utf8(*name_index)?.to_owned(),
         )),
-        other => Err(InterpError::Decode(format!(
-            "ldc of an unsupported {} constant",
+        (false, Constant::Integer(value)) => Ok(Instr::LdcInt(*value)),
+        (false, Constant::Float(value)) => Ok(Instr::LdcFloat(*value)),
+        (true, Constant::Long(value)) => Ok(Instr::LdcLong(*value)),
+        (true, Constant::Double(value)) => Ok(Instr::LdcDouble(*value)),
+        (_, other) => Err(InterpError::Decode(format!(
+            "{} of an unsupported {} constant",
+            if wide { "ldc2_w" } else { "ldc" },
             constant_kind(other)
         ))),
     }

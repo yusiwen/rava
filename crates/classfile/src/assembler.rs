@@ -7,17 +7,18 @@
 //!
 //! What it covers is exactly what the fixtures need: integer constants, integer and
 //! reference loads and stores, `iinc`, `aconst_null`, `dup`, two conditional branches,
-//! `if_acmpeq`/`if_acmpne`, `goto`, `getstatic`, `getfield`, `putfield`, `new`, array
-//! creation and access (`newarray`, `anewarray`, `multianewarray`, `arraylength`,
-//! `iaload`/`iastore` and `aaload`/`aastore`), `ldc`/`ldc_w`, `invokevirtual`,
-//! `invokeinterface`, `invokespecial`, `invokestatic` through [`op`](Assembler::op),
-//! `athrow`, and the
-//! `ireturn`/`areturn`/`return` forms. Everything else is still raw bytes through
+//! `if_acmpeq`/`if_acmpne`, `goto`, `getstatic`, `putstatic`, `getfield`, `putfield`,
+//! `new`, array creation and access (`newarray`, `anewarray`, `multianewarray`,
+//! `arraylength`, `iaload`/`iastore` and `aaload`/`aastore`), `ldc`/`ldc_w`/`ldc2_w`,
+//! `checkcast`, `instanceof`, `invokevirtual`, `invokeinterface`, `invokespecial`,
+//! `invokestatic` through [`op`](Assembler::op), `athrow`, `lcmp`/`fcmp<op>`/`dcmp<op>`,
+//! the `tableswitch`/`lookupswitch` forms, and the `ireturn`/`lreturn`/`freturn`/
+//! `dreturn`/`areturn`/`return` forms. Everything else is still raw bytes through
 //! [`Assembler::op`].
 //!
-//! `tableswitch` and `lookupswitch` are deliberately absent: their padding depends on the switch
-//! opcode's own address, which is a different encoding problem (and the decoder already handles the
-//! result).
+//! The switch helpers compute their own alignment padding from the opcode's address and
+//! resolve every default/case label in [`finish`](Assembler::finish), because a switch
+//! operand's 32-bit offsets are measured from the opcode just like a branch's 16-bit one.
 
 use crate::Error;
 
@@ -25,11 +26,17 @@ use crate::Error;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Label(usize);
 
-/// One 16-bit branch offset waiting for its label’s address.
-struct Fixup {
-    /// Offset of the branch's *opcode*, which is what the relative offset is measured from.
-    opcode: usize,
-    label: Label,
+/// One target waiting for its label’s address.
+#[derive(Debug, Clone, Copy)]
+enum Fixup {
+    /// A signed 16-bit branch offset at `opcode + 1`, relative to the opcode.
+    Branch { opcode: usize, label: Label },
+    /// A signed 32-bit switch offset written at `at`, relative to `opcode`.
+    Switch {
+        opcode: usize,
+        label: Label,
+        at: usize,
+    },
 }
 
 /// Bytecode under construction.
@@ -183,8 +190,19 @@ impl Assembler {
         self.op(0x13, &index.to_be_bytes());
     }
 
+    /// `ldc2_w`: push a `long` or `double` constant-pool entry. JVMS requires this
+    /// two-byte form for the two-slot constants.
+    pub fn ldc2_w(&mut self, index: u16) {
+        self.op(0x14, &index.to_be_bytes());
+    }
+
     pub fn getstatic(&mut self, index: u16) {
         self.op(0xb2, &index.to_be_bytes());
+    }
+
+    /// `putstatic`: write a static field through a `CONSTANT_Fieldref`.
+    pub fn putstatic(&mut self, index: u16) {
+        self.op(0xb3, &index.to_be_bytes());
     }
 
     /// `getfield`: read an instance field through a `CONSTANT_Fieldref`.
@@ -298,8 +316,127 @@ impl Assembler {
         self.branch(0xa7, label);
     }
 
+    /// `tableswitch`: one target per key in `low..=high`, plus the default.
+    ///
+    /// The padding is computed from the opcode's own address, so callers never write it.
+    /// The `high` value is derived from `labels`, which must not be empty and must line
+    /// up with `low`.
+    pub fn tableswitch(&mut self, default: Label, low: i32, labels: &[Label]) {
+        assert!(
+            !labels.is_empty(),
+            "tableswitch needs at least one jump-table entry"
+        );
+        let high = low
+            .checked_add(i32::try_from(labels.len() - 1).expect("jump-table length fits an int"))
+            .expect("tableswitch high value fits an int");
+        let opcode = self.bytes.len();
+        self.bytes.push(0xaa);
+        let operand = self.switch_operand_start();
+        self.bytes.extend_from_slice(&0i32.to_be_bytes()); // default, patched in finish
+        self.bytes.extend_from_slice(&low.to_be_bytes());
+        self.bytes.extend_from_slice(&high.to_be_bytes());
+        self.fixups.push(Fixup::Switch {
+            opcode,
+            label: default,
+            at: operand,
+        });
+        for label in labels {
+            let at = self.bytes.len();
+            self.bytes.extend_from_slice(&0i32.to_be_bytes());
+            self.fixups.push(Fixup::Switch {
+                opcode,
+                label: *label,
+                at,
+            });
+        }
+    }
+
+    /// `lookupswitch`: sparse `(key, target)` pairs plus the default.
+    ///
+    /// The pairs are sorted by key, as JVMS §6.5.lookupswitch requires; a duplicate key
+    /// panics because the resulting class file would be malformed. A malformed switch is
+    /// still assemblable through [`op`](Assembler::op), which is how the decoder's
+    /// rejection tests build one.
+    pub fn lookupswitch(&mut self, default: Label, pairs: &[(i32, Label)]) {
+        let mut pairs = pairs.to_vec();
+        pairs.sort_by_key(|(key, _)| *key);
+        for window in pairs.windows(2) {
+            assert!(
+                window[0].0 != window[1].0,
+                "lookupswitch keys must be unique: {} appears twice",
+                window[0].0
+            );
+        }
+        let opcode = self.bytes.len();
+        self.bytes.push(0xab);
+        let operand = self.switch_operand_start();
+        self.bytes.extend_from_slice(&0i32.to_be_bytes()); // default, patched in finish
+        self.bytes
+            .extend_from_slice(&(pairs.len() as i32).to_be_bytes());
+        self.fixups.push(Fixup::Switch {
+            opcode,
+            label: default,
+            at: operand,
+        });
+        for (key, label) in pairs {
+            self.bytes.extend_from_slice(&key.to_be_bytes());
+            let at = self.bytes.len();
+            self.bytes.extend_from_slice(&0i32.to_be_bytes());
+            self.fixups.push(Fixup::Switch { opcode, label, at });
+        }
+    }
+
+    /// `checkcast`: check that the reference on top of the stack is assignable to the
+    /// class named by the `CONSTANT_Class` at `index`, leaving it on the stack.
+    pub fn checkcast(&mut self, index: u16) {
+        self.op(0xc0, &index.to_be_bytes());
+    }
+
+    /// `instanceof`: push 1 or 0 for whether the reference on top of the stack is an
+    /// instance of the class named by the `CONSTANT_Class` at `index`.
+    pub fn instanceof(&mut self, index: u16) {
+        self.op(0xc1, &index.to_be_bytes());
+    }
+
+    /// `lcmp`: compare two `long` values.
+    pub fn lcmp(&mut self) {
+        self.bytes.push(0x94);
+    }
+
+    /// `fcmpl`: compare two `float` values, pushing -1 when either is NaN.
+    pub fn fcmpl(&mut self) {
+        self.bytes.push(0x95);
+    }
+
+    /// `fcmpg`: compare two `float` values, pushing 1 when either is NaN.
+    pub fn fcmpg(&mut self) {
+        self.bytes.push(0x96);
+    }
+
+    /// `dcmpl`: compare two `double` values, pushing -1 when either is NaN.
+    pub fn dcmpl(&mut self) {
+        self.bytes.push(0x97);
+    }
+
+    /// `dcmpg`: compare two `double` values, pushing 1 when either is NaN.
+    pub fn dcmpg(&mut self) {
+        self.bytes.push(0x98);
+    }
+
     pub fn ireturn(&mut self) {
         self.bytes.push(0xac);
+    }
+
+    pub fn lreturn(&mut self) {
+        self.bytes.push(0xad);
+    }
+
+    pub fn freturn(&mut self) {
+        self.bytes.push(0xae);
+    }
+
+    pub fn dreturn(&mut self) {
+        self.bytes.push(0xaf);
     }
 
     pub fn areturn(&mut self) {
@@ -313,19 +450,38 @@ impl Assembler {
     /// Resolves every branch and returns the bytes.
     pub fn finish(self) -> Result<Vec<u8>, Error> {
         let mut bytes = self.bytes;
+        let labels = &self.labels;
         for fixup in &self.fixups {
-            let target = self.labels[fixup.label.0].ok_or(Error::InvalidAssembly {
-                detail: format!("label {} was never placed", fixup.label.0),
-            })?;
-            // A branch offset is relative to the opcode's own address (JVMS §6.5).
-            let offset = target as isize - fixup.opcode as isize;
-            let offset = i16::try_from(offset).map_err(|_| Error::InvalidAssembly {
-                detail: format!(
-                    "branch to label {} is {offset} bytes away, beyond a signed 16-bit offset",
-                    fixup.label.0
-                ),
-            })?;
-            bytes[fixup.opcode + 1..fixup.opcode + 3].copy_from_slice(&offset.to_be_bytes());
+            match *fixup {
+                Fixup::Branch { opcode, label } => {
+                    let target = labels[label.0].ok_or(Error::InvalidAssembly {
+                        detail: format!("label {} was never placed", label.0),
+                    })?;
+                    // A branch offset is relative to the opcode's own address (JVMS §6.5).
+                    let offset = target as isize - opcode as isize;
+                    let offset = i16::try_from(offset).map_err(|_| Error::InvalidAssembly {
+                        detail: format!(
+                            "branch to label {} is {offset} bytes away, beyond a signed 16-bit offset",
+                            label.0
+                        ),
+                    })?;
+                    bytes[opcode + 1..opcode + 3].copy_from_slice(&offset.to_be_bytes());
+                }
+                Fixup::Switch { opcode, label, at } => {
+                    let target = labels[label.0].ok_or(Error::InvalidAssembly {
+                        detail: format!("label {} was never placed", label.0),
+                    })?;
+                    // A switch offset is a signed 32-bit value relative to the opcode.
+                    let offset = target as i64 - opcode as i64;
+                    let offset = i32::try_from(offset).map_err(|_| Error::InvalidAssembly {
+                        detail: format!(
+                            "switch target label {} is {offset} bytes away, beyond a signed 32-bit offset",
+                            label.0
+                        ),
+                    })?;
+                    bytes[at..at + 4].copy_from_slice(&offset.to_be_bytes());
+                }
+            }
         }
         Ok(bytes)
     }
@@ -334,9 +490,19 @@ impl Assembler {
         let opcode_offset = self.bytes.len();
         self.bytes.push(opcode);
         self.bytes.extend_from_slice(&[0, 0]); // placeholder
-        self.fixups.push(Fixup {
+        self.fixups.push(Fixup::Branch {
             opcode: opcode_offset,
             label,
         });
+    }
+
+    /// Append between zero and three zero bytes so the next operand starts on a
+    /// four-byte boundary measured from the start of the code array (JVMS §6.5).
+    ///
+    /// Returns the code offset of the operand.
+    fn switch_operand_start(&mut self) -> usize {
+        let padding = (4 - (self.bytes.len() % 4)) % 4;
+        self.bytes.extend(std::iter::repeat_n(0u8, padding));
+        self.bytes.len()
     }
 }

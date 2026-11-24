@@ -7,8 +7,8 @@
 
 > Ledger. P0 and P1 were accepted on 2026-11-23. M1 is complete; M2 is in progress
 > (M2.1, M2.2, M2.3, M2.4, M2.5, M2.6, M2.7, M2.8, M2.9, M2.10, M2.11, M2.12,
-> M2.13, M2.14, M2.15, M2.16, M2.17, M2.18, M2.19 and M2.20 done). Keep this file
-> honest and terse.
+> M2.13, M2.14, M2.15, M2.16, M2.17, M2.18, M2.19, M2.20 and M2.21 done). Keep
+> this file honest and terse.
 
 ## Phase status
 
@@ -29,7 +29,7 @@ release process, if wanted, becomes its own phase.
 > Gates are defined in `docs/requirements.md` § Milestones. P0 and P1 are accepted;
 > M0 and M1 are complete, and both gate reviews have passed. M2 is in progress, with
 > M2.1, M2.2, M2.3, M2.4, M2.5, M2.6, M2.7, M2.8, M2.9, M2.10, M2.11, M2.12, M2.13,
-> M2.14, M2.15, M2.16, M2.17, M2.18, M2.19 and M2.20 done.
+> M2.14, M2.15, M2.16, M2.17, M2.18, M2.19, M2.20 and M2.21 done.
 
 | Milestone | Delivers | Gate | Status |
 | :--- | :--- | :--- | :--- |
@@ -80,12 +80,12 @@ release process, if wanted, becomes its own phase.
 | M2.18 | `invokedynamic` string concatenation | R3 | `cargo test -p rava-interp --test invokedynamic_concat` exits 0 | done |
 | M2.19 | Lambda metafactory and `invokeinterface` | R3 | `cargo test -p rava-interp --test lambdas` exits 0 | done |
 | M2.20 | Classpath runner (`rava run`) | R3 | `cargo test -p rava-cli --test classpath_run` exits 0 | done |
-| M2.21 | Static fields, casts, switches and numeric constants | R3 | `cargo test -p rava-interp --test bytecode_surface` exits 0 | todo |
+| M2.21 | Static fields, casts, switches and numeric constants | R3 | `cargo test -p rava-interp --test bytecode_surface` exits 0 | done |
 
 P0 and P1 are accepted; P2 is done because the M2 increments are sliced. All M0 and
 M1 slices are done, and both gate reviews passed. M2.1, M2.2, M2.3, M2.4, M2.5,
 M2.6, M2.7, M2.8, M2.9, M2.10, M2.11, M2.12, M2.13, M2.14, M2.15, M2.16, M2.17,
-M2.18, M2.19 and M2.20 are done; M2.21 is next.
+M2.18, M2.19, M2.20 and M2.21 are done; M2.22 is next.
 
 ## Slice log
 
@@ -123,6 +123,7 @@ M2.18, M2.19 and M2.20 are done; M2.21 is next.
 | M2.18 | `cargo test -p rava-interp --test invokedynamic_concat` | 0 | 2026-11-24 | `CONSTANT_InvokeDynamic` at opcode `0xba` decodes its u2 index, its reserved zero bytes, its call-site name and descriptor and its bootstrap method index; `ClassFile::bootstrap_method` materializes a `BootstrapMethods` entry on demand as a `REF_invokeStatic` handle plus `String`/`Class`/`int`/`long`/`float`/`double` static arguments, and an out-of-range index, a non-`MethodHandle` reference, a non-static handle or an unsupported argument is `Error::BadBootstrapMethod`; `rava-vm`'s `string_concat` module implements `StringConcatFactory.makeConcat` (every argument, no recipe) and `makeConcatWithConstants` (`\u0001` consumes the next dynamic argument, `\u0002` the next recipe constant, and both sides must be consumed exactly), converts dynamic arguments through the M2.9/M2.13 `String.valueOf` rules (String, boxed Integer, null, int/long/boolean/char/float/double, Object `ClassName@hex`) and pushes an interned String result; any other bootstrap owner or method is `VmError::UnsupportedBootstrapMethod`; the committed release-17 `demo/ConcatProbe` carries four javac-emitted `makeConcatWithConstants` call sites, one using a `\u0002` recipe constant, and assembled probes cover `makeConcat`, every supported primitive descriptor, static recipe constants, a recipe/descriptor mismatch and the malformed and out-of-range bootstrap references; 13 tests; `cargo test -p rava-interp` 143, `rava-vm` 47, `rava-classfile` 50 and `rava-cli` 67 pass, workspace 307; `cargo xtask ci` exits 0; |
 | M2.19 | `cargo test -p rava-interp --test lambdas` | 0 | 2026-11-24 | `invokeinterface` (`0xb9`) decodes its u2 interface-method reference, u1 argument count and u1 reserved zero byte (a non-zero byte is a decode error) and executes: the interface method is resolved on the receiver's runtime class first, then as a default method in the instruction's interface hierarchy, and the ordinary native-registry-before-`Code` path runs it; a class chain without the method falls back to a declaration in the interface hierarchy, an interface-assignability check rejects a wrong receiver with a typed `NotAssignable`, and a missing transitive interface in the C1 tree is skipped instead of masking the result. `HeapObject::Lambda` carries the functional-interface `ClassId`, the SAM name and `samMethodType` descriptor, the `instantiatedMethodType`, a target (owner `ClassId`, name, descriptor and static/instance/constructor kind) and the captured `Value`s; the lambda's class identity is the interface (there is no synthetic class file), `Shared::get_class`/`Object.toString` report that interface and `Shared::roots` enumerates the captured references. `LambdaMetafactory.metafactory` and `altMetafactory` parse their `MethodType`/`MethodHandle` static arguments (the class-file `BootstrapMethods` view now types both), capture the call-site arguments and create the lambda; the SAM call concatenates captured and call arguments, uses the first value as the receiver for an instance target, allocates for a constructor target, and runs through the existing `run_static_method`/`run_instance_method`; `altMetafactory` rejects `FLAG_SERIALIZABLE` and skips marker/bridge tables. The committed release-17 fixture (`demo/IntFn`, `demo/Sink`, `demo/IntFnImpl`, `demo/SinkFactory`, `demo/LambdaProbe`) covers a capturing static lambda, a no-argument void `Runnable`, static/unbound/bound/constructor method references and ordinary/String/ArrayList receivers through `invokeinterface`; assembled probes cover `altMetafactory`, a wrong receiver, a wrong SAM name, an unsupported bootstrap owner, a serializable flag and missing metafactory arguments; 13 tests; `cargo test -p rava-interp` 156, `rava-vm` 47, `rava-classfile` 50 and `rava-cli` 67 pass, workspace 320; `cargo xtask ci` exits 0; |
 | M2.20 | `cargo test -p rava-cli --test classpath_run` | 0 | 2026-11-24 | `ClassPathSource` searches directories and jars in classpath order through the existing `ClassSource`/`DirectorySource`/`JarSource` and reports a missing class as `ClassNotFound`; the CLI adds one application loader parented to the bootstrap loader (no second class table, `(loader, name)` identity) and `rava run` loads `MainClass`, requires a static `main([Ljava/lang/String;)V`, allocates a `String[]` through the heap's `ClassRef` machinery and invokes it; `rava-vm::library::register_all` installs the existing Object/String/builder/list/map/Integer/annotation/reflection/instance natives plus a minimal `PrintStream` and initializes `System.out`/`System.err`, and the runner also registers the interpreter's reflective-invocation natives; a committed `javac --release 17` `demo/HelloRun` class and its stored jar, 10 CLI tests (directory, jar, classpath order through a colon list, repeated `--cp`, missing class, missing main, non-static main, usage exit codes, the default stdlib and program arguments) plus 3 `ClassPathSource` tests; `cargo test -p rava-cli` passes 77, `rava-vm` 50, `rava-interp` 156, `rava-classfile` 50, workspace 333; `cargo xtask ci` exits 0 |
+| M2.21 | `cargo test -p rava-interp --test bytecode_surface` | 0 | 2026-11-24 | `putstatic` writes `ClassEntry.statics` keyed by `(name, descriptor)` after resolving the declaring class through the executing loader, with typed static/instance, missing-field, descriptor and value-kind errors; `checkcast`/`instanceof` resolve named/primitive/array operands and cover superclass, interface, array-covariance and `Object`/`Cloneable`/`Serializable` assignability, with a typed `ClassCast` on failure; `tableswitch`/`lookupswitch` map default and case targets through the two-pass boundary map and reject non-zero padding, non-boundary targets, inverted/truncated tables and unsorted/duplicate lookup keys; `ldc`/`ldc_w` decode Integer/Float and `ldc2_w` Long/Double, with `lcmp`/`fcmp<op>`/`dcmp<op>` and `lreturn`/`freturn`/`dreturn`; assembler helpers cover each new form; 15 tests; `cargo test -p rava-interp` 171, `rava-vm` 50, `rava-classfile` 50 and `rava-cli` 77 pass, workspace 348; `cargo xtask ci` exits 0 |
 
 M0.6 boundary: the reference and class-unloading hooks are registration points only.
 M0 has no collector, so no weak/soft/phantom reference is cleared and no class is
@@ -726,6 +727,12 @@ loudly as missing natives; a `System.err` line is indistinguishable from stdout;
 no classpath deduplication or canonicalisation, so the same directory listed twice is
 searched twice. This slice does not start Spring and adds no Spring or module behavior.
 
+M2.21 boundary: `putstatic` resolves the owner through the executing class's loader and the field on that class or a superclass; a field declared in a superclass is stored on the *declaring* class's statics table. It requires `ACC_STATIC`, so an instance field through a static opcode is `InterpError::InstanceFieldAccess`, while a static field through `getfield`/`putfield` stays `StaticFieldAccess`; a missing field, a name under another descriptor and a value whose kind does not match the descriptor (`FieldValueMismatch`) are typed errors. A stored value is the ordinary `ClassEntry.statics` map keyed by `(name, descriptor)`. `getstatic` now uses the same resolution walk, so a superclass static field reads back and the M2.15 `TYPE`/`System.out` paths are unchanged. No `final`-field or access-control check is added, and a static field inherited through an interface is still outside the superclass-only resolution walk.
+
+`checkcast`/`instanceof` decode a class operand and resolve it through the executing loader as a named class, a primitive (Java name or one-character descriptor) or an array descriptor. `instanceof` pushes 1/0. Null is an instance of every reference type and of no primitive, so a null operand short-circuits without resolving a named target; a primitive operand never matches a reference value. `checkcast` leaves null and assignable references unchanged and reports a mismatch as `InterpError::ClassCast { expected, found }`; there is no synthesized `ClassCastException`. Assignability covers the superclass chain, the interface lists on it, array covariance with primitive-component equality, and the array supertypes `Object`/`Cloneable`/`Serializable`. It is still a name-level walk of loaded classes: an interface the C1 tree omits is skipped, and a class object's runtime type is `java.lang.Class`, just as `Shared::get_class` reports.
+
+`tableswitch`/`lookupswitch` decode their JVMS §6.5 alignment padding; a non-zero padding byte is malformed, not ignored. The default and every case target become instruction indices through the existing two-pass boundary map, and a non-boundary target, a negative pair count, a `tableswitch` whose high is below its low, a truncated table, and a `lookupswitch` whose keys are unsorted or duplicated are decode errors. `ldc`/`ldc_w` decode `CONSTANT_Integer` and `CONSTANT_Float` in addition to the M2.17 string and class forms; `ldc2_w` decodes `CONSTANT_Long`/`CONSTANT_Double`; a `long`/`double` through `ldc`/`ldc_w`, and `ldc2_w` of any other kind, are typed decode errors. `lcmp`, `fcmpl`/`fcmpg`, `dcmpl`/`dcmpg` and `lreturn`/`freturn`/`dreturn` were added so a fixture can return and compare those constants. The interpreter keeps one local slot per value, so a `long`/`double` argument is read from one local and a fixture may declare the JVM's two-slot width without using the second slot; this is the existing M2.18 deviation, not two-slot widening. There is no `wide` instruction, monitor, `ldc` of `MethodType`/`MethodHandle`/`Dynamic`, or Spring in this slice. The `BytecodeProbe` fixture is assembled in Rust, and its malformed switch methods are decoded when called, so those paths are typed errors rather than hand-built `DecodedMethod` values.
+
 ## Decision log
 
 | ADR | Decision | Status |
@@ -825,7 +832,13 @@ A fresh session should:
     point, a minimal `System.out`/`System.err` and `PrintStream`, and `rava run`, which
     takes `<MainClass> --stdlib <dir> --cp <path-list>`, requires a static
     `main([Ljava/lang/String;)V`, allocates its `String[]` and invokes it with exit codes
-    0/1/2 (`cargo test -p rava-cli --test classpath_run`). M2.21 is next.
+    0/1/2 (`cargo test -p rava-cli --test classpath_run`). M2.21 landed static fields,
+    casts, switches and numeric constants: `putstatic` on the declaring class's statics
+    table with typed static/instance and kind checks, `checkcast`/`instanceof` over named,
+    interface and array types with array covariance, `tableswitch`/`lookupswitch` targets
+    resolved to instruction indices, and `ldc`/`ldc2_w` of int/float/long/double with the
+    returns and comparisons that observe them
+    (`cargo test -p rava-interp --test bytecode_surface`). M2.22 is next.
 4. Do not write runtime code outside a defined slice.
 
 ## Open decisions

@@ -375,6 +375,69 @@ fn execute(
                     frame.pc = target;
                 }
             }
+            Instr::TableSwitch {
+                default,
+                low,
+                targets,
+            } => {
+                let key = int(frame.pop()?)?;
+                let index = i64::from(key) - i64::from(low);
+                let target = usize::try_from(index)
+                    .ok()
+                    .and_then(|index| targets.get(index).copied())
+                    .unwrap_or(default);
+                frame.pc = target;
+            }
+            Instr::LookupSwitch {
+                default,
+                keys,
+                targets,
+            } => {
+                let key = int(frame.pop()?)?;
+                let target = keys
+                    .binary_search(&key)
+                    .ok()
+                    .and_then(|index| targets.get(index).copied())
+                    .unwrap_or(default);
+                frame.pc = target;
+            }
+            Instr::InstanceOf { class } => {
+                // JVMS §6.5.instanceof: null is an instance of every reference type and
+                // of no primitive type, so it needs no operand resolution. A primitive
+                // operand is a non-reference type, so no object is ever its instance.
+                let reference = pop_reference(frame)?;
+                let result = if reference.is_null() {
+                    primitive_operand(&class).is_none()
+                } else {
+                    let target = resolve_class_operand(shared, frame.class, &class)?;
+                    let actual = runtime_class_ref(shared, reference)?;
+                    class_ref_assignable(shared, &actual, &target)?
+                };
+                frame.push(Value::Int(i32::from(result)))?;
+            }
+            Instr::CheckCast { class } => {
+                let reference = pop_reference(frame)?;
+                if reference.is_null() {
+                    // A null passes every reference cast. A primitive operand names no
+                    // reference type, so even null is not assignable to it.
+                    if let Some(kind) = primitive_operand(&class) {
+                        return Err(InterpError::ClassCast {
+                            expected: kind.name().to_owned(),
+                            found: "null".to_owned(),
+                        });
+                    }
+                } else {
+                    let target = resolve_class_operand(shared, frame.class, &class)?;
+                    let actual = runtime_class_ref(shared, reference)?;
+                    if !class_ref_assignable(shared, &actual, &target)? {
+                        return Err(InterpError::ClassCast {
+                            expected: class_ref_label(shared, &target)?,
+                            found: class_ref_label(shared, &actual)?,
+                        });
+                    }
+                }
+                frame.push(Value::Ref(reference))?;
+            }
             Instr::LdcString(text) => {
                 // JVMS §5.1: a string constant is interned. Using the intern table here
                 // makes `ldc` of the same constant reference-identical and keeps a loop
@@ -390,12 +453,16 @@ fn execute(
                 let reference = class_literal(shared, frame.class, &name)?;
                 frame.push(Value::Ref(reference))?;
             }
+            Instr::LdcInt(value) => frame.push(Value::Int(value))?,
+            Instr::LdcFloat(value) => frame.push(Value::Float(value))?,
+            Instr::LdcLong(value) => frame.push(Value::Long(value))?,
+            Instr::LdcDouble(value) => frame.push(Value::Double(value))?,
             Instr::GetStatic {
                 class,
                 name,
                 descriptor,
             } => {
-                let target = resolve_from(shared, frame.class, &class)?;
+                let target = static_field(shared, frame.class, &class, &name, &descriptor)?;
                 ensure_initialized(shared, thread, target)?;
                 let entry = shared
                     .entry(target)
@@ -412,6 +479,33 @@ fn execute(
                         ))
                     })?;
                 frame.push(value)?;
+            }
+            Instr::PutStatic {
+                class,
+                name,
+                descriptor,
+            } => {
+                // JVMS §6.5.putstatic: the value is on top of the operand stack. The
+                // owner is resolved through the executing class's loader, then the
+                // declaring class is initialized before the store.
+                let target = static_field(shared, frame.class, &class, &name, &descriptor)?;
+                ensure_initialized(shared, thread, target)?;
+                let value = frame.pop()?;
+                if !value_matches_descriptor(&descriptor, value) {
+                    return Err(InterpError::FieldValueMismatch {
+                        class: class_name(shared, target),
+                        name,
+                        descriptor,
+                    });
+                }
+                let entry = shared
+                    .entry(target)
+                    .ok_or_else(|| InterpError::Decode("static class vanished".to_owned()))?;
+                entry
+                    .statics
+                    .lock()
+                    .expect("static field lock poisoned")
+                    .insert((name, descriptor), value);
             }
             Instr::GetField {
                 class,
@@ -535,6 +629,15 @@ fn execute(
                 };
                 frame.push(Value::Int(result))?;
             }
+            Instr::LCmp => {
+                let right = long(frame.pop()?)?;
+                let left = long(frame.pop()?)?;
+                frame.push(Value::Int(ordering(left.cmp(&right))))?;
+            }
+            Instr::FCmpL => compare_floats(frame, -1)?,
+            Instr::FCmpG => compare_floats(frame, 1)?,
+            Instr::DCmpL => compare_doubles(frame, -1)?,
+            Instr::DCmpG => compare_doubles(frame, 1)?,
             Instr::InvokeStatic {
                 class,
                 name,
@@ -597,7 +700,9 @@ fn execute(
                     return Err(InterpError::Thrown(throwable));
                 }
             }
-            Instr::IReturn | Instr::AReturn => return Ok(Some(frame.pop()?)),
+            Instr::IReturn | Instr::LReturn | Instr::FReturn | Instr::DReturn | Instr::AReturn => {
+                return Ok(Some(frame.pop()?));
+            }
             Instr::Return => return Ok(None),
         }
     }
@@ -882,6 +987,44 @@ fn invoke_instance(
     run_instance_method(shared, thread, entry.id, name, descriptor, receiver, args)
 }
 
+/// Resolve a `getstatic`/`putstatic` owner to the class that declares the field.
+///
+/// Both opcodes share the field-resolution walk; a field that resolves to an instance
+/// field is a typed error, so a static opcode never reads or writes instance state.
+fn static_field(
+    shared: &Shared,
+    current: ClassId,
+    owner: &str,
+    name: &str,
+    descriptor: &str,
+) -> Result<ClassId, InterpError> {
+    let (declaring, is_static) = resolve_field(shared, current, owner, name, descriptor)?;
+    if !is_static {
+        return Err(InterpError::InstanceFieldAccess {
+            class: owner.to_owned(),
+            name: name.to_owned(),
+            descriptor: descriptor.to_owned(),
+        });
+    }
+    Ok(declaring)
+}
+
+/// Whether a value's kind matches a field descriptor.
+///
+/// The descriptor's first byte selects the value representation: `int`-family primitives
+/// are `Value::Int`, `long`/`float`/`double` keep their own variants, and an object or
+/// array descriptor needs a reference handle. `void` matches nothing.
+fn value_matches_descriptor(descriptor: &str, value: Value) -> bool {
+    match descriptor.as_bytes().first() {
+        Some(b'Z' | b'B' | b'C' | b'S' | b'I') => matches!(value, Value::Int(_)),
+        Some(b'J') => matches!(value, Value::Long(_)),
+        Some(b'F') => matches!(value, Value::Float(_)),
+        Some(b'D') => matches!(value, Value::Double(_)),
+        Some(b'L' | b'[') => matches!(value, Value::Ref(_)),
+        _ => false,
+    }
+}
+
 /// Resolve `owner.name:descriptor` up the superclass chain from the instruction's owner.
 ///
 /// Returns the declaring class and whether the field is `static`. A field with the right
@@ -1007,6 +1150,71 @@ fn int(value: Value) -> Result<i32, InterpError> {
     value.as_int().ok_or(InterpError::WrongValue)
 }
 
+fn long(value: Value) -> Result<i64, InterpError> {
+    match value {
+        Value::Long(value) => Ok(value),
+        _ => Err(InterpError::WrongValue),
+    }
+}
+
+fn float(value: Value) -> Result<f32, InterpError> {
+    match value {
+        Value::Float(value) => Ok(value),
+        _ => Err(InterpError::WrongValue),
+    }
+}
+
+fn double(value: Value) -> Result<f64, InterpError> {
+    match value {
+        Value::Double(value) => Ok(value),
+        _ => Err(InterpError::WrongValue),
+    }
+}
+
+/// `lcmp`'s result: -1, 0 or 1.
+fn ordering(ordering: std::cmp::Ordering) -> i32 {
+    match ordering {
+        std::cmp::Ordering::Less => -1,
+        std::cmp::Ordering::Equal => 0,
+        std::cmp::Ordering::Greater => 1,
+    }
+}
+
+/// `fcmpl`/`fcmpg`: compare two floats, using `nan_result` when either is NaN.
+///
+/// The two opcodes differ only in the NaN result, which is what makes `fcmpg` the
+/// "greater" form the compiler picks when a NaN must sort high.
+fn compare_floats(frame: &mut Frame, nan_result: i32) -> Result<(), InterpError> {
+    let right = float(frame.pop()?)?;
+    let left = float(frame.pop()?)?;
+    let result = if left.is_nan() || right.is_nan() {
+        nan_result
+    } else if left < right {
+        -1
+    } else if left > right {
+        1
+    } else {
+        0
+    };
+    frame.push(Value::Int(result))
+}
+
+/// `dcmpl`/`dcmpg`: compare two doubles, using `nan_result` when either is NaN.
+fn compare_doubles(frame: &mut Frame, nan_result: i32) -> Result<(), InterpError> {
+    let right = double(frame.pop()?)?;
+    let left = double(frame.pop()?)?;
+    let result = if left.is_nan() || right.is_nan() {
+        nan_result
+    } else if left < right {
+        -1
+    } else if left > right {
+        1
+    } else {
+        0
+    };
+    frame.push(Value::Int(result))
+}
+
 /// Pop a reference for an array instruction or a reference comparison.
 ///
 /// A null handle is not rejected here: an array instruction reports it as
@@ -1102,6 +1310,37 @@ fn resolve_class_ref(
     Ok(ClassRef::Named(resolve_from(shared, current, component)?))
 }
 
+/// The primitive a `checkcast`/`instanceof` operand names, if it names one.
+///
+/// A real class file never uses a primitive as a cast target, but the operand is still
+/// decoded as a name: accepting the Java name (`int`) as well as the one-character
+/// descriptor (`I`) lets the VM reject the operand explicitly instead of treating it as
+/// a missing class.
+fn primitive_operand(name: &str) -> Option<PrimitiveKind> {
+    PrimitiveKind::from_name(name).or_else(|| PrimitiveKind::from_descriptor(name))
+}
+
+/// Resolve a class constant or cast operand through `current`'s loader.
+///
+/// The three shapes the `Class` model already has are the same for `ldc`, `checkcast`
+/// and `instanceof`: an array descriptor (`[I`, `[[I`, `[Ljava/lang/String;`) becomes a
+/// [`ClassRef::Array`] resolved through `current`'s loader, a primitive name or
+/// descriptor becomes [`ClassRef::Primitive`], and every other name is a loaded class.
+fn resolve_class_operand(
+    shared: &Shared,
+    current: ClassId,
+    name: &str,
+) -> Result<ClassRef, InterpError> {
+    if name.starts_with('[') {
+        let loader = resolve_loader(shared, current)?;
+        return Ok(shared.class_ref_for_descriptor(loader, name)?);
+    }
+    if let Some(kind) = primitive_operand(name) {
+        return Ok(ClassRef::Primitive(kind));
+    }
+    Ok(ClassRef::Named(resolve_from(shared, current, name)?))
+}
+
 /// Resolve one `ldc`/`ldc_w` class constant through `current`'s loader.
 ///
 /// The constant names one of the three shapes the `Class` model already has: an array
@@ -1112,16 +1351,118 @@ fn resolve_class_ref(
 /// identity, so a child loader's class stays distinct from a bootstrap class of the same
 /// name. The class is loaded but not initialized, exactly as JVMS §5.4.3 requires.
 fn class_literal(shared: &Shared, current: ClassId, name: &str) -> Result<ObjRef, InterpError> {
-    if name.starts_with('[') {
-        let loader = resolve_loader(shared, current)?;
-        let class_ref = shared.class_ref_for_descriptor(loader, name)?;
-        return Ok(shared.class_object_for_ref(&class_ref)?);
+    let class_ref = resolve_class_operand(shared, current, name)?;
+    Ok(shared.class_object_for_ref(&class_ref)?)
+}
+
+/// The runtime type of a heap object, for `checkcast` and `instanceof`.
+///
+/// The representation decides the type: an instance reports its defining class, a
+/// string `java.lang.String`, a class object `java.lang.Class`, a box its boxed class, a
+/// container its VM class, an annotation or enum its declared class, a lambda its
+/// functional interface and an array its array class (the component the allocation
+/// named). Each VM-level class is resolved through the bootstrap library, which is the
+/// identity [`Shared::get_class`] reports for the same object.
+fn runtime_class_ref(shared: &Shared, reference: ObjRef) -> Result<ClassRef, InterpError> {
+    enum RuntimeKind {
+        Named(ClassId),
+        Library(&'static str),
+        Class,
+        Array(ClassRef),
     }
-    if let Some(kind) = PrimitiveKind::from_name(name) {
-        return Ok(shared.primitive_class(kind));
+
+    let kind = {
+        let heap = shared.heap();
+        match heap.get(reference)? {
+            HeapObject::Instance(instance) => RuntimeKind::Named(instance.class),
+            HeapObject::Str(_) => RuntimeKind::Library("java/lang/String"),
+            HeapObject::Class(_) | HeapObject::PrimitiveClass(_) | HeapObject::ArrayClass(_) => {
+                RuntimeKind::Class
+            }
+            HeapObject::Reflect(member) => RuntimeKind::Library(member.kind.class_name()),
+            HeapObject::Boxed(boxed) => RuntimeKind::Library(boxed.class_name()),
+            HeapObject::Annotation(annotation) => RuntimeKind::Named(annotation.class),
+            HeapObject::Enum(constant) => RuntimeKind::Named(constant.class),
+            HeapObject::StringBuilder(_) => {
+                RuntimeKind::Library(rava_vm::collections::STRING_BUILDER_CLASS)
+            }
+            HeapObject::List(_) => RuntimeKind::Library(rava_vm::collections::ARRAY_LIST_CLASS),
+            HeapObject::Map(_) => RuntimeKind::Library(rava_vm::maps::HASH_MAP_CLASS),
+            HeapObject::Array(array) => {
+                RuntimeKind::Array(ClassRef::array(array.component.clone()))
+            }
+            HeapObject::Lambda(lambda) => RuntimeKind::Named(lambda.interface),
+        }
+    };
+
+    Ok(match kind {
+        RuntimeKind::Named(class) => ClassRef::Named(class),
+        RuntimeKind::Class => ClassRef::Named(shared.load_library_class("java/lang/Class")?),
+        RuntimeKind::Library(name) => ClassRef::Named(shared.load_library_class(name)?),
+        RuntimeKind::Array(class_ref) => class_ref,
+    })
+}
+
+/// The `Class.getName()`-style label of a class ref, for a typed cast error.
+fn class_ref_label(shared: &Shared, class_ref: &ClassRef) -> Result<String, InterpError> {
+    Ok(shared.class_ref_name(class_ref)?)
+}
+
+/// Is `from` assignable to `to` under the JVM's reference-type rules?
+///
+/// Named types use the superclass-and-interface walk of [`is_assignable`]. An array is
+/// assignable to `Object`, `Cloneable` and `Serializable` and, covariantly, to another
+/// array whose component type it is assignable to; a primitive component only matches
+/// the same primitive. A primitive is never a reference type, so neither side of a cast
+/// involving one can match.
+fn class_ref_assignable(
+    shared: &Shared,
+    from: &ClassRef,
+    to: &ClassRef,
+) -> Result<bool, InterpError> {
+    if matches!(from, ClassRef::Primitive(_)) || matches!(to, ClassRef::Primitive(_)) {
+        return Ok(false);
     }
-    let class = resolve_from(shared, current, name)?;
-    Ok(shared.class_object(class)?)
+    match (from, to) {
+        (ClassRef::Named(from), ClassRef::Named(to)) => is_assignable(shared, *from, *to),
+        (ClassRef::Named(_), ClassRef::Array(_)) => Ok(false),
+        (ClassRef::Array(_), ClassRef::Named(to)) => array_assignable_to(shared, *to),
+        (ClassRef::Array(from), ClassRef::Array(to)) => {
+            component_assignable(shared, &from.component, &to.component)
+        }
+        _ => Ok(false),
+    }
+}
+
+/// Is one array component type assignable to another for array covariance?
+///
+/// Two primitive components must be the same primitive; every other pair is a reference
+/// assignability question, including a nested array component (which is assignable to
+/// `Object` through [`class_ref_assignable`]).
+fn component_assignable(
+    shared: &Shared,
+    from: &ClassRef,
+    to: &ClassRef,
+) -> Result<bool, InterpError> {
+    match (from, to) {
+        (ClassRef::Primitive(from), ClassRef::Primitive(to)) => Ok(from == to),
+        _ => class_ref_assignable(shared, from, to),
+    }
+}
+
+/// Is an array assignable to the named class `target`?
+///
+/// JLS §4.10.3 gives every array type exactly three supertypes: `Object`, `Cloneable`
+/// and `Serializable`. The comparison is by the loaded class's binary name, which is the
+/// same name-level identity the rest of this VM's assignability walk uses.
+fn array_assignable_to(shared: &Shared, target: ClassId) -> Result<bool, InterpError> {
+    let entry = shared
+        .entry(target)
+        .ok_or_else(|| InterpError::Decode("cast target vanished".to_owned()))?;
+    Ok(matches!(
+        entry.name.as_str(),
+        "java/lang/Object" | "java/lang/Cloneable" | "java/io/Serializable"
+    ))
 }
 
 fn resolve_loader(shared: &Shared, current: ClassId) -> Result<rava_vm::LoaderId, InterpError> {

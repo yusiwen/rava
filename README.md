@@ -188,7 +188,23 @@ bootstrap loader in the existing `(loader, name)` class table, and a single
 minimal `System.out`/`System.err` and `PrintStream`. The runner validates the entry
 point, allocates the `String[]` with the heap's array machinery, invokes `main` through
 the interpreter, flushes the captured stdout, and exits 0 on success, 1 on a runtime
-error and 2 on a usage error. Spring does not start yet. **M2.21 is next.**
+error and 2 on a usage error. Spring does not start yet.
+**M2.21 is done (2026-11-24):** `putstatic` resolves the owner through the executing
+class's loader, stores the value in the declaring class's `statics` table keyed by
+`(name, descriptor)`, and rejects an instance field, a missing field, a wrong descriptor
+and a value of the wrong kind with typed errors. `checkcast` and `instanceof` resolve a
+named, primitive or array class operand through the same loader, use
+superclass/interface/array-covariance assignability (including the
+`Object`/`Cloneable`/`Serializable` array supertypes), treat null as an instance of every
+reference type and a primitive as matching no reference value, and report a failed cast
+as a typed `ClassCast` error instead of synthesizing `ClassCastException`. `tableswitch`
+and `lookupswitch` map their default and case targets to instruction indices at decode
+time and reject non-zero padding, non-boundary targets, inverted/truncated tables and
+unsorted or duplicate lookup keys. `ldc`/`ldc_w` now decode Integer and Float constants
+and `ldc2_w` Long/Double, with `lcmp`/`fcmp<op>`/`dcmp<op>` and
+`lreturn`/`freturn`/`dreturn` returning and comparing them; the existing one-slot local
+model is unchanged. The `BytecodeProbe` fixture and its malformed-switch methods are
+assembled in Rust. **M2.22 is next.**
 
 ## What this project is
 
