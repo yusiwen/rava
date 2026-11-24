@@ -5,8 +5,8 @@
 **License:** MIT
 **Started:** 2026-11-22
 
-> Ledger. P0 and P1 were accepted on 2026-11-23. M0 is complete; M1 is the next
-> milestone. Keep this file honest and terse.
+> Ledger. P0 and P1 were accepted on 2026-11-23. M0 is complete; M1 is in progress.
+> Keep this file honest and terse.
 
 ## Phase status
 
@@ -30,7 +30,7 @@ release process, if wanted, becomes its own phase.
 | Milestone | Delivers | Gate | Status |
 | :--- | :--- | :--- | :--- |
 | M0 | Foundation: parser/model, loader/ClassSource, heap/IR, Shared/ThreadState, safepoints, verifier skeleton, native registry, MemoryRegion | Hello + small corpus; metadata dump; loader identity; no-lock invariant | in-progress |
-| M1 | Surface manifest, target lock, `link-check` | Manifest reproducible; unresolved = 0 | todo |
+| M1 | Surface manifest, target lock, `link-check` | Manifest reproducible; unresolved = 0 | in-progress |
 | M2 | C1 metadata, minimal library, Spring context | Metadata diff 0; bean graph starts | todo |
 | M3 | C2 dynamic code: Proxy, CGLIB, Objenesis, `Lookup`, `Unsafe` U0 | C2 suite exits 0 | todo |
 | M4 | C3 resources/jars, `-jar`, non-web Boot | Boot non-web application starts | todo |
@@ -52,6 +52,10 @@ release process, if wanted, becomes its own phase.
 | M0.5b | Hello through the interpreter: class library and native minimum | R13 | `cargo test -p rava-interp --test hello` exits 0 | done |
 | M0.6 | Safepoint polling, GC roots and the no-lock-across-Java-call invariant | R13 | `cargo test -p rava-vm --test safepoints` exits 0 | done |
 | M0.7 | Verifier dataflow skeleton and the metadata dump fixture | R13 | `cargo test -p rava-vm --test verifier_skeleton` exits 0 | done |
+| M1.1 | Target lock, reference app and pinned jar set | R2 | `cargo run -p rava-cli -- compat target` exits 0 | todo |
+| M1.2 | Static manifest over the pinned jars | R1 | `cargo run -p rava-cli -- compat manifest --check` exits 0 | todo |
+| M1.3 | Stub library surface and zero-unresolved link-check | R2 | `cargo run -p rava-cli -- compat link-check` exits 0 | todo |
+| M1.4 | Manifest reproducibility and M1 gate review | R1, R2 | `cargo xtask ci` exits 0 | todo |
 
 P0 and P1 are accepted; P2 is done because the M0 increments are sliced. All M0 slices
 are done and the M0 gate review passed.
@@ -110,8 +114,8 @@ A fresh session should:
 
 1. Read `README.md`, `docs/requirements.md` and `docs/open-questions.md`.
 2. Read the ADRs in order; 0001–0005 are the project-defining decisions.
-3. M0 is complete; the next milestone is M1 (surface manifest, target lock,
-   `link-check`).
+3. M0 is complete; M1 is in progress. The next slice is M1.1 (target lock, reference
+   app and pinned jar set).
 4. Do not write runtime code outside a defined slice.
 
 ## Open decisions
