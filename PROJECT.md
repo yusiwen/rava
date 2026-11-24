@@ -93,6 +93,7 @@ release process, if wanted, becomes its own phase.
 | M2.27 | Descriptor-closure manifest and C1-tree re-baseline | R3 | `cargo run -p rava-cli -- compat check` exits 0 and `RAVA_SPRING_ACCEPTANCE=1 cargo test -p rava-cli --test spring_context` reaches the next blocker | done |
 | M2.28 | Method/Executable bridge, varargs and synthetic flags | R3 | `cargo test -p rava-interp --test method_flags` exits 0 | done |
 | M2.29 | Minimal `java.text.MessageFormat` for Spring messages | R3 | `cargo test -p rava-interp --test message_format` exits 0 | done |
+| M2.30 | `NoSuchMethodException`/`NoSuchFieldException` lookup misses | R3 | `cargo test -p rava-interp --test lookup_exceptions` exits 0 | todo |
 
 P0 and P1 are accepted; P2 is done because the M2 increments are sliced. All M0 and
 M1 slices are done, and both gate reviews passed. M2.1, M2.2, M2.3, M2.4, M2.5,
