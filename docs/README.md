@@ -25,6 +25,8 @@ documents are added when there is something to record.
 | [`adr/`](adr/) | decisions | 0001–0012, one decision per record |
 | [`adr/README.md`](adr/README.md) | index | the ADR table and the format rules |
 | [`explanation/README.md`](explanation/README.md) | explanation index | the implementation-document contract, current documents and the planned backlog |
+| [`explanation/compatibility-gates.md`](explanation/compatibility-gates.md) | explanation | C0–C4 commands/artifacts, `compat check`, the Spring smoke, and where `cargo xtask ci` belongs |
+| [`explanation/class-loading-and-libraries.md`](explanation/class-loading-and-libraries.md) | explanation | sources, loader identity/delegation, the two `stdlib` trees and native dispatch |
 | [`explanation/c1-metadata.md`](explanation/c1-metadata.md) | explanation | C1 levels, the 1,011/36 `ct.sym` split, normalization, and what “differences 0” does and does not prove |
 | [`explanation/spring-context.md`](explanation/spring-context.md) | explanation | the real Spring `AnnotationConfigApplicationContext` path from `rava run` to the `hello` bean |
 | [`../stdlib/README.md`](../stdlib/README.md) | state | the two generated class libraries, and what each one is for |

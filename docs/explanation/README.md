@@ -39,6 +39,8 @@ When the fact is only a status, update `PROJECT.md` instead.
 
 | Document | Question it owns | Status |
 | :--- | :--- | :--- |
+| [`compatibility-gates.md`](compatibility-gates.md) | How are C0–C4 measured, which artifact/command owns each gate, and how does `cargo xtask ci` relate to them? | current |
+| [`class-loading-and-libraries.md`](class-loading-and-libraries.md) | How do sources, loader identity, parent-first delegation, the two `stdlib` trees and native dispatch fit together? | current |
 | [`c1-metadata.md`](c1-metadata.md) | What exactly does the M2 C1 metadata diff compare, and what does “diff 0” prove? | current |
 | [`spring-context.md`](spring-context.md) | How does a real Spring `AnnotationConfigApplicationContext` reach a bean on rava? | current |
 
@@ -50,8 +52,6 @@ its boundaries re-checked against `PROJECT.md`.
 
 | Priority | Document | Question it must answer |
 | :--- | :--- | :--- |
-| P0 | `compatibility-gates.md` | How are C0–C4 measured, which artifact/command owns each gate, and what is the promotion rule? |
-| P0 | `class-loading-and-libraries.md` | How do `ClassSource`, loader identity, parent-first delegation, the two `stdlib` trees and the native registry fit together? |
 | P1 | `interpreter-execution.md` | How do decoded IR, frames, static/instance calls, the native ABI, exceptions, `invokedynamic`, lambdas and streams execute a method? |
 | P1 | `reflection-and-metadata.md` | How does a C1 metadata record become a `Class`/member/annotation/generic `Type` at runtime? |
 | P2 | `testing-and-evidence.md` | How are fixtures, golden dumps, opt-in Spring acceptance and reproducible stub trees generated and checked? |
@@ -62,8 +62,9 @@ its boundaries re-checked against `PROJECT.md`.
 The C1 explanation deliberately records a **qualified** metadata pass: 1,011 classes
 have a release-17 `ct.sym` reference, and 36 manifest owners are documented placeholders
 excluded from the diff. The Spring explanation records the exact single-bean smoke
-context and its opt-in local acceptance. Neither is a claim that every C1/C3 surface is
-complete.
+context and its opt-in local acceptance. The compatibility-gates explanation records
+that C0 is observed-manifest symbol resolution, not a full load/verify pass, and that
+C2/C4 are future. None of these is a claim that every C1–C4 surface is complete.
 
 The machine-readable state remains in [`PROJECT.md`](../../PROJECT.md); the pinned
 versions remain in [`compat/targets.toml`](../../compat/targets.toml).
