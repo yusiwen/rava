@@ -164,6 +164,49 @@ pub struct Array {
     pub elements: Vec<Value>,
 }
 
+/// The kind of reflected member a [`ReflectMember`] describes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum MemberKind {
+    Field,
+    Method,
+    Constructor,
+}
+
+impl MemberKind {
+    /// The internal class name of the member's `java.lang.reflect` class.
+    pub fn class_name(self) -> &'static str {
+        match self {
+            Self::Field => "java/lang/reflect/Field",
+            Self::Method => "java/lang/reflect/Method",
+            Self::Constructor => "java/lang/reflect/Constructor",
+        }
+    }
+
+    /// The binary name of the member's `java.lang.reflect` class.
+    pub fn binary_name(self) -> &'static str {
+        match self {
+            Self::Field => "java.lang.reflect.Field",
+            Self::Method => "java.lang.reflect.Method",
+            Self::Constructor => "java.lang.reflect.Constructor",
+        }
+    }
+}
+
+/// A reflected field, method or constructor (`java.lang.reflect.Member`).
+///
+/// The object stores identity only: the declaring class, the member's name and its
+/// descriptor. Modifiers, types and parameter lists are read from the class table when
+/// a native asks for them, so there is no second copy of the metadata. Member objects
+/// are created and cached by [`crate::Shared::reflect_member`], never by a caller
+/// allocating directly.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ReflectMember {
+    pub kind: MemberKind,
+    pub class: ClassId,
+    pub name: String,
+    pub descriptor: String,
+}
+
 #[derive(Debug)]
 pub enum HeapObject {
     Instance(Instance),
@@ -178,6 +221,12 @@ pub enum HeapObject {
     /// are created and cached by [`crate::Shared::class_object`], never by a caller
     /// allocating directly.
     Class(ClassId),
+    /// A reflected `Field`, `Method` or `Constructor`: one heap object per member.
+    ///
+    /// Like a class object, the object holds identity only; the class's member record is
+    /// read from the class table on demand. Cached by
+    /// [`crate::Shared::reflect_member`], never allocated by a caller directly.
+    Reflect(ReflectMember),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -276,6 +325,12 @@ impl Heap {
         self.allocate(HeapObject::Class(class))
     }
 
+    /// Allocate a reflected member. Callers go through
+    /// [`crate::Shared::reflect_member`], which caches one object per member.
+    pub fn allocate_reflect(&mut self, member: ReflectMember) -> ObjRef {
+        self.allocate(HeapObject::Reflect(member))
+    }
+
     pub fn string(&self, reference: ObjRef) -> Result<&str, HeapError> {
         match self.get(reference)? {
             HeapObject::Str(text) => Ok(text),
@@ -293,6 +348,17 @@ impl Heap {
             _ => Err(HeapError::WrongObjectKind {
                 reference,
                 expected: "a class object",
+            }),
+        }
+    }
+
+    /// The member identity behind a reflected member object.
+    pub fn reflect(&self, reference: ObjRef) -> Result<&ReflectMember, HeapError> {
+        match self.get(reference)? {
+            HeapObject::Reflect(member) => Ok(member),
+            _ => Err(HeapError::WrongObjectKind {
+                reference,
+                expected: "a reflected member",
             }),
         }
     }
@@ -340,48 +406,52 @@ impl Heap {
     pub fn instance(&self, reference: ObjRef) -> Result<&Instance, HeapError> {
         match self.get(reference)? {
             HeapObject::Instance(instance) => Ok(instance),
-            HeapObject::Array(_) | HeapObject::Str(_) | HeapObject::Class(_) => {
-                Err(HeapError::WrongObjectKind {
-                    reference,
-                    expected: "an instance",
-                })
-            }
+            HeapObject::Array(_)
+            | HeapObject::Str(_)
+            | HeapObject::Class(_)
+            | HeapObject::Reflect(_) => Err(HeapError::WrongObjectKind {
+                reference,
+                expected: "an instance",
+            }),
         }
     }
 
     pub fn instance_mut(&mut self, reference: ObjRef) -> Result<&mut Instance, HeapError> {
         match self.get_mut(reference)? {
             HeapObject::Instance(instance) => Ok(instance),
-            HeapObject::Array(_) | HeapObject::Str(_) | HeapObject::Class(_) => {
-                Err(HeapError::WrongObjectKind {
-                    reference,
-                    expected: "an instance",
-                })
-            }
+            HeapObject::Array(_)
+            | HeapObject::Str(_)
+            | HeapObject::Class(_)
+            | HeapObject::Reflect(_) => Err(HeapError::WrongObjectKind {
+                reference,
+                expected: "an instance",
+            }),
         }
     }
 
     pub fn array(&self, reference: ObjRef) -> Result<&Array, HeapError> {
         match self.get(reference)? {
             HeapObject::Array(array) => Ok(array),
-            HeapObject::Instance(_) | HeapObject::Str(_) | HeapObject::Class(_) => {
-                Err(HeapError::WrongObjectKind {
-                    reference,
-                    expected: "an array",
-                })
-            }
+            HeapObject::Instance(_)
+            | HeapObject::Str(_)
+            | HeapObject::Class(_)
+            | HeapObject::Reflect(_) => Err(HeapError::WrongObjectKind {
+                reference,
+                expected: "an array",
+            }),
         }
     }
 
     pub fn array_mut(&mut self, reference: ObjRef) -> Result<&mut Array, HeapError> {
         match self.get_mut(reference)? {
             HeapObject::Array(array) => Ok(array),
-            HeapObject::Instance(_) | HeapObject::Str(_) | HeapObject::Class(_) => {
-                Err(HeapError::WrongObjectKind {
-                    reference,
-                    expected: "an array",
-                })
-            }
+            HeapObject::Instance(_)
+            | HeapObject::Str(_)
+            | HeapObject::Class(_)
+            | HeapObject::Reflect(_) => Err(HeapError::WrongObjectKind {
+                reference,
+                expected: "an array",
+            }),
         }
     }
 

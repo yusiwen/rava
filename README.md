@@ -48,7 +48,13 @@ pushes the throwable and jumps to the handler, while an uncaught throw leaves th
 frame as a typed `Thrown` carrying the same object. A catch-all entry
 (`catch_type = 0`) decodes, but `finally` duplication, stack traces,
 exception-object synthesis and interfaces are not implemented, and nothing checks that
-the thrown object or the catch type is a `Throwable`. **M2.8 is next.**
+the thrown object or the catch type is a `Throwable`. **M2.8 is done (2026-11-24):**
+`HeapObject::Reflect` represents a field, method or constructor by its declaring class,
+name and descriptor; one object per member is cached and enumerated as a GC root;
+`Class.getDeclaredFields`, `getDeclaredMethods` and `getDeclaredConstructors` return real
+heap reference arrays; and the read-only member natives report names, modifiers,
+declaring classes, field and return types and parameter counts. Reflective invocation,
+annotations and generic types remain later slices. **M2.9 is next.**
 
 ## What this project is
 

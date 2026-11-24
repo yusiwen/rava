@@ -3,9 +3,10 @@
 //! M0.5a implements the integer subset and `invokestatic`; M2.4 added native dispatch
 //! through the receiver-carrying ABI, M2.5 adds instance allocation, constructors,
 //! instance fields and instance method calls, M2.6 adds primitive/reference arrays and
-//! the integer control-flow instructions, and M2.7 adds `athrow` and the decoded
-//! exception table. The decoded form and the frame are the contracts a later JIT
-//! consumes; there is no second frame model.
+//! the integer control-flow instructions, M2.7 adds `athrow` and the decoded exception
+//! table, and M2.8 dispatches a reflected `Field`/`Method`/`Constructor` receiver to its
+//! `java.lang.reflect` class. The decoded form and the frame are the contracts a later
+//! JIT consumes; there is no second frame model.
 
 #![forbid(unsafe_code)]
 
@@ -21,8 +22,8 @@ use std::sync::Arc;
 
 use rava_classfile::model::ACC_STATIC;
 use rava_vm::{
-    ArrayKind, ClassEntry, ClassId, ClassState, FrameRootsGuard, HeapObject, ObjRef, Shared,
-    ThreadState, Value,
+    ArrayKind, ClassEntry, ClassId, ClassState, FrameRootsGuard, HeapObject, MemberKind, ObjRef,
+    Shared, ThreadState, Value,
 };
 
 /// Run a static method with `args` and return its result (`None` for `void`).
@@ -923,6 +924,7 @@ fn dispatch_class(
         Instance(ClassId),
         Str,
         Class,
+        Reflect(MemberKind),
         Array,
     }
 
@@ -932,6 +934,7 @@ fn dispatch_class(
             HeapObject::Instance(instance) => ReceiverKind::Instance(instance.class),
             HeapObject::Str(_) => ReceiverKind::Str,
             HeapObject::Class(_) => ReceiverKind::Class,
+            HeapObject::Reflect(member) => ReceiverKind::Reflect(member.kind),
             HeapObject::Array(_) => ReceiverKind::Array,
         }
     };
@@ -940,6 +943,7 @@ fn dispatch_class(
         ReceiverKind::Instance(class) => Ok(class),
         ReceiverKind::Str => resolve_from(shared, current, "java/lang/String"),
         ReceiverKind::Class => resolve_from(shared, current, "java/lang/Class"),
+        ReceiverKind::Reflect(kind) => resolve_from(shared, current, kind.class_name()),
         ReceiverKind::Array => resolve_from(shared, current, "java/lang/Object"),
     }
 }

@@ -6,7 +6,8 @@
 **Started:** 2026-11-22
 
 > Ledger. P0 and P1 were accepted on 2026-11-23. M1 is complete; M2 is in progress
-> (M2.1, M2.2, M2.3, M2.4, M2.5, M2.6 and M2.7 done). Keep this file honest and terse.
+> (M2.1, M2.2, M2.3, M2.4, M2.5, M2.6, M2.7 and M2.8 done). Keep this file honest
+> and terse.
 
 ## Phase status
 
@@ -26,7 +27,7 @@ release process, if wanted, becomes its own phase.
 
 > Gates are defined in `docs/requirements.md` § Milestones. P0 and P1 are accepted;
 > M0 and M1 are complete, and both gate reviews have passed. M2 is in progress, with
-> M2.1, M2.2, M2.3, M2.4, M2.5, M2.6 and M2.7 done.
+> M2.1, M2.2, M2.3, M2.4, M2.5, M2.6, M2.7 and M2.8 done.
 
 | Milestone | Delivers | Gate | Status |
 | :--- | :--- | :--- | :--- |
@@ -64,11 +65,11 @@ release process, if wanted, becomes its own phase.
 | M2.5 | Instance allocation, constructors, fields and instance calls | R3 | `cargo test -p rava-interp --test instance_execution` exits 0 | done |
 | M2.6 | Arrays and integer control flow | R3 | `cargo test -p rava-interp --test arrays_control` exits 0 | done |
 | M2.7 | Exceptions, `athrow` and exception tables | R3 | `cargo test -p rava-interp --test exceptions` exits 0 | done |
-| M2.8 | Reflection member objects (`Field`/`Method`/`Constructor`) | R3 | `cargo test -p rava-interp --test reflection_members` exits 0 | todo |
+| M2.8 | Reflection member objects (`Field`/`Method`/`Constructor`) | R3 | `cargo test -p rava-interp --test reflection_members` exits 0 | done |
 
 P0 and P1 are accepted; P2 is done because the M2 increments are sliced. All M0 and
 M1 slices are done, and both gate reviews passed. M2.1, M2.2, M2.3, M2.4, M2.5,
-M2.6 and M2.7 are done; M2.8 is next.
+M2.6, M2.7 and M2.8 are done; M2.9 is next.
 
 ## Slice log
 
@@ -93,6 +94,7 @@ M2.6 and M2.7 are done; M2.8 is next.
 | M2.5 | `cargo test -p rava-interp --test instance_execution` | 0 | 2026-11-24 | `new`, `dup`, `aconst_null`, `invokespecial`, `getfield`, `putfield` and narrow/wide `aload`/`astore` decode and execute; `run_instance_method` reuses the existing `Frame`, puts `this` in local 0 and leaves static calls on the unchanged path; `Shared::field_layout` builds superclass-first instance layouts (static fields excluded) and `Shared::allocate_instance` allocates with field defaults; `new` resolves and initializes the class from the current class's loader; `getfield`/`putfield` resolve the exact owner/name/descriptor, use the receiver's runtime layout and reject a static field through an instance opcode and a descriptor mismatch; `invokespecial` resolves on the instruction's owner while `invokevirtual` dispatches from the receiver's class, and both prefer the native registry before executing `Code`; `instance::register_natives` supplies `java/lang/Object.<init>()V` as a no-op for the C1 stub that has no `Code`; `Point`/`PointProbe` fixture; 8 tests; `cargo test -p rava-interp` 24, `cargo test -p rava-vm` 42 and `cargo test -p rava-cli` 67 pass, workspace 183; `cargo xtask ci` exits 0 |
 | M2.6 | `cargo test -p rava-interp --test arrays_control` | 0 | 2026-11-24 | `newarray` (all eight primitive `atype` values), `anewarray`, `multianewarray`, `arraylength`, the eight primitive array loads/stores, `aaload`/`aastore`, `iinc`, `goto`, `ifeq`/`ifne`/`iflt`/`ifge`/`ifgt`/`ifle`, `if_icmp{eq,ne,lt,ge,gt,le}` and `ifnull`/`ifnonnull` decode and execute; branch offsets are resolved at decode time to instruction indices, so the dispatch loop never computes a byte address and a non-boundary target is a decode error; `newarray`/`anewarray`/`multianewarray` allocate through the existing `Heap`/`ArrayKind`/`Array`, and `anewarray` resolves an object component through the current class's loader; bounds, null, negative-size and `ArrayKind`/element-type errors are typed; the `ArrayProbe` fixture (`sum` with `if_icmpge`/`goto`/`iaload`/`arraylength`, `make` with `newarray`/`iastore`, `refs` with `anewarray`/`aastore`, a two-dimensional `multianewarray`, and one method per comparison) exercises them; 12 tests; `cargo test -p rava-interp` 36, `cargo test -p rava-vm` 42, `cargo test -p rava-classfile` 50 and `cargo test -p rava-cli` 67 pass, workspace 195; `cargo xtask ci` exits 0 |
 | M2.7 | `cargo test -p rava-interp --test exceptions` | 0 | 2026-11-24 | The `Code` exception table is decoded after the code array and its `start_pc`/`end_pc`/`handler_pc` become instruction indices through the existing two-pass boundary map (a non-boundary, out-of-range, empty or reversed entry and a non-`Class` `catch_type` are decode errors); `athrow` and a callee's `Thrown` result search the current frame's table in class-file order for an entry whose range contains the throwing instruction and whose catch type is assignable from the throwable's runtime class through the superclass chain, clearing the stack and jumping to the handler on a match and otherwise re-raising the same `ObjRef`; `catch_type = 0` is a catch-all; `InterpError::Thrown(ObjRef)`, `NullThrow` and `NonReferenceThrow` are new; the `Boom`/`Catcher` fixture covers a direct catch returning 5, a catch-all, a superclass catch, a wrong catch type, a throw crossing two calls into the outer frame, an uncaught throw that still carries the object, null and non-reference `athrow`, and three malformed tables; 9 tests; `cargo test -p rava-interp` 45, `cargo test -p rava-vm` 42 and `cargo test -p rava-cli` 67 pass, workspace 204; `cargo xtask ci` exits 0 |
+| M2.8 | `cargo test -p rava-interp --test reflection_members` | 0 | 2026-11-24 | `HeapObject::Reflect(ReflectMember)` with a `MemberKind` of `Field`/`Method`/`Constructor`, the declaring `ClassId`, name and descriptor; `Shared::reflect_member` caches one object per `(class, kind, name, descriptor)` and `Shared::roots` enumerates those roots, while `Shared::get_class` and `invokevirtual` dispatch a member to `java/lang/reflect/{Field,Method,Constructor}`; `Class.getDeclaredFields/getDeclaredMethods/getDeclaredConstructors` return real heap reference arrays built from the typed C1 metadata model, and the read-only member natives cover `getName`/`getModifiers`/`getDeclaringClass`, `Field.getType`, `Method.getReturnType/getParameterTypes/getParameterCount` and `Constructor.getParameterTypes/getParameterCount/getName`; the `ReflectMembersProbe` fixture exercises them through the C1 bootstrap library; 7 tests; `cargo test -p rava-interp` 52, `cargo test -p rava-vm` 42 and `cargo test -p rava-cli` 67 pass, workspace 211; `cargo xtask ci` exits 0 |
 
 M0.6 boundary: the reference and class-unloading hooks are registration points only.
 M0 has no collector, so no weak/soft/phantom reference is cleared and no class is
@@ -287,6 +289,34 @@ reference can be thrown and any class name can be a catch type. Assignability wa
 superclasses only, so an interface catch type, `invokeinterface` dispatch and interface
 identity remain later slices.
 
+M2.8 boundary: a reflected member is `HeapObject::Reflect(ReflectMember)`, carrying a
+`MemberKind` (`Field`, `Method`, `Constructor`), the declaring `ClassId`, the member name
+and its descriptor; it stores no modifiers or type objects. `Shared::reflect_member`
+caches exactly one object per `(class, kind, name, descriptor)` and `Shared::roots`
+enumerates those objects, so they are permanent roots rather than inferred retention.
+`Shared::get_class` reports `java/lang/reflect/Field`, `Method` or `Constructor` for a
+member, and `invokevirtual` dispatches its methods to that class. `Class` gains
+`getDeclaredFields`, `getDeclaredMethods` and `getDeclaredConstructors`, each returning a
+real heap reference array in class-file order from the typed C1 metadata; fields are all
+declared fields, methods exclude `<init>`/`<clinit>`, and constructors are the `<init>`
+methods. The read-only member methods are `getName`, `getModifiers`
+(`Modifier.fieldModifiers`/`methodModifiers`/`constructorModifiers` masks),
+`getDeclaringClass`, `Field.getType`, `Method.getReturnType`,
+`Method`/`Constructor.getParameterTypes` and `getParameterCount`, and
+`Constructor.getName` (the binary class name); `getClass` on a member reports the
+`java.lang.reflect` class. A type descriptor is resolved only when it names an object
+class: primitive, void and array descriptors return a typed `VmError::Native` because
+this slice has no primitive or array class identity. Inherited lookup (`getFields`,
+`getMethods`, `getConstructors`, `getField`, `getMethod`, `getDeclaredField`,
+`getDeclaredMethod`, `getConstructor`, `getDeclaredConstructor`) is not implemented and
+fails as the typed `NativeOrAbstract` error; `getDeclared*` is the whole query surface.
+There is no `Field.get/set`, `Method.invoke`, `Constructor.newInstance`, annotation
+proxy, generic `Type` graph, access check, `setAccessible`, or
+`toString`/`equals`/`hashCode`; annotations and `Signature` remain metadata-only.
+`java.lang.reflect.Member` and `Executable` are an interface and an abstract stub, so
+they get no natives of their own: the concrete `Field`, `Method` and `Constructor`
+declarations carry the registry entries.
+
 ## Decision log
 
 | ADR | Decision | Status |
@@ -324,7 +354,10 @@ A fresh session should:
    (`cargo test -p rava-interp --test arrays_control`). M2.7 landed exceptions: the
    `Code` exception table decoded to instruction ranges, `athrow`, and handler search
    across `invokestatic`/`invokevirtual`/`invokespecial` (`cargo test -p rava-interp
-   --test exceptions`). M2.8 is next.
+   --test exceptions`). M2.8 landed reflected member objects: the `HeapObject::Reflect`
+   representation, the declared-member queries and the read-only
+   `Field`/`Method`/`Constructor` natives (`cargo test -p rava-interp --test
+   reflection_members`). M2.9 is next.
 4. Do not write runtime code outside a defined slice.
 
 ## Open decisions
