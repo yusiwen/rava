@@ -5,7 +5,7 @@
 **License:** MIT
 **Started:** 2026-11-22
 
-> Ledger. P0 and P1 were accepted on 2026-11-23. M1 is complete; M2 is next.
+> Ledger. P0 and P1 were accepted on 2026-11-23. M1 is complete; M2 is in progress.
 > Keep this file honest and terse.
 
 ## Phase status
@@ -31,7 +31,7 @@ release process, if wanted, becomes its own phase.
 | :--- | :--- | :--- | :--- |
 | M0 | Foundation: parser/model, loader/ClassSource, heap/IR, Shared/ThreadState, safepoints, verifier skeleton, native registry, MemoryRegion | Hello + small corpus; metadata dump; loader identity; no-lock invariant | done |
 | M1 | Surface manifest, target lock, `link-check` | Manifest reproducible; unresolved = 0 | done |
-| M2 | C1 metadata, minimal library, Spring context | Metadata diff 0; bean graph starts | todo |
+| M2 | C1 metadata, minimal library, Spring context | Metadata diff 0; bean graph starts | in-progress |
 | M3 | C2 dynamic code: Proxy, CGLIB, Objenesis, `Lookup`, `Unsafe` U0 | C2 suite exits 0 | todo |
 | M4 | C3 resources/jars, `-jar`, non-web Boot | Boot non-web application starts | todo |
 | M5 | C3 concurrency, JMM, references, cleaner, Tomcat | Tomcat concurrent; JCStress 0 | todo |
@@ -56,6 +56,8 @@ release process, if wanted, becomes its own phase.
 | M1.2 | Static manifest over the pinned jars | R1 | `cargo run -p rava-cli -- compat manifest --check` exits 0 | done |
 | M1.3 | Stub library surface and zero-unresolved link-check | R2 | `cargo run -p rava-cli -- compat link-check` exits 0 | done |
 | M1.4 | Manifest reproducibility and M1 gate review | R1, R2 | `cargo run -p rava-cli -- compat check` exits 0 | done |
+| M2.1 | C1 metadata model and normalized dump | R3 | `cargo test -p rava-classfile --test metadata_model` exits 0 | todo |
+| M2.2 | JDK 17 signature stubs and zero metadata diff | R3 | `cargo run -p rava-cli -- compat metadata --check` exits 0 | todo |
 
 P0 and P1 are accepted; P2 is done because the M0 increments are sliced. All M0 and
 M1 slices are done, and both gate reviews passed. M2 is next.
