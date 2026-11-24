@@ -6,8 +6,8 @@
 **Started:** 2026-11-22
 
 > Ledger. P0 and P1 were accepted on 2026-11-23. M1 is complete; M2 is in progress
-> (M2.1, M2.2, M2.3, M2.4, M2.5, M2.6, M2.7, M2.8, M2.9, M2.10 and M2.11 done). Keep
-> this file honest and terse.
+> (M2.1, M2.2, M2.3, M2.4, M2.5, M2.6, M2.7, M2.8, M2.9, M2.10, M2.11 and M2.12
+> done). Keep this file honest and terse.
 
 ## Phase status
 
@@ -27,7 +27,7 @@ release process, if wanted, becomes its own phase.
 
 > Gates are defined in `docs/requirements.md` § Milestones. P0 and P1 are accepted;
 > M0 and M1 are complete, and both gate reviews have passed. M2 is in progress, with
-> M2.1, M2.2, M2.3, M2.4, M2.5, M2.6, M2.7, M2.8, M2.9, M2.10 and M2.11 done.
+> M2.1, M2.2, M2.3, M2.4, M2.5, M2.6, M2.7, M2.8, M2.9, M2.10, M2.11 and M2.12 done.
 
 | Milestone | Delivers | Gate | Status |
 | :--- | :--- | :--- | :--- |
@@ -69,11 +69,11 @@ release process, if wanted, becomes its own phase.
 | M2.9 | Core `Object`/`String` behavior | R3 | `cargo test -p rava-interp --test string_object` exits 0 | done |
 | M2.10 | Boxed values and reflection invocation | R3 | `cargo test -p rava-interp --test reflection_invoke` exits 0 | done |
 | M2.11 | Annotation reflection and proxies | R3 | `cargo test -p rava-interp --test annotations` exits 0 | done |
-| M2.12 | `StringBuilder` and core collection behavior | R3 | `cargo test -p rava-interp --test collections` exits 0 | todo |
+| M2.12 | `StringBuilder` and core collection behavior | R3 | `cargo test -p rava-interp --test collections` exits 0 | done |
 
 P0 and P1 are accepted; P2 is done because the M2 increments are sliced. All M0 and
 M1 slices are done, and both gate reviews passed. M2.1, M2.2, M2.3, M2.4, M2.5,
-M2.6, M2.7, M2.8, M2.9, M2.10 and M2.11 are done; M2.12 is next.
+M2.6, M2.7, M2.8, M2.9, M2.10, M2.11 and M2.12 are done; M2.13 is next.
 
 ## Slice log
 
@@ -102,6 +102,7 @@ M2.6, M2.7, M2.8, M2.9, M2.10 and M2.11 are done; M2.12 is next.
 | M2.9 | `cargo test -p rava-interp --test string_object` | 0 | 2026-11-24 | `HeapObject::Str` stays the only string representation; the `java/lang/String` registry covers `length`, `isEmpty`, `charAt`, `equals`, `hashCode`, `compareTo`, `concat`, both `substring` overloads, `startsWith`, `endsWith`, `indexOf`, `replace(CC)`, `toCharArray`, `toString` and `intern`, and every operation reads UTF-16 code units from the stored text through `utf16_units`/`string_from_utf16`, so a supplementary character is two units; `java/lang/Object` gains `equals` (reference identity), `hashCode` (a deterministic mix of the `ObjRef` index and generation, documented as the identity hash and cached by nothing because the handle never changes) and `toString` (`ClassName@hexHashCode` with the dotted runtime binary name); `Shared::intern_string` keeps one canonical object per text as a permanent root, and `ldc` goes through it so repeated execution of a string constant reuses one object; `StringProbe` with 50+ `ldc` and argument helpers plus 8 tests; `cargo test -p rava-interp` 60, `cargo test -p rava-vm` 45 and `cargo test -p rava-cli` 67 pass, workspace 222; `cargo xtask ci` exits 0 |
 | M2.10 | `cargo test -p rava-interp --test reflection_invoke` | 0 | 2026-11-24 | `HeapObject::Boxed(BoxedPrimitive::Integer)` is a heap object, not a second `Value` variant; `Shared::get_class` and `invokevirtual` dispatch it to `java/lang/Integer`, so `getClass` reports the boxed class; `Shared::box_int`/`unbox_int` and the `boxed::{unbox_argument,box_result}` helpers convert `int` boxes and pass reference handles through; the `java/lang/Integer` registry overrides `valueOf(I)`, `intValue`, `toString()`, `toString(I)`, `equals`, `hashCode`, `compareTo(Integer)` and `parseInt(String)`; `Field.get`/`set` cover `int` and reference instance fields, reject a static field and a null or non-assignable receiver, and preserve reference identity; `Method.invoke` runs static and instance methods by the reflected name and descriptor with no overload lookup, unboxes `int` arguments, boxes an `int` result and ignores the receiver for a static method; `Constructor.newInstance` allocates the declaring class, unboxes its arguments and runs `<init>` through `run_instance_method`; a Java throwable from an invoked method crosses the native ABI as `VmError::Thrown` and becomes `InterpError::Thrown`, so it is not swallowed (`InvocationTargetException` wrapping is deferred); the `Bean`/`BoxProbe` fixture covers boxed virtual calls, `(I)V` and `()V` construction, int/reference field access, getters/setters and static `sum`, plus wrong receivers, a static field, wrong arity and type, a missing-descriptor method and the no-`getDeclaredMethod` boundary; 9 tests; `cargo test -p rava-interp` 70, `cargo test -p rava-vm` 45 and `cargo test -p rava-cli` 67 pass, workspace 232; `cargo xtask ci` exits 0 |
 | M2.11 | `cargo test -p rava-interp --test annotations` | 0 | 2026-11-24 | `HeapObject::Annotation` carries the annotation type's `ClassId` and the encoded values from the M2.1 metadata model, and `HeapObject::Enum` (cached per `(class, name)` as a permanent root) represents an enum constant; `Class`, `Field`, `Method` and `Constructor` gain `getDeclaredAnnotations`, `getAnnotations` and `getAnnotation(Class)` over that metadata in class-file order, returning an empty array for no declared annotations and null for a missing single annotation; `Class.getAnnotations` merges superclass annotations whose type is itself `@Inherited`, nearest declaration winning, while `getDeclaredAnnotations` stays declared-only; an omitted element falls back to the annotation type's `AnnotationDefault`; element values decode through the annotation type's loader as interned strings, `Value` primitives, class literals (`c`), enum constants (`e`), nested annotation objects (`@`) and primitive/reference arrays (`[`); `invokevirtual` dispatches an annotation receiver to its annotation type and the annotation module answers `annotationType`, every element method and deterministic `equals`/`hashCode`/`toString`; `java/lang/annotation/Annotation.annotationType` and the three queries on `Class`/`Field`/`Method`/`Constructor` (plus `AccessibleObject.getAnnotations`, where the C1 stub declares it) are registry natives, and `java/lang/Enum.name`/`toString` report a constant's name; the committed release-17 fixture under `crates/interp/tests/fixtures/annotations/` annotates a class, field, method and constructor with string/int/boolean/long/double/class/enum/nested/array elements and defaults and an `@Inherited` superclass annotation; 10 tests; `cargo test -p rava-interp` 80, `rava-vm` 47, `rava-classfile` 50 and `rava-cli` 67 pass, workspace 244; `cargo xtask ci` exits 0 |
+| M2.12 | `cargo test -p rava-interp --test collections` | 0 | 2026-11-24 | `HeapObject::StringBuilder(String)` and `HeapObject::List(Vec<Value>)` are ordinary heap objects selected by their class identity in `Shared::allocate_instance`; `Shared::get_class`, `invokevirtual` dispatch and `Object.toString`'s runtime name report `java/lang/StringBuilder` and `java/util/ArrayList`, and `Shared::roots` enumerates every non-null reference held by a heap list. The builder natives cover the three constructors, the `String`/`Object`/`int`/`long`/`char`/`boolean`/`float`/`double`/`CharSequence` `append` overloads, `toString`, `length`, `charAt`, `setLength`, `reverse`, `deleteCharAt` and `insert(I,String)` over UTF-16 units (null String appends `"null"`, a split surrogate is `UnpairedSurrogate`); the list natives cover both constructors, `size`, `isEmpty`, both `add` forms, `get`, `set`, `clear`, both `remove` forms, `contains` and `indexOf` with reference-equality membership and typed bounds errors. The `CollectionsProbe` fixture exercises the bytecode path (including `getClass().getName()` on both VM classes), and the registry is called directly only for the `long`/`float`/`double` overloads the decoded instruction subset cannot load. 12 new tests; `cargo test -p rava-interp` 92, `rava-vm` 47, `rava-classfile` 50 and `rava-cli` 67 pass, workspace 256; `cargo xtask ci` exits 0 |
 
 M0.6 boundary: the reference and class-unloading hooks are registration points only.
 M0 has no collector, so no weak/soft/phantom reference is cleared and no class is
@@ -412,6 +413,45 @@ and Spring stay out of this slice. The fixture is compiled at release 17 and com
 `crates/interp/tests/fixtures/annotations/` (sources in `src/`, classes in `classes/`) and is
 loaded through a `DirectorySource` child loader, so the test needs no JDK.
 
+M2.12 boundary: a `StringBuilder` is `HeapObject::StringBuilder(String)` and an
+`ArrayList` is `HeapObject::List(Vec<Value>)`, both ordinary heap objects selected by
+their class identity in `Shared::allocate_instance`; they are not
+`HeapObject::Instance`s, so an instance field opcode and a reflected `Field.get`/`set` or
+`Method.invoke` receiver do not apply to them. `Shared::get_class`, `invokevirtual`
+dispatch and `Object.toString`'s runtime name report `java.lang.StringBuilder` and
+`java.util.ArrayList`. `Shared::roots` additionally enumerates every non-null reference
+held by a heap list, so a list element is visible to a future collector; there is still
+no collector, so an element of an otherwise unreachable list is over-retained rather than
+traced. The builder stores valid UTF-8 text and implements `length`, `charAt`,
+`setLength`, `deleteCharAt`, `insert`, `reverse` and `append(String)` in UTF-16 units;
+`setLength` can grow with NUL units and `reverse` keeps a surrogate pair intact the way
+the JDK does, while `setLength`, `deleteCharAt` or `append(char)` that would leave a lone
+surrogate are typed `UnpairedSurrogate` errors because the stored text cannot represent
+one. A null String, Object or CharSequence append produces `"null"`. `append(Object)`
+uses a `String.valueOf`-shaped conversion (String and StringBuilder content, a boxed
+`Integer`'s decimal value, `"null"` for null, otherwise the VM's `ClassName@hex`
+Object.toString shape) because a VM native cannot re-enter the interpreter to dispatch an
+overridden `toString`; `append(CharSequence)` accepts String and StringBuilder only. The
+float and double text uses Rust's shortest round-trip formatting with the mandatory `.0`
+and prints an exponential value in plain decimal, not the JDK's exact
+`Float.toString`/`Double.toString` spelling for every value. `ArrayList` implements
+`size`, `isEmpty`, `add`, `add(int,E)`, `get`, `set`, `clear`, `remove(int)`,
+`remove(Object)`, `contains` and `indexOf`; `contains`, `indexOf` and `remove(Object)`
+compare references, not `Object.equals`, so a distinct but equal element is not found,
+and a null argument matches a null element. A negative capacity is a typed
+`VmError::Native`; a negative index and an index past the end are
+`StringIndexOutOfBounds` (builder) or `CollectionIndexOutOfBounds` (list), not
+synthesized exceptions. There are no iterators,
+streams, `HashMap`, `StringBuffer`, `CharSequence.length/charAt` delegation, list
+`toString`, `removeAll`/`retainAll`/`toArray`, reflection changes or Spring in this
+slice. `java.lang.StringBuilder`'s package-private superclass
+`java.lang.AbstractStringBuilder` is absent from the ct.sym-derived C1 tree, so
+`Shared::resolution_superclass` continues that one chain at `java.lang.Object`; every
+other class resolves the superclass its class file names. The `CollectionsProbe` fixture
+is assembled in `crates/interp/tests/collections.rs` rather than committed, and the
+`long`/`float`/`double` append overloads are called through the registry because the
+decoded instruction subset has no `lload`/`fload`/`dload` or `ldc2_w`.
+
 ## Decision log
 
 | ADR | Decision | Status |
@@ -464,7 +504,12 @@ A fresh session should:
    `Method` and `Constructor`, `AnnotationDefault` fallback, inherited class annotations,
    annotation-member dispatch through `invokevirtual`, and the committed release-17
    fixture loaded from a child `DirectorySource` (`cargo test -p rava-interp --test
-   annotations`). M2.12 is next.
+   annotations`). M2.12 landed `StringBuilder` and core collection behavior: the
+   `HeapObject::StringBuilder` and `HeapObject::List` representations, their
+   constructors, append overloads and list operations as native registry entries, the
+   builder's UTF-16 semantics and the list's reference-equality membership, with
+   `Shared::roots` enumerating list-held references (`cargo test -p rava-interp --test
+   collections`). M2.13 is next.
 4. Do not write runtime code outside a defined slice.
 
 ## Open decisions

@@ -7,6 +7,7 @@
 
 pub mod annotation;
 pub mod boxed;
+pub mod collections;
 pub mod error;
 pub mod heap;
 pub mod hooks;

@@ -376,10 +376,11 @@ impl Shared {
     /// `java.lang.reflect.Field`, `Method` or `Constructor`, a box reports its boxed
     /// class (`java.lang.Integer`), an annotation reports
     /// `java.lang.annotation.Annotation` (its `annotationType()` names the annotation
-    /// type) and an enum constant reports its enum class; those VM-level objects use the
-    /// bootstrap class library as their identity. Array class identity (`[I`,
-    /// `[Ljava/lang/String;`) is not modeled in M2.4, so an array returns a typed error
-    /// instead of a wrong class object.
+    /// type), an enum constant reports its enum class, a `StringBuilder` reports
+    /// `java.lang.StringBuilder` and an `ArrayList` reports `java.util.ArrayList`; those
+    /// VM-level objects use the bootstrap class library as their identity. Array class
+    /// identity (`[I`, `[Ljava/lang/String;`) is not modeled in M2.4, so an array returns
+    /// a typed error instead of a wrong class object.
     pub fn get_class(&self, reference: ObjRef) -> Result<ObjRef, VmError> {
         enum Kind {
             Instance(ClassId),
@@ -389,6 +390,8 @@ impl Shared {
             Boxed(BoxedPrimitive),
             Annotation,
             Enum(ClassId),
+            StringBuilder,
+            List,
         }
 
         let kind = {
@@ -404,6 +407,8 @@ impl Shared {
                 HeapObject::Boxed(boxed) => Kind::Boxed(*boxed),
                 HeapObject::Annotation(_) => Kind::Annotation,
                 HeapObject::Enum(constant) => Kind::Enum(constant.class),
+                HeapObject::StringBuilder(_) => Kind::StringBuilder,
+                HeapObject::List(_) => Kind::List,
                 HeapObject::Array(_) => {
                     return Err(VmError::Native(
                         "array class objects are not supported yet (M2.4)".to_owned(),
@@ -435,6 +440,14 @@ impl Shared {
                 self.class_object(class)
             }
             Kind::Enum(class) => self.class_object(class),
+            Kind::StringBuilder => {
+                let class = self.load_library_class(crate::collections::STRING_BUILDER_CLASS)?;
+                self.class_object(class)
+            }
+            Kind::List => {
+                let class = self.load_library_class(crate::collections::ARRAY_LIST_CLASS)?;
+                self.class_object(class)
+            }
         }
     }
 
@@ -452,6 +465,32 @@ impl Shared {
         Ok(layout)
     }
 
+    /// The superclass a class-file walk should continue at.
+    ///
+    /// `java.lang.StringBuilder` extends the package-private
+    /// `java.lang.AbstractStringBuilder`, which `ct.sym` omits, so the committed C1 stub
+    /// tree has no class file for it. The VM's class library has no members there, so the
+    /// walk continues at `java.lang.Object` instead of failing to load a class the library
+    /// does not ship. Every other class resolves the superclass its class file names, and
+    /// a genuinely missing superclass is still a loader error.
+    pub fn resolution_superclass(&self, class: ClassId) -> Result<Option<ClassId>, VmError> {
+        let entry = self
+            .entry(class)
+            .ok_or_else(|| VmError::Loader(format!("class id {} is not loaded", class.0)))?;
+        let Some(super_name) = entry.file.super_class_name()? else {
+            return Ok(None);
+        };
+        let super_name = super_name.to_owned();
+        let super_name = if entry.name == crate::collections::STRING_BUILDER_CLASS
+            && super_name == "java/lang/AbstractStringBuilder"
+        {
+            "java/lang/Object".to_owned()
+        } else {
+            super_name
+        };
+        Ok(Some(self.load_class(entry.loader, &super_name)?))
+    }
+
     fn collect_instance_fields(
         &self,
         class: ClassId,
@@ -462,9 +501,7 @@ impl Shared {
             .ok_or_else(|| VmError::Loader(format!("class id {} is not loaded", class.0)))?;
         // Load the superclass before pushing this class's fields, so the parent prefix
         // stays at the front of the layout.
-        if let Some(super_name) = entry.file.super_class_name()? {
-            let super_name = super_name.to_owned();
-            let super_class = self.load_class(entry.loader, &super_name)?;
+        if let Some(super_class) = self.resolution_superclass(class)? {
             self.collect_instance_fields(super_class, layout)?;
         }
         for field in &entry.file.fields {
@@ -479,7 +516,24 @@ impl Shared {
     }
 
     /// Allocate an instance of `class`, with defaults for every field in its layout.
+    ///
+    /// `java.lang.StringBuilder` and `java.util.ArrayList` are VM-level objects rather
+    /// than `HeapObject::Instance`s, so their class identities select a dedicated heap
+    /// representation. Their constructors are normally the first thing to run, and they
+    /// fill the empty object. Every other class gets the ordinary instance layout.
     pub fn allocate_instance(&self, class: ClassId) -> Result<ObjRef, VmError> {
+        let entry = self
+            .entry(class)
+            .ok_or_else(|| VmError::Loader(format!("class id {} is not loaded", class.0)))?;
+        match entry.name.as_str() {
+            crate::collections::STRING_BUILDER_CLASS => {
+                return Ok(self.heap().allocate_string_builder());
+            }
+            crate::collections::ARRAY_LIST_CLASS => {
+                return Ok(self.heap().allocate_list());
+            }
+            _ => {}
+        }
         let layout = self.field_layout(class)?;
         Ok(self.heap().allocate_instance(class, &layout))
     }
@@ -535,7 +589,8 @@ impl Shared {
     }
 
     /// Collect the VM roots: every non-null class static field, every cached class object
-    /// and reflected member, plus the roots the given threads' active frames published.
+    /// and reflected member, the references held by a heap list, plus the roots the given
+    /// threads' active frames published.
     ///
     /// The class table is snapshotted before any per-class statics lock is taken, and
     /// each statics lock is released before the next class is visited, so this never
@@ -607,6 +662,28 @@ impl Shared {
             for reference in interned_strings.values() {
                 if seen.insert(*reference) {
                     roots.push(*reference);
+                }
+            }
+        }
+
+        {
+            // A container holds references that are not themselves roots of the class
+            // table or a cache. The list's elements are enumerated here so a future
+            // collector sees them; there is no collector yet, so this over-retains an
+            // element whose list is otherwise unreachable, which is the honest state
+            // until M5 traverses the object graph.
+            let heap = self.heap.lock().expect("heap lock poisoned");
+            for object in heap.live_objects() {
+                let HeapObject::List(elements) = object else {
+                    continue;
+                };
+                for value in elements {
+                    let Value::Ref(reference) = *value else {
+                        continue;
+                    };
+                    if !reference.is_null() && seen.insert(reference) {
+                        roots.push(reference);
+                    }
                 }
             }
         }

@@ -8,8 +8,11 @@
 //! `java.lang.reflect` class, and M2.9 adds the `java.lang.Object` and `java.lang.String`
 //! natives in `rava-vm`. M2.10 adds boxed `Integer` dispatch and the reflective-invocation
 //! natives (`Method.invoke`, `Constructor.newInstance`) in [`reflect_invoke`], which
-//! re-enter this crate's existing instance/static machinery. The decoded form and the
-//! frame are the contracts a later JIT consumes; there is no second frame model.
+//! re-enter this crate's existing instance/static machinery. M2.12 dispatches a
+//! `StringBuilder` and an `ArrayList` receiver to `java/lang/StringBuilder` and
+//! `java/util/ArrayList`, whose natives live in `rava-vm`'s `collections` module. The
+//! decoded form and the frame are the contracts a later JIT consumes; there is no second
+//! frame model.
 
 #![forbid(unsafe_code)]
 
@@ -699,11 +702,10 @@ fn resolve_field(
                 mismatch = Some((entry.name.clone(), field_descriptor.to_owned()));
             }
         }
-        let Some(super_name) = entry.file.super_class_name()? else {
+        let Some(super_class) = shared.resolution_superclass(target)? else {
             break;
         };
-        let super_name = super_name.to_owned();
-        target = shared.load_class(entry.loader, &super_name)?;
+        target = super_class;
     }
     match mismatch {
         Some((class, found)) => Err(InterpError::FieldDescriptorMismatch {
@@ -754,14 +756,10 @@ fn is_assignable(shared: &Shared, from: ClassId, to: ClassId) -> Result<bool, In
         if current == to {
             return Ok(true);
         }
-        let entry = shared
-            .entry(current)
-            .ok_or_else(|| InterpError::Decode(format!("class {} is not loaded", current.0)))?;
-        let Some(super_name) = entry.file.super_class_name()? else {
+        let Some(super_class) = shared.resolution_superclass(current)? else {
             return Ok(false);
         };
-        let super_name = super_name.to_owned();
-        current = shared.load_class(entry.loader, &super_name)?;
+        current = super_class;
     }
 }
 
@@ -941,12 +939,13 @@ fn resolve_from(shared: &Shared, current: ClassId, name: &str) -> Result<ClassId
 
 /// The class a virtual call starts resolution from.
 ///
-/// An instance dispatches from its defining class. A string, a class object or a box has
-/// no `ClassId` of its own in the heap, so it dispatches from `java/lang/String`,
-/// `java/lang/Class` or its boxed class (`java/lang/Integer`), resolved through the
-/// caller's loader. An array has no class identity yet; `Object` methods (including
-/// `getClass`, which reports a typed error) still dispatch, and any other method fails
-/// resolution normally.
+/// An instance dispatches from its defining class. A string, a class object, a box, a
+/// `StringBuilder` or an `ArrayList` has no `ClassId` of its own in the heap, so it
+/// dispatches from `java/lang/String`, `java/lang/Class`, its boxed class
+/// (`java/lang/Integer`), `java/lang/StringBuilder` or `java/util/ArrayList`, resolved
+/// through the caller's loader. An array has no class identity yet; `Object` methods
+/// (including `getClass`, which reports a typed error) still dispatch, and any other
+/// method fails resolution normally.
 fn dispatch_class(
     shared: &Shared,
     current: ClassId,
@@ -960,6 +959,8 @@ fn dispatch_class(
         Boxed(BoxedPrimitive),
         Annotation(ClassId),
         Enum(ClassId),
+        StringBuilder,
+        List,
         Array,
     }
 
@@ -973,6 +974,8 @@ fn dispatch_class(
             HeapObject::Boxed(boxed) => ReceiverKind::Boxed(*boxed),
             HeapObject::Annotation(annotation) => ReceiverKind::Annotation(annotation.class),
             HeapObject::Enum(constant) => ReceiverKind::Enum(constant.class),
+            HeapObject::StringBuilder(_) => ReceiverKind::StringBuilder,
+            HeapObject::List(_) => ReceiverKind::List,
             HeapObject::Array(_) => ReceiverKind::Array,
         }
     };
@@ -984,6 +987,10 @@ fn dispatch_class(
         ReceiverKind::Reflect(kind) => resolve_from(shared, current, kind.class_name()),
         ReceiverKind::Boxed(boxed) => resolve_from(shared, current, boxed.class_name()),
         ReceiverKind::Annotation(class) | ReceiverKind::Enum(class) => Ok(class),
+        ReceiverKind::StringBuilder => {
+            resolve_from(shared, current, rava_vm::collections::STRING_BUILDER_CLASS)
+        }
+        ReceiverKind::List => resolve_from(shared, current, rava_vm::collections::ARRAY_LIST_CLASS),
         ReceiverKind::Array => resolve_from(shared, current, "java/lang/Object"),
     }
 }
@@ -1006,16 +1013,14 @@ fn resolve_virtual(
         if let Some(method) = entry.file.find_method(name, descriptor)? {
             return Ok((Arc::clone(&entry), method.is_native()));
         }
-        let Some(super_name) = entry.file.super_class_name()? else {
+        let Some(super_class) = shared.resolution_superclass(current)? else {
             return Err(InterpError::MethodNotFound {
                 class: entry.name.clone(),
                 name: name.to_owned(),
                 descriptor: descriptor.to_owned(),
             });
         };
-        let super_name = super_name.to_owned();
-        let loader = entry.loader;
-        current = shared.load_class(loader, &super_name)?;
+        current = super_class;
     }
 }
 

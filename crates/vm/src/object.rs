@@ -101,11 +101,14 @@ fn object_to_string(
 /// The dotted binary name of a receiver's runtime class.
 ///
 /// An instance reports its defining class, a string `java.lang.String`, a class object
-/// `java.lang.Class`, a reflected member its `java.lang.reflect` class and a box its boxed
-/// class (`java.lang.Integer`). An array has no class identity in this slice, so it
-/// returns a typed error instead of a wrong name, the same choice `Shared::get_class`
-/// makes.
-fn runtime_binary_name(shared: &Shared, receiver: ObjRef) -> Result<String, VmError> {
+/// `java.lang.Class`, a reflected member its `java.lang.reflect` class, a box its boxed
+/// class (`java.lang.Integer`), a builder `java.lang.StringBuilder` and a list
+/// `java.util.ArrayList`. An array has no class identity in this slice, so it returns a
+/// typed error instead of a wrong name, the same choice `Shared::get_class` makes.
+///
+/// [`crate::collections`] reuses this for `StringBuilder.append(Object)`'s
+/// `String.valueOf`-shaped conversion.
+pub(crate) fn runtime_binary_name(shared: &Shared, receiver: ObjRef) -> Result<String, VmError> {
     enum Kind {
         Instance(ClassId),
         Str,
@@ -114,6 +117,8 @@ fn runtime_binary_name(shared: &Shared, receiver: ObjRef) -> Result<String, VmEr
         Boxed(&'static str),
         Annotation,
         Enum(ClassId),
+        StringBuilder,
+        List,
         Array,
     }
 
@@ -130,6 +135,8 @@ fn runtime_binary_name(shared: &Shared, receiver: ObjRef) -> Result<String, VmEr
             HeapObject::Boxed(boxed) => Kind::Boxed(boxed.binary_name()),
             HeapObject::Annotation(_) => Kind::Annotation,
             HeapObject::Enum(constant) => Kind::Enum(constant.class),
+            HeapObject::StringBuilder(_) => Kind::StringBuilder,
+            HeapObject::List(_) => Kind::List,
             HeapObject::Array(_) => Kind::Array,
         }
     };
@@ -152,6 +159,8 @@ fn runtime_binary_name(shared: &Shared, receiver: ObjRef) -> Result<String, VmEr
                 .ok_or_else(|| VmError::Loader(format!("class id {} is not loaded", class.0)))?;
             Ok(entry.name.replace('/', "."))
         }
+        Kind::StringBuilder => Ok("java.lang.StringBuilder".to_owned()),
+        Kind::List => Ok("java.util.ArrayList".to_owned()),
         Kind::Array => Err(VmError::Native(
             "array class names are not supported yet (M2.9)".to_owned(),
         )),

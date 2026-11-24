@@ -31,10 +31,23 @@ pub enum VmError {
     /// A `String` index or range lies outside the string's UTF-16 length, where the JDK
     /// raises `StringIndexOutOfBoundsException`.
     ///
-    /// `index` is the offending argument and `length` the receiver's UTF-16 length. Like
-    /// [`VmError::NullStringArgument`], this is a typed error rather than a synthesized
-    /// exception object.
+    /// `index` is the offending argument and `length` the receiver's UTF-16 length. The
+    /// `java.lang.StringBuilder` natives reuse this variant for `charAt`, `setLength`,
+    /// `deleteCharAt` and `insert`, because the builder is a UTF-16 character sequence
+    /// too. Like [`VmError::NullStringArgument`], this is a typed error rather than a
+    /// synthesized exception object.
     StringIndexOutOfBounds { index: i32, length: usize },
+    /// A `java.util.ArrayList` index or insertion point lies outside the list, where the
+    /// JDK raises `IndexOutOfBoundsException`.
+    ///
+    /// `operation` names the Java method, `index` is the offending argument and `length`
+    /// the list's size. The JDK's exception-object synthesis does not exist yet, so this
+    /// is a typed error.
+    CollectionIndexOutOfBounds {
+        operation: &'static str,
+        index: i32,
+        length: usize,
+    },
     /// A `String` operation would produce a lone UTF-16 surrogate, which the heap's
     /// `String` storage (valid UTF-8) cannot represent.
     ///
@@ -73,6 +86,14 @@ impl fmt::Display for VmError {
             Self::StringIndexOutOfBounds { index, length } => write!(
                 f,
                 "String index {index} is outside a UTF-16 length of {length}"
+            ),
+            Self::CollectionIndexOutOfBounds {
+                operation,
+                index,
+                length,
+            } => write!(
+                f,
+                "{operation} index {index} is outside a list of size {length}"
             ),
             Self::UnpairedSurrogate { method } => write!(
                 f,

@@ -319,6 +319,20 @@ pub enum HeapObject {
     Annotation(AnnotationObject),
     /// One enum constant used as an annotation element value.
     Enum(EnumConstant),
+    /// A `java.lang.StringBuilder` (`java.lang.AbstractStringBuilder` state).
+    ///
+    /// The builder stores its text as a Rust `String` (valid UTF-8), the same
+    /// representation [`HeapObject::Str`] uses. The `java.lang.StringBuilder` natives view
+    /// it as UTF-16 code units through `String::encode_utf16`, so `length` and `charAt`
+    /// count and index units, and an operation that would leave a lone surrogate is a
+    /// typed error, exactly as for a string.
+    StringBuilder(String),
+    /// A `java.util.ArrayList`: its elements in index order.
+    ///
+    /// An element is a [`Value`], so the list can hold a reference (including null) and
+    /// that reference must be enumerated by [`crate::Shared::roots`]. Lists are ordinary
+    /// heap objects, not permanent roots.
+    List(Vec<Value>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -444,6 +458,71 @@ impl Heap {
         }))
     }
 
+    /// Allocate an empty `java.lang.StringBuilder`. The builder's class is named by
+    /// [`crate::collections::STRING_BUILDER_CLASS`]; [`crate::Shared::allocate_instance`]
+    /// is the entry point that creates one for `new` and reflection.
+    pub fn allocate_string_builder(&mut self) -> ObjRef {
+        self.allocate(HeapObject::StringBuilder(String::new()))
+    }
+
+    /// Allocate an empty `java.util.ArrayList`. The list's class is named by
+    /// [`crate::collections::ARRAY_LIST_CLASS`].
+    pub fn allocate_list(&mut self) -> ObjRef {
+        self.allocate(HeapObject::List(Vec::new()))
+    }
+
+    /// Every live object, in slot order.
+    ///
+    /// Root enumeration uses this to reach the references a container such as a list
+    /// holds; there is no collector scanning object graphs yet.
+    pub fn live_objects(&self) -> impl Iterator<Item = &HeapObject> {
+        self.slots.iter().filter_map(|slot| slot.object.as_ref())
+    }
+
+    /// The text behind a `java.lang.StringBuilder` reference.
+    pub fn string_builder(&self, reference: ObjRef) -> Result<&str, HeapError> {
+        match self.get(reference)? {
+            HeapObject::StringBuilder(text) => Ok(text),
+            _ => Err(HeapError::WrongObjectKind {
+                reference,
+                expected: "a String builder",
+            }),
+        }
+    }
+
+    /// The mutable text behind a `java.lang.StringBuilder` reference.
+    pub fn string_builder_mut(&mut self, reference: ObjRef) -> Result<&mut String, HeapError> {
+        match self.get_mut(reference)? {
+            HeapObject::StringBuilder(text) => Ok(text),
+            _ => Err(HeapError::WrongObjectKind {
+                reference,
+                expected: "a String builder",
+            }),
+        }
+    }
+
+    /// The elements behind a `java.util.ArrayList` reference.
+    pub fn list(&self, reference: ObjRef) -> Result<&[Value], HeapError> {
+        match self.get(reference)? {
+            HeapObject::List(elements) => Ok(elements),
+            _ => Err(HeapError::WrongObjectKind {
+                reference,
+                expected: "a list",
+            }),
+        }
+    }
+
+    /// The mutable elements behind a `java.util.ArrayList` reference.
+    pub fn list_mut(&mut self, reference: ObjRef) -> Result<&mut Vec<Value>, HeapError> {
+        match self.get_mut(reference)? {
+            HeapObject::List(elements) => Ok(elements),
+            _ => Err(HeapError::WrongObjectKind {
+                reference,
+                expected: "a list",
+            }),
+        }
+    }
+
     /// The annotation instance behind a reference.
     pub fn annotation(&self, reference: ObjRef) -> Result<&AnnotationObject, HeapError> {
         match self.get(reference)? {
@@ -552,13 +631,7 @@ impl Heap {
     pub fn instance(&self, reference: ObjRef) -> Result<&Instance, HeapError> {
         match self.get(reference)? {
             HeapObject::Instance(instance) => Ok(instance),
-            HeapObject::Array(_)
-            | HeapObject::Str(_)
-            | HeapObject::Class(_)
-            | HeapObject::Reflect(_)
-            | HeapObject::Boxed(_)
-            | HeapObject::Annotation(_)
-            | HeapObject::Enum(_) => Err(HeapError::WrongObjectKind {
+            _ => Err(HeapError::WrongObjectKind {
                 reference,
                 expected: "an instance",
             }),
@@ -568,13 +641,7 @@ impl Heap {
     pub fn instance_mut(&mut self, reference: ObjRef) -> Result<&mut Instance, HeapError> {
         match self.get_mut(reference)? {
             HeapObject::Instance(instance) => Ok(instance),
-            HeapObject::Array(_)
-            | HeapObject::Str(_)
-            | HeapObject::Class(_)
-            | HeapObject::Reflect(_)
-            | HeapObject::Boxed(_)
-            | HeapObject::Annotation(_)
-            | HeapObject::Enum(_) => Err(HeapError::WrongObjectKind {
+            _ => Err(HeapError::WrongObjectKind {
                 reference,
                 expected: "an instance",
             }),
@@ -584,13 +651,7 @@ impl Heap {
     pub fn array(&self, reference: ObjRef) -> Result<&Array, HeapError> {
         match self.get(reference)? {
             HeapObject::Array(array) => Ok(array),
-            HeapObject::Instance(_)
-            | HeapObject::Str(_)
-            | HeapObject::Class(_)
-            | HeapObject::Reflect(_)
-            | HeapObject::Boxed(_)
-            | HeapObject::Annotation(_)
-            | HeapObject::Enum(_) => Err(HeapError::WrongObjectKind {
+            _ => Err(HeapError::WrongObjectKind {
                 reference,
                 expected: "an array",
             }),
@@ -600,13 +661,7 @@ impl Heap {
     pub fn array_mut(&mut self, reference: ObjRef) -> Result<&mut Array, HeapError> {
         match self.get_mut(reference)? {
             HeapObject::Array(array) => Ok(array),
-            HeapObject::Instance(_)
-            | HeapObject::Str(_)
-            | HeapObject::Class(_)
-            | HeapObject::Reflect(_)
-            | HeapObject::Boxed(_)
-            | HeapObject::Annotation(_)
-            | HeapObject::Enum(_) => Err(HeapError::WrongObjectKind {
+            _ => Err(HeapError::WrongObjectKind {
                 reference,
                 expected: "an array",
             }),

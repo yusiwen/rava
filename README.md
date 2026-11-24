@@ -83,7 +83,19 @@ annotations and primitive/reference arrays; and `invokevirtual` dispatches an an
 receiver to its annotation type, where `annotationType`, the element methods and
 deterministic `equals`/`hashCode`/`toString` are served. Repeatable containers
 (`getAnnotationsByType`), parameter and type annotations, annotation identity caching,
-the generic `Type` graph and Spring remain later slices. **M2.12 is next.**
+the generic `Type` graph and Spring remain later slices. **M2.12 is done
+(2026-11-24):** a `StringBuilder` and an `ArrayList` are dedicated heap objects
+(`HeapObject::StringBuilder` and `HeapObject::List`) selected by their class identity, so
+`getClass` and virtual dispatch report `java.lang.StringBuilder` and `java.util.ArrayList`,
+and `Shared::roots` enumerates the references a list holds. The builder implements its
+three constructors, the `String`/`Object`/`int`/`long`/`char`/`boolean`/`float`/`double`/
+`CharSequence` `append` overloads, `toString`, `length`, `charAt`, `setLength`, `reverse`,
+`deleteCharAt` and `insert(I,String)` over UTF-16 units; the list implements both
+constructors, `size`, `isEmpty`, both `add` and `remove` forms, `get`, `set`, `clear`,
+`contains` and `indexOf`, with reference-equality membership and typed bounds errors.
+`append(Object)` uses the VM's `String.valueOf`-shaped conversion rather than dispatching
+an overridden `toString`; iterators, streams, `HashMap`, `StringBuffer` and reflection
+changes remain later slices. **M2.13 is next.**
 
 ## What this project is
 
