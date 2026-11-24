@@ -147,8 +147,18 @@ array class. `Field.getType`, `Method.getReturnType`/`getParameterTypes` and
 `getDeclaredMethod`/`getMethod`/`getDeclaredConstructor`/`getConstructor` accept array
 class objects in their `Class[]`, so an array parameter resolves by its exact descriptor;
 a miss is still null. An array class declares no members, and a malformed array
-descriptor or missing component is a typed error. Generic `Type`, `ldc` class literals,
-annotation changes and Spring remain later slices. **M2.17 is next.**
+descriptor or missing component is a typed error. **M2.17 is done (2026-11-24):** `ldc`
+and `ldc_w` decode a `CONSTANT_Class` and push the cached class object, so
+`String.class`, `int.class`, `int[].class` and `String[].class` are the same objects
+`Class.forName` and the class, primitive and array caches already own. A named class
+resolves through the executing class's loader (a child loader's own class keeps its
+identity, while a library class still delegates to the bootstrap loader), a primitive
+name through the primitive-class cache and an array descriptor through the array-class
+cache, without initializing the class. `ldc` of a `String` still interns, `ldc_w`'s
+two-byte index is supported, and a numeric constant or any other constant kind is a
+typed error; a missing class and a malformed array descriptor are typed errors too.
+Generic `Type`, `MethodType`/`MethodHandle` constants, lambdas, annotation changes and
+Spring remain later slices. **M2.18 is next.**
 
 ## What this project is
 

@@ -7,11 +7,12 @@
 //!
 //! What it covers is exactly what the fixtures need: integer constants, integer and
 //! reference loads and stores, `iinc`, `aconst_null`, `dup`, two conditional branches,
-//! `goto`, `getstatic`, `getfield`, `putfield`, `new`, array creation and access
-//! (`newarray`, `anewarray`, `multianewarray`, `arraylength`, `iaload`/`iastore` and
-//! `aaload`/`aastore`), `invokevirtual`, `invokespecial`, `invokestatic` through
-//! [`op`](Assembler::op), `athrow`, and the `ireturn`/`areturn`/`return` forms.
-//! Everything else is still raw bytes through [`Assembler::op`].
+//! `if_acmpeq`/`if_acmpne`, `goto`, `getstatic`, `getfield`, `putfield`, `new`, array
+//! creation and access (`newarray`, `anewarray`, `multianewarray`, `arraylength`,
+//! `iaload`/`iastore` and `aaload`/`aastore`), `ldc`/`ldc_w`, `invokevirtual`,
+//! `invokespecial`, `invokestatic` through [`op`](Assembler::op), `athrow`, and the
+//! `ireturn`/`areturn`/`return` forms. Everything else is still raw bytes through
+//! [`Assembler::op`].
 //!
 //! `tableswitch` and `lookupswitch` are deliberately absent: their padding depends on the switch
 //! opcode's own address, which is a different encoding problem (and the decoder already handles the
@@ -142,10 +143,19 @@ impl Assembler {
         self.bytes.push(0x68);
     }
 
+    /// `ldc`: push a constant-pool entry. Indices above 255 use the two-byte `ldc_w`
+    /// form, which JVMS requires and the decoder accepts for either width.
     pub fn ldc(&mut self, index: u16) {
-        // Only the one-byte form; a wider constant pool needs `ldc_w`, which no fixture does yet.
-        debug_assert!(index < 256, "ldc index {index} needs ldc_w");
-        self.op(0x12, &[index as u8]);
+        if index < 256 {
+            self.op(0x12, &[index as u8]);
+        } else {
+            self.ldc_w(index);
+        }
+    }
+
+    /// `ldc_w`: push a constant-pool entry, always with the two-byte index form.
+    pub fn ldc_w(&mut self, index: u16) {
+        self.op(0x13, &index.to_be_bytes());
     }
 
     pub fn getstatic(&mut self, index: u16) {
@@ -236,6 +246,11 @@ impl Assembler {
 
     /// `if_icmpeq`..`if_icmple` (0x9f..=0xa4) by their JVMS opcodes.
     pub fn if_icmp(&mut self, opcode: u8, label: Label) {
+        self.branch(opcode, label);
+    }
+
+    /// `if_acmpeq` (0xa5) or `if_acmpne` (0xa6): compare two references.
+    pub fn if_acmp(&mut self, opcode: u8, label: Label) {
         self.branch(opcode, label);
     }
 

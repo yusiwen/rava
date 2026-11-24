@@ -15,8 +15,10 @@
 //! `rava-vm`'s `maps` module. M2.14 adds the named lookup natives to `rava-vm`'s
 //! `reflection` module; this crate's descriptor parser now skips an array parameter's
 //! element descriptor, so `Class.getDeclaredMethod(String, Class[])` is callable from
-//! bytecode. The decoded form and the frame are the contracts a later JIT
-//! consumes; there is no second frame model.
+//! bytecode. M2.17 adds the class literal: `ldc`/`ldc_w` of a `CONSTANT_Class` pushes the
+//! cached class object (a loaded class, a primitive or an array class), resolved through
+//! the executing frame's loader. The decoded form and the frame are the contracts a later
+//! JIT consumes; there is no second frame model.
 
 #![forbid(unsafe_code)]
 
@@ -287,7 +289,7 @@ fn execute(
                 frame.push(Value::Ref(reference))?;
             }
             Instr::ArrayLength => {
-                let reference = array_ref(frame)?;
+                let reference = pop_reference(frame)?;
                 let length = shared.heap().array(reference)?.elements.len();
                 let length = i32::try_from(length).map_err(|_| {
                     InterpError::Decode("array is longer than an int can hold".to_owned())
@@ -296,7 +298,7 @@ fn execute(
             }
             Instr::ArrayLoad(kind) => {
                 let index = int(frame.pop()?)?;
-                let reference = array_ref(frame)?;
+                let reference = pop_reference(frame)?;
                 let value = {
                     let heap = shared.heap();
                     let array = heap.array(reference)?;
@@ -309,7 +311,7 @@ fn execute(
                 // JVMS §6.5.iastore: the value is on top, then the index, then the array.
                 let value = frame.pop()?;
                 let index = int(frame.pop()?)?;
-                let reference = array_ref(frame)?;
+                let reference = pop_reference(frame)?;
                 {
                     let mut heap = shared.heap();
                     let array = heap.array_mut(reference)?;
@@ -334,6 +336,20 @@ fn execute(
                     frame.pc = target;
                 }
             }
+            Instr::IfACmpEq(target) => {
+                let right = pop_reference(frame)?;
+                let left = pop_reference(frame)?;
+                if left == right {
+                    frame.pc = target;
+                }
+            }
+            Instr::IfACmpNe(target) => {
+                let right = pop_reference(frame)?;
+                let left = pop_reference(frame)?;
+                if left != right {
+                    frame.pc = target;
+                }
+            }
             Instr::IfNull(target) => {
                 if pop_is_null(frame)? {
                     frame.pc = target;
@@ -349,6 +365,14 @@ fn execute(
                 // makes `ldc` of the same constant reference-identical and keeps a loop
                 // from allocating one fresh string per execution.
                 let reference = shared.intern_string(&text);
+                frame.push(Value::Ref(reference))?;
+            }
+            Instr::LdcClass(name) => {
+                // JVMS §5.4.3: a class constant is resolved through the defining loader
+                // of the class that executes the instruction, and only resolved — not
+                // initialized. The cache owns the object, so repeated execution of the
+                // same constant pushes the same `ObjRef`.
+                let reference = class_literal(shared, frame.class, &name)?;
                 frame.push(Value::Ref(reference))?;
             }
             Instr::GetStatic {
@@ -783,10 +807,12 @@ fn int(value: Value) -> Result<i32, InterpError> {
     value.as_int().ok_or(InterpError::WrongValue)
 }
 
-/// Pop a reference for an array instruction. A null handle is not rejected here: the
-/// heap reports it as `HeapError::NullReference`, the same typed error every other
-/// reference access produces.
-fn array_ref(frame: &mut Frame) -> Result<ObjRef, InterpError> {
+/// Pop a reference for an array instruction or a reference comparison.
+///
+/// A null handle is not rejected here: an array instruction reports it as
+/// `HeapError::NullReference` and `if_acmpeq`/`if_acmpne` compare it like any other
+/// handle, which is what the JVM does.
+fn pop_reference(frame: &mut Frame) -> Result<ObjRef, InterpError> {
     match frame.pop()? {
         Value::Ref(reference) => Ok(reference),
         _ => Err(InterpError::WrongValue),
@@ -874,6 +900,28 @@ fn resolve_class_ref(
         return Ok(shared.class_ref_for_descriptor(loader, component)?);
     }
     Ok(ClassRef::Named(resolve_from(shared, current, component)?))
+}
+
+/// Resolve one `ldc`/`ldc_w` class constant through `current`'s loader.
+///
+/// The constant names one of the three shapes the `Class` model already has: an array
+/// descriptor (`[I`, `[[I`, `[Ljava/lang/String;`) becomes the cached array class object
+/// whose components are resolved through `current`'s loader; a primitive name (`int`,
+/// `void`) becomes the cached primitive class object; every other name is a loaded class
+/// resolved through `current`'s loader. A loaded class contributes its defining loader's
+/// identity, so a child loader's class stays distinct from a bootstrap class of the same
+/// name. The class is loaded but not initialized, exactly as JVMS §5.4.3 requires.
+fn class_literal(shared: &Shared, current: ClassId, name: &str) -> Result<ObjRef, InterpError> {
+    if name.starts_with('[') {
+        let loader = resolve_loader(shared, current)?;
+        let class_ref = shared.class_ref_for_descriptor(loader, name)?;
+        return Ok(shared.class_object_for_ref(&class_ref)?);
+    }
+    if let Some(kind) = PrimitiveKind::from_name(name) {
+        return Ok(shared.primitive_class(kind));
+    }
+    let class = resolve_from(shared, current, name)?;
+    Ok(shared.class_object(class)?)
 }
 
 fn resolve_loader(shared: &Shared, current: ClassId) -> Result<rava_vm::LoaderId, InterpError> {

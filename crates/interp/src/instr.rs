@@ -14,6 +14,12 @@
 //! M2.7 adds the exception table: `start_pc`/`end_pc`/`handler_pc` are resolved to the
 //! same instruction indices at decode time, so handler search at run time is a range
 //! check over instruction positions, never a byte-address comparison.
+//!
+//! M2.17 extends `ldc` to a `CONSTANT_Class` constant (a class literal), adds `ldc_w`,
+//! and adds `if_acmpeq`/`if_acmpne` so a fixture can compare two class literals by
+//! reference identity. A class constant keeps its name: the class is resolved through
+//! the executing frame's loader, so the name cannot be turned into a class id at decode
+//! time.
 
 use std::collections::HashMap;
 
@@ -91,6 +97,9 @@ pub enum Instr {
     IMul,
     IDiv,
     LdcString(String),
+    /// `ldc`/`ldc_w` of a `CONSTANT_Class`: the class name or descriptor, resolved
+    /// through the executing frame's loader when the instruction runs.
+    LdcClass(String),
     GetStatic {
         class: String,
         name: String,
@@ -143,6 +152,10 @@ pub enum Instr {
     If(IntCondition, usize),
     /// `if_icmpeq`/...: compare two popped ints, then jump to an index.
     IfICmp(IntCondition, usize),
+    /// `if_acmpeq`: compare two popped references, then jump to an index; `0xa5`.
+    IfACmpEq(usize),
+    /// `if_acmpne`: compare two popped references, then jump to an index; `0xa6`.
+    IfACmpNe(usize),
     IfNull(usize),
     IfNonNull(usize),
     /// `athrow`: pop a reference and throw it; `0xbf`.
@@ -290,6 +303,18 @@ pub fn decode(file: &ClassFile, attribute_data: &[u8]) -> Result<DecodedMethod, 
                 fixups.push((instructions.len(), target_offset(opcode_pc, offset)?));
                 Instr::IfICmp(CONDITIONS[usize::from(opcode - 0x9f)], 0)
             }
+            0xa5 => {
+                let offset = branch_offset(code, pc)?;
+                pc += 2;
+                fixups.push((instructions.len(), target_offset(opcode_pc, offset)?));
+                Instr::IfACmpEq(0)
+            }
+            0xa6 => {
+                let offset = branch_offset(code, pc)?;
+                pc += 2;
+                fixups.push((instructions.len(), target_offset(opcode_pc, offset)?));
+                Instr::IfACmpNe(0)
+            }
             0xa7 => {
                 let offset = branch_offset(code, pc)?;
                 pc += 2;
@@ -313,9 +338,14 @@ pub fn decode(file: &ClassFile, attribute_data: &[u8]) -> Result<DecodedMethod, 
             0xb1 => Instr::Return,
             0xbf => Instr::Athrow,
             0x12 => {
-                let index = byte(code, pc)?;
+                let index = u16::from(byte(code, pc)?);
                 pc += 1;
-                resolve_ldc(file, u16::from(index))?
+                resolve_ldc(file, index)?
+            }
+            0x13 => {
+                let index = u16::from_be_bytes([byte(code, pc)?, byte(code, pc + 1)?]);
+                pc += 2;
+                resolve_ldc(file, index)?
             }
             0xb2 => {
                 let index = u16::from_be_bytes([byte(code, pc)?, byte(code, pc + 1)?]);
@@ -411,6 +441,8 @@ pub fn decode(file: &ClassFile, attribute_data: &[u8]) -> Result<DecodedMethod, 
             Instr::Goto(_) => Instr::Goto(target_index),
             Instr::If(condition, _) => Instr::If(*condition, target_index),
             Instr::IfICmp(condition, _) => Instr::IfICmp(*condition, target_index),
+            Instr::IfACmpEq(_) => Instr::IfACmpEq(target_index),
+            Instr::IfACmpNe(_) => Instr::IfACmpNe(target_index),
             Instr::IfNull(_) => Instr::IfNull(target_index),
             Instr::IfNonNull(_) => Instr::IfNonNull(target_index),
             _ => {
@@ -572,15 +604,49 @@ fn target_offset(opcode_pc: usize, offset: i16) -> Result<usize, InterpError> {
     })
 }
 
+/// Resolve `ldc`/`ldc_w`'s constant-pool index to its instruction.
+///
+/// Only the two kinds this VM can push are decoded: a `CONSTANT_String` (interned when
+/// it executes) and a `CONSTANT_Class` (a class literal, resolved through the executing
+/// frame's loader). A numeric constant and every other kind are a typed decode error;
+/// the numeric forms need `ldc2_w` or a value representation this slice does not have.
 fn resolve_ldc(file: &ClassFile, index: u16) -> Result<Instr, InterpError> {
-    let Constant::String { string_index } = file.constant_pool.get(index)? else {
-        return Err(InterpError::Decode(format!(
-            "constant {index} is not a String"
-        )));
-    };
-    Ok(Instr::LdcString(
-        file.constant_pool.utf8(*string_index)?.to_owned(),
-    ))
+    let constant = file.constant_pool.get(index)?;
+    match constant {
+        Constant::String { string_index } => Ok(Instr::LdcString(
+            file.constant_pool.utf8(*string_index)?.to_owned(),
+        )),
+        Constant::Class { name_index } => Ok(Instr::LdcClass(
+            file.constant_pool.utf8(*name_index)?.to_owned(),
+        )),
+        other => Err(InterpError::Decode(format!(
+            "ldc of an unsupported {} constant",
+            constant_kind(other)
+        ))),
+    }
+}
+
+/// The class-file name of a constant kind, for an error that names what it rejected.
+fn constant_kind(constant: &Constant) -> &'static str {
+    match constant {
+        Constant::Utf8(_) => "Utf8",
+        Constant::Integer(_) => "Integer",
+        Constant::Float(_) => "Float",
+        Constant::Long(_) => "Long",
+        Constant::Double(_) => "Double",
+        Constant::Class { .. } => "Class",
+        Constant::String { .. } => "String",
+        Constant::FieldRef { .. } => "Fieldref",
+        Constant::MethodRef { .. } => "Methodref",
+        Constant::InterfaceMethodRef { .. } => "InterfaceMethodref",
+        Constant::NameAndType { .. } => "NameAndType",
+        Constant::MethodHandle { .. } => "MethodHandle",
+        Constant::MethodType { .. } => "MethodType",
+        Constant::Dynamic { .. } => "Dynamic",
+        Constant::InvokeDynamic { .. } => "InvokeDynamic",
+        Constant::Module { .. } => "Module",
+        Constant::Package { .. } => "Package",
+    }
 }
 
 fn resolve_class(file: &ClassFile, index: u16) -> Result<String, InterpError> {
