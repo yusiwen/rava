@@ -70,6 +70,7 @@ release process, if wanted, becomes its own phase.
 | M2.10 | Boxed values and reflection invocation | R3 | `cargo test -p rava-interp --test reflection_invoke` exits 0 | done |
 | M2.11 | Annotation reflection and proxies | R3 | `cargo test -p rava-interp --test annotations` exits 0 | done |
 | M2.12 | `StringBuilder` and core collection behavior | R3 | `cargo test -p rava-interp --test collections` exits 0 | done |
+| M2.13 | `HashMap` and `String.valueOf`/value conversion | R3 | `cargo test -p rava-interp --test maps_values` exits 0 | todo |
 
 P0 and P1 are accepted; P2 is done because the M2 increments are sliced. All M0 and
 M1 slices are done, and both gate reviews passed. M2.1, M2.2, M2.3, M2.4, M2.5,
