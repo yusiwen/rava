@@ -107,7 +107,16 @@ or a non-reference argument is a typed error. `String.valueOf` covers `Object`, 
 itself, a boxed `Integer` its decimal value, and any other object the VM's
 `ClassName@hex` shape, with `valueOf(int)` identical to `Integer.toString(int)`. Iterators,
 `entrySet`/`keySet`/`values`, streams, `StringBuffer`, `Objects` and the remaining
-`HashMap` methods remain later slices. **M2.14 is next.**
+`HashMap` methods remain later slices. **M2.14 is done (2026-11-24):**
+`Class.getDeclaredField`/`getField`, `getDeclaredMethod`/`getMethod` and
+`getDeclaredConstructor`/`getConstructor` resolve a member from the C1 metadata: a field
+by name, a method or constructor by name plus the parameter descriptors built from a
+`Class[]`, with inherited lookup through the superclass chain and interfaces and
+declared-only constructor lookup. A hit is the cached reflected-member object, a miss is
+null, and a primitive or array parameter class, a null `Class[]`, a null element or a
+non-`Class` element is a typed error because those class objects do not exist yet.
+Access-control filtering, primitive and array `Class` identity, the generic `Type` graph
+and Spring remain later slices. **M2.15 is next.**
 
 ## What this project is
 

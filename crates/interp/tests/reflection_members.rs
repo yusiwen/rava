@@ -1393,44 +1393,36 @@ fn primitive_and_array_descriptors_are_typed_errors() {
 }
 
 #[test]
-fn inherited_member_queries_are_typed_unsupported() {
+fn inherited_member_array_queries_are_typed_unsupported() {
     let fixture = fixture();
     let class_class = fixture
         .shared
         .load_library_class("java/lang/Class")
         .unwrap();
 
-    let fields = run_instance_method(
-        &fixture.shared,
-        &fixture.thread,
-        class_class,
-        "getFields",
-        "()[Ljava/lang/reflect/Field;",
-        fixture.string_object,
-        Vec::new(),
-    );
-    assert!(
-        matches!(
-            fields,
-            Err(InterpError::NativeOrAbstract { ref name, .. }) if name == "getFields"
-        ),
-        "{fields:?}"
-    );
-
-    let field = run_instance_method(
-        &fixture.shared,
-        &fixture.thread,
-        class_class,
-        "getDeclaredField",
-        "(Ljava/lang/String;)Ljava/lang/reflect/Field;",
-        fixture.string_object,
-        vec![name_argument(&fixture, "value")],
-    );
-    assert!(
-        matches!(
-            field,
-            Err(InterpError::NativeOrAbstract { ref name, .. }) if name == "getDeclaredField"
-        ),
-        "{field:?}"
-    );
+    // M2.14 added the named lookups (`getField`, `getMethod`, `getConstructor`); the
+    // array-valued inherited queries are still absent and reach the abstract C1 stub.
+    for (name, descriptor) in [
+        ("getFields", "()[Ljava/lang/reflect/Field;"),
+        ("getMethods", "()[Ljava/lang/reflect/Method;"),
+        ("getConstructors", "()[Ljava/lang/reflect/Constructor;"),
+    ] {
+        let result = run_instance_method(
+            &fixture.shared,
+            &fixture.thread,
+            class_class,
+            name,
+            descriptor,
+            fixture.string_object,
+            Vec::new(),
+        );
+        let unsupported = matches!(
+            &result,
+            Err(InterpError::NativeOrAbstract {
+                name: found_name,
+                ..
+            }) if found_name.as_str() == name
+        );
+        assert!(unsupported, "{name}: {result:?}");
+    }
 }

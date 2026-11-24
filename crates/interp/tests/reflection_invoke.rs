@@ -224,7 +224,6 @@ fn box_probe_bytes() -> Vec<u8> {
 struct Fixture {
     shared: Shared,
     bean: ClassId,
-    bean_object: ObjRef,
     box_probe: ClassId,
     thread: ThreadState,
 }
@@ -240,7 +239,6 @@ fn fixture() -> Fixture {
     let bean = shared
         .define_class(LoaderId::BOOTSTRAP, "Bean", &bean_bytes())
         .expect("Bean defines");
-    let bean_object = shared.class_object(bean).expect("Bean gets a class object");
     let box_probe = shared
         .define_class(LoaderId::BOOTSTRAP, "BoxProbe", &box_probe_bytes())
         .expect("BoxProbe defines");
@@ -248,7 +246,6 @@ fn fixture() -> Fixture {
     Fixture {
         shared,
         bean,
-        bean_object,
         box_probe,
         thread,
     }
@@ -1037,30 +1034,12 @@ fn wrong_receivers_static_fields_and_wrong_arguments_are_typed_errors() {
 }
 
 #[test]
-fn the_no_overload_and_no_lookup_boundary_is_explicit() {
+fn the_exact_descriptor_invocation_boundary_is_explicit() {
     let fixture = fixture();
 
-    // The reflective lookup API that would resolve overloads by name and parameter types
-    // is still absent: it reaches the abstract C1 stub, not a native.
-    let class_class = library_class(&fixture, "java/lang/Class");
-    let name = fixture.shared.intern_string("setValue");
-    let parameter_types = reference_array(&fixture.shared, &[]);
-    let result = run_instance_method(
-        &fixture.shared,
-        &fixture.thread,
-        class_class,
-        "getDeclaredMethod",
-        "(Ljava/lang/String;[Ljava/lang/Class;)Ljava/lang/reflect/Method;",
-        fixture.bean_object,
-        vec![Value::Ref(name), Value::Ref(parameter_types)],
-    );
-    assert!(
-        matches!(
-            result,
-            Err(InterpError::NativeOrAbstract { ref name, .. }) if name == "getDeclaredMethod"
-        ),
-        "found {result:?}"
-    );
+    // Reflective invocation uses the reflected name and descriptor exactly. The named
+    // lookup that resolves an overload is M2.14's `Class.getDeclaredMethod` and is
+    // covered by `member_lookup`, not here.
 
     // A member object whose descriptor does not exist is not resolved to a same-named
     // overload: Method.invoke uses the reflected name and descriptor exactly.

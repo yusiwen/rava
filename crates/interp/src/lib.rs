@@ -12,7 +12,10 @@
 //! `StringBuilder` and an `ArrayList` receiver to `java/lang/StringBuilder` and
 //! `java/util/ArrayList`, whose natives live in `rava-vm`'s `collections` module. M2.13
 //! dispatches a `HashMap` receiver to `java/util/HashMap`, whose natives live in
-//! `rava-vm`'s `maps` module. The decoded form and the frame are the contracts a later JIT
+//! `rava-vm`'s `maps` module. M2.14 adds the named lookup natives to `rava-vm`'s
+//! `reflection` module; this crate's descriptor parser now skips an array parameter's
+//! element descriptor, so `Class.getDeclaredMethod(String, Class[])` is callable from
+//! bytecode. The decoded form and the frame are the contracts a later JIT
 //! consumes; there is no second frame model.
 
 #![forbid(unsafe_code)]
@@ -1079,13 +1082,36 @@ fn argument_count(descriptor: &str) -> Result<usize, InterpError> {
     while let Some(ch) = chars.next() {
         match ch {
             'I' | 'J' | 'F' | 'D' | 'Z' | 'B' | 'C' | 'S' => count += 1,
-            'L' | '[' => {
-                // Skip a reference descriptor; one value either way.
-                if ch == 'L' {
-                    for next in chars.by_ref() {
-                        if next == ';' {
-                            break;
+            'L' => {
+                // Skip the internal name of an object descriptor; one value.
+                for next in chars.by_ref() {
+                    if next == ';' {
+                        break;
+                    }
+                }
+                count += 1;
+            }
+            '[' => {
+                // An array descriptor is any number of `[` followed by an element
+                // descriptor. The whole thing is one value, but every character belongs
+                // to the same parameter, so the element descriptor must be skipped as
+                // well; otherwise `[Ljava/lang/Class;` would be counted twice.
+                while chars.as_str().starts_with('[') {
+                    chars.next();
+                }
+                match chars.next() {
+                    Some('L') => {
+                        for next in chars.by_ref() {
+                            if next == ';' {
+                                break;
+                            }
                         }
+                    }
+                    Some('Z' | 'B' | 'C' | 'S' | 'I' | 'J' | 'F' | 'D') => {}
+                    _ => {
+                        return Err(InterpError::BadDescriptor(format!(
+                            "{descriptor} has a malformed array parameter"
+                        )));
                     }
                 }
                 count += 1;

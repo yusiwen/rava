@@ -6,8 +6,8 @@
 **Started:** 2026-11-22
 
 > Ledger. P0 and P1 were accepted on 2026-11-23. M1 is complete; M2 is in progress
-> (M2.1, M2.2, M2.3, M2.4, M2.5, M2.6, M2.7, M2.8, M2.9, M2.10, M2.11, M2.12 and
-> M2.13 done). Keep this file honest and terse.
+> (M2.1, M2.2, M2.3, M2.4, M2.5, M2.6, M2.7, M2.8, M2.9, M2.10, M2.11, M2.12,
+> M2.13 and M2.14 done). Keep this file honest and terse.
 
 ## Phase status
 
@@ -27,8 +27,8 @@ release process, if wanted, becomes its own phase.
 
 > Gates are defined in `docs/requirements.md` § Milestones. P0 and P1 are accepted;
 > M0 and M1 are complete, and both gate reviews have passed. M2 is in progress, with
-> M2.1, M2.2, M2.3, M2.4, M2.5, M2.6, M2.7, M2.8, M2.9, M2.10, M2.11, M2.12 and M2.13
-> done.
+> M2.1, M2.2, M2.3, M2.4, M2.5, M2.6, M2.7, M2.8, M2.9, M2.10, M2.11, M2.12, M2.13
+> and M2.14 done.
 
 | Milestone | Delivers | Gate | Status |
 | :--- | :--- | :--- | :--- |
@@ -72,11 +72,12 @@ release process, if wanted, becomes its own phase.
 | M2.11 | Annotation reflection and proxies | R3 | `cargo test -p rava-interp --test annotations` exits 0 | done |
 | M2.12 | `StringBuilder` and core collection behavior | R3 | `cargo test -p rava-interp --test collections` exits 0 | done |
 | M2.13 | `HashMap` and `String.valueOf`/value conversion | R3 | `cargo test -p rava-interp --test maps_values` exits 0 | done |
-| M2.14 | Named member lookup (`getDeclaredMethod`/`getField`/`getConstructor`) | R3 | `cargo test -p rava-interp --test member_lookup` exits 0 | todo |
+| M2.14 | Named member lookup (`getDeclaredMethod`/`getField`/`getConstructor`) | R3 | `cargo test -p rava-interp --test member_lookup` exits 0 | done |
 
 P0 and P1 are accepted; P2 is done because the M2 increments are sliced. All M0 and
 M1 slices are done, and both gate reviews passed. M2.1, M2.2, M2.3, M2.4, M2.5,
-M2.6, M2.7, M2.8, M2.9, M2.10, M2.11, M2.12 and M2.13 are done; M2.14 is next.
+M2.6, M2.7, M2.8, M2.9, M2.10, M2.11, M2.12, M2.13 and M2.14 are done; M2.15 is
+next.
 
 ## Slice log
 
@@ -107,6 +108,7 @@ M2.6, M2.7, M2.8, M2.9, M2.10, M2.11, M2.12 and M2.13 are done; M2.14 is next.
 | M2.11 | `cargo test -p rava-interp --test annotations` | 0 | 2026-11-24 | `HeapObject::Annotation` carries the annotation type's `ClassId` and the encoded values from the M2.1 metadata model, and `HeapObject::Enum` (cached per `(class, name)` as a permanent root) represents an enum constant; `Class`, `Field`, `Method` and `Constructor` gain `getDeclaredAnnotations`, `getAnnotations` and `getAnnotation(Class)` over that metadata in class-file order, returning an empty array for no declared annotations and null for a missing single annotation; `Class.getAnnotations` merges superclass annotations whose type is itself `@Inherited`, nearest declaration winning, while `getDeclaredAnnotations` stays declared-only; an omitted element falls back to the annotation type's `AnnotationDefault`; element values decode through the annotation type's loader as interned strings, `Value` primitives, class literals (`c`), enum constants (`e`), nested annotation objects (`@`) and primitive/reference arrays (`[`); `invokevirtual` dispatches an annotation receiver to its annotation type and the annotation module answers `annotationType`, every element method and deterministic `equals`/`hashCode`/`toString`; `java/lang/annotation/Annotation.annotationType` and the three queries on `Class`/`Field`/`Method`/`Constructor` (plus `AccessibleObject.getAnnotations`, where the C1 stub declares it) are registry natives, and `java/lang/Enum.name`/`toString` report a constant's name; the committed release-17 fixture under `crates/interp/tests/fixtures/annotations/` annotates a class, field, method and constructor with string/int/boolean/long/double/class/enum/nested/array elements and defaults and an `@Inherited` superclass annotation; 10 tests; `cargo test -p rava-interp` 80, `rava-vm` 47, `rava-classfile` 50 and `rava-cli` 67 pass, workspace 244; `cargo xtask ci` exits 0 |
 | M2.12 | `cargo test -p rava-interp --test collections` | 0 | 2026-11-24 | `HeapObject::StringBuilder(String)` and `HeapObject::List(Vec<Value>)` are ordinary heap objects selected by their class identity in `Shared::allocate_instance`; `Shared::get_class`, `invokevirtual` dispatch and `Object.toString`'s runtime name report `java/lang/StringBuilder` and `java/util/ArrayList`, and `Shared::roots` enumerates every non-null reference held by a heap list. The builder natives cover the three constructors, the `String`/`Object`/`int`/`long`/`char`/`boolean`/`float`/`double`/`CharSequence` `append` overloads, `toString`, `length`, `charAt`, `setLength`, `reverse`, `deleteCharAt` and `insert(I,String)` over UTF-16 units (null String appends `"null"`, a split surrogate is `UnpairedSurrogate`); the list natives cover both constructors, `size`, `isEmpty`, both `add` forms, `get`, `set`, `clear`, both `remove` forms, `contains` and `indexOf` with reference-equality membership and typed bounds errors. The `CollectionsProbe` fixture exercises the bytecode path (including `getClass().getName()` on both VM classes), and the registry is called directly only for the `long`/`float`/`double` overloads the decoded instruction subset cannot load. 12 new tests; `cargo test -p rava-interp` 92, `rava-vm` 47, `rava-classfile` 50 and `rava-cli` 67 pass, workspace 256; `cargo xtask ci` exits 0 |
 | M2.13 | `cargo test -p rava-interp --test maps_values` | 0 | 2026-11-24 | `HeapObject::Map(Vec<(Value, Value)>)` is an insertion-ordered map with a heap allocator and accessors, selected by the `java.util.HashMap` class identity in `Shared::allocate_instance`; `Shared::get_class`, `invokevirtual` dispatch and `Object.toString`'s runtime name report `java.util.HashMap`, and `Shared::roots` enumerates every non-null key and value a map holds. The natives cover the `()V`/`(I)V` constructors, `size`, `isEmpty`, `put` (returning the previous value or null), `get`, `containsKey`, `containsValue`, `remove` and `clear`; null keys and values are stored, a string key compares by content, a boxed `Integer` key by value and every other key by reference identity, and a negative capacity or a non-reference argument is a typed `VmError::Native`. `String.valueOf` covers `Object`, `int`, `long`, `boolean`, `char`, `float` and `double`: null renders `"null"`, a `String` returns itself, a boxed `Integer` its decimal value, any other object the VM's `ClassName@hex` shape that matches M2.9 `Object.toString`, `valueOf(int)` is byte-identical to `Integer.toString(int)`, and a lone surrogate `char` is `UnpairedSurrogate`; the value-conversion helpers moved from `collections` to `string`, so `StringBuilder.append(Object)` keeps the same text. The assembled `MapProbe` exercises the bytecode path, two distinct equal-content string keys and two distinct boxed `Integer` keys, roots, and typed errors; 16 tests; `cargo test -p rava-interp` 108, `rava-vm` 47, `rava-classfile` 50 and `rava-cli` 67 pass, workspace 272; `cargo xtask ci` exits 0 |
+| M2.14 | `cargo test -p rava-interp --test member_lookup` | 0 | 2026-11-24 | `Class.getDeclaredField`/`getField`, `getDeclaredMethod`/`getMethod` and `getDeclaredConstructor`/`getConstructor` are registry natives; a field matches by name and an executable by name plus the parameter descriptors built from its `Class[]` argument (reference parameter classes only), first in class-file order, and a method's return type is not part of the query; `get*` searches the class, its superclass chain and its interfaces with a visited set, while `getDeclared*` and the constructor queries stay on the receiver; a miss is null (the JDK's `NoSuchFieldException`/`NoSuchMethodException` is deferred because exception objects are not synthesized), and a primitive, array, null or non-`Class` parameter class is a typed `VmError::Native`; every hit is the M2.8 `Shared::reflect_member` object, so it is reference-identical to the array queries and stable across calls; the interpreter's `argument_count` now skips an array parameter's element descriptor, so `Class.getDeclaredMethod(String, Class[])` is callable from bytecode; the fixture has a field-hiding subclass, an interface method and three constructors; 5 tests; `cargo test -p rava-interp` 113, `rava-vm` 47, `rava-classfile` 50 and `rava-cli` 67 pass, workspace 277; `cargo xtask ci` exits 0 |
 
 M0.6 boundary: the reference and class-unloading hooks are registration points only.
 M0 has no collector, so no weak/soft/phantom reference is cleared and no class is
@@ -489,6 +491,39 @@ the `char[]` forms remain absent, `valueOf(int)` uses the identical decimal text
 limitation (an exponential value is printed in plain decimal). A lone surrogate `char` is
 a typed `UnpairedSurrogate`.
 
+M2.14 boundary: the six named lookup natives are `Class.getDeclaredField`/`getField`,
+`getDeclaredMethod`/`getMethod` and `getDeclaredConstructor`/`getConstructor`. A field
+query is a name only, which is the JDK signature: the first declared field with that
+name wins in class-file order (Java allows one field per name per class; a hidden
+superclass field is reached by the ordered search, not by a duplicate within one class).
+A method or constructor query matches the name (constructors are `<init>`, and
+`<clinit>` is never a method) plus the parameter descriptors built from the `Class[]`
+argument; a method's return type is not part of the query, as on the JDK, so two
+same-name, same-parameter declarations in one class would resolve to the first in
+class-file order (Java source cannot express that; a bridge method can). Inherited
+lookup walks the receiver, its superclass chain, then the interfaces of each class on
+that chain, visiting each `ClassId` at most once; an interface's class file names
+`Object` as its superclass, but the JDK reports no superclass for an interface, so that
+edge is not followed and only the interface's own `interfaces` list continues the walk.
+`getDeclared*` stays on the receiver, and constructors are not inherited on the JDK
+either, so `getConstructor` is the declared view too. A lookup miss is `null`: the JDK
+throws `NoSuchFieldException`/`NoSuchMethodException`, but this slice has no exception
+object synthesis, so `null` is the documented result instead of a synthesized throwable.
+A parameter class must be a reference class object, so its binary name becomes
+`Linternal/Name;`; primitive and array class objects do not exist in this slice (there is
+no `int.class` or array identity), and a parameter class whose name is a primitive
+keyword or an array descriptor is a typed `VmError::Native`, as is a null `Class[]`, a
+null element and a non-`Class` element. There is no access-control filter yet: the JDK's
+`getField`/`getMethod`/`getConstructor` are public-only and the `getDeclared*` forms
+report private members, but this slice returns either without checking modifiers. Every
+hit is the M2.8 `Shared::reflect_member` object for its `(class, kind, name, descriptor)`
+identity, so it is reference-identical to the `getDeclared*` array queries and stable
+across calls; no second cache exists. The interpreter's descriptor parser skips an array
+parameter's element descriptor (`[Ljava/lang/Class;` is one parameter, not two), which is
+what lets `getDeclaredMethod`/`getMethod` be called from bytecode. Array and primitive
+`Class` identity, the generic `Type` graph, annotation changes and Spring remain later
+slices.
+
 ## Decision log
 
 | ADR | Decision | Status |
@@ -551,7 +586,12 @@ A fresh session should:
    `get`/`containsKey`/`containsValue`/`remove`/`clear` natives with content-equal string
    keys and value-equal `Integer` keys, `Shared::roots` enumerating map keys and values,
    and the `String.valueOf` overloads over the shared `ClassName@hex`/decimal text
-   (`cargo test -p rava-interp --test maps_values`). M2.14 is next.
+   (`cargo test -p rava-interp --test maps_values`). M2.14 landed named member lookup:
+    `Class.getDeclaredField`/`getField`, `getDeclaredMethod`/`getMethod` and
+    `getDeclaredConstructor`/`getConstructor` match a field by name and an executable by
+    name plus parameter descriptors, search the superclass chain and interfaces for the
+    inherited forms, return null for a miss, and return the M2.8 cached member object
+    (`cargo test -p rava-interp --test member_lookup`). M2.15 is next.
 4. Do not write runtime code outside a defined slice.
 
 ## Open decisions

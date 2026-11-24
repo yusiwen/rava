@@ -1,5 +1,5 @@
-//! `Object`/`Class` reflection natives (M2.4), reflected members (M2.8) and field
-//! access (M2.10).
+//! `Object`/`Class` reflection natives (M2.4), reflected members (M2.8), field access
+//! (M2.10) and named member lookup (M2.14).
 //!
 //! The surface here is deliberately small. M2.4 supplies the six class-object methods
 //! plus `Object.getClass`: names, modifiers, interface/array flags, the superclass and
@@ -7,10 +7,14 @@
 //! `Field`, `Method` and `Constructor` objects: the declaring class, name, modifiers,
 //! field type, return type, parameter types and parameter count. M2.10 adds `Field.get`
 //! and `Field.set` for `int` and reference fields, boxing an `int` on read and unboxing
-//! a boxed `Integer` on write. `Method.invoke` and `Constructor.newInstance` need the
+//! a boxed `Integer` on write. M2.14 adds `getDeclaredField`/`getField`,
+//! `getDeclaredMethod`/`getMethod` and `getDeclaredConstructor`/`getConstructor`: a
+//! query matches a field by name and an executable by name plus parameter descriptors,
+//! `get*` walks the superclass chain and interfaces while `getDeclared*` stays on the
+//! receiver, and every hit is the same cached member object the `getDeclared*`
+//! array queries return. `Method.invoke` and `Constructor.newInstance` need the
 //! interpreter's execution machinery, so they live in `rava-interp` instead of this
-//! crate; annotations, generic types, inherited-member lookup and access checks remain
-//! later slices.
+//! crate; annotations, generic types and access checks remain later slices.
 //!
 //! The natives read the class table rather than caching a second copy of the metadata:
 //! a class object is only a [`crate::ClassId`], and every answer comes from that
@@ -19,6 +23,8 @@
 //! modifiers and types come from the same typed C1 metadata. `Class.forName` loads and
 //! allocates the class object; it does not initialize the class, because the C1 stubs
 //! have no observable `<clinit>`.
+
+use std::collections::HashSet;
 
 use crate::VmError;
 use crate::boxed;
@@ -105,6 +111,42 @@ pub fn register_natives(shared: &Shared) {
         "getDeclaredConstructors",
         "()[Ljava/lang/reflect/Constructor;",
         class_get_declared_constructors,
+    );
+    shared.register_native(
+        "java/lang/Class",
+        "getDeclaredField",
+        "(Ljava/lang/String;)Ljava/lang/reflect/Field;",
+        class_get_declared_field,
+    );
+    shared.register_native(
+        "java/lang/Class",
+        "getField",
+        "(Ljava/lang/String;)Ljava/lang/reflect/Field;",
+        class_get_field,
+    );
+    shared.register_native(
+        "java/lang/Class",
+        "getDeclaredMethod",
+        "(Ljava/lang/String;[Ljava/lang/Class;)Ljava/lang/reflect/Method;",
+        class_get_declared_method,
+    );
+    shared.register_native(
+        "java/lang/Class",
+        "getMethod",
+        "(Ljava/lang/String;[Ljava/lang/Class;)Ljava/lang/reflect/Method;",
+        class_get_method,
+    );
+    shared.register_native(
+        "java/lang/Class",
+        "getDeclaredConstructor",
+        "([Ljava/lang/Class;)Ljava/lang/reflect/Constructor;",
+        class_get_declared_constructor,
+    );
+    shared.register_native(
+        "java/lang/Class",
+        "getConstructor",
+        "([Ljava/lang/Class;)Ljava/lang/reflect/Constructor;",
+        class_get_constructor,
     );
 
     // `Field` and `Method` declare `getName` themselves; `Constructor` overrides it with
@@ -422,6 +464,361 @@ pub(crate) fn allocate_reference_array(
         }
     }
     Ok(array)
+}
+
+/// A member found by the M2.14 named lookup, before it becomes a cached member object.
+struct FoundMember {
+    class: ClassId,
+    name: String,
+    descriptor: String,
+}
+
+fn class_get_declared_field(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let class = receiver_class(shared, receiver)?;
+    let name = lookup_name(shared, args, 0, "Class.getDeclaredField")?;
+    let found = find_declared_field(shared, class, &name)?;
+    member_value(shared, found, MemberKind::Field)
+}
+
+fn class_get_field(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let class = receiver_class(shared, receiver)?;
+    let name = lookup_name(shared, args, 0, "Class.getField")?;
+    for candidate in lookup_order(shared, class)? {
+        if let Some(found) = find_declared_field(shared, candidate, &name)? {
+            return member_value(shared, Some(found), MemberKind::Field);
+        }
+    }
+    Ok(Some(Value::Ref(ObjRef::NULL)))
+}
+
+fn class_get_declared_method(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let class = receiver_class(shared, receiver)?;
+    let name = lookup_name(shared, args, 0, "Class.getDeclaredMethod")?;
+    let parameters = parameter_class_descriptors(shared, args, 1, "Class.getDeclaredMethod")?;
+    let found = find_declared_method(shared, class, &name, &parameters)?;
+    member_value(shared, found, MemberKind::Method)
+}
+
+fn class_get_method(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let class = receiver_class(shared, receiver)?;
+    let name = lookup_name(shared, args, 0, "Class.getMethod")?;
+    let parameters = parameter_class_descriptors(shared, args, 1, "Class.getMethod")?;
+    for candidate in lookup_order(shared, class)? {
+        if let Some(found) = find_declared_method(shared, candidate, &name, &parameters)? {
+            return member_value(shared, Some(found), MemberKind::Method);
+        }
+    }
+    Ok(Some(Value::Ref(ObjRef::NULL)))
+}
+
+fn class_get_declared_constructor(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let class = receiver_class(shared, receiver)?;
+    let parameters = parameter_class_descriptors(shared, args, 0, "Class.getDeclaredConstructor")?;
+    let found = find_declared_constructor(shared, class, &parameters)?;
+    member_value(shared, found, MemberKind::Constructor)
+}
+
+/// `Class.getConstructor`: constructors are not inherited, so the lookup is the declared
+/// view of the receiver. The JDK additionally filters to public constructors; this slice
+/// performs no access check, so every declared constructor is a candidate.
+fn class_get_constructor(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let class = receiver_class(shared, receiver)?;
+    let parameters = parameter_class_descriptors(shared, args, 0, "Class.getConstructor")?;
+    let found = find_declared_constructor(shared, class, &parameters)?;
+    member_value(shared, found, MemberKind::Constructor)
+}
+
+/// The `String` name argument of a field lookup.
+fn lookup_name(
+    shared: &Shared,
+    args: &[Value],
+    position: usize,
+    operation: &str,
+) -> Result<String, VmError> {
+    let Some(Value::Ref(reference)) = args.get(position).copied() else {
+        return Err(VmError::Native(format!(
+            "{operation} expects a String name argument"
+        )));
+    };
+    if reference.is_null() {
+        return Err(VmError::Native(format!(
+            "{operation} received a null name argument"
+        )));
+    }
+    let name = {
+        let heap = shared.heap();
+        let name = heap.string(reference).map_err(|error| {
+            VmError::Native(format!(
+                "{operation} name argument is not a String: {error}"
+            ))
+        })?;
+        name.to_owned()
+    };
+    Ok(name)
+}
+
+/// Build the parameter descriptors of a lookup from its `Class[]` argument.
+///
+/// A parameter class is a class object, so a reference parameter becomes its
+/// `Linternal/Name;` descriptor. Primitive and array class objects do not exist in this
+/// slice (there is no `int.class` or array class identity), so a parameter class whose
+/// name is a primitive keyword or an array descriptor is a typed error rather than a
+/// guessed descriptor. A null element, a null array and a non-`Class` element are typed
+/// errors too, where the JDK would raise `NullPointerException`.
+fn parameter_class_descriptors(
+    shared: &Shared,
+    args: &[Value],
+    position: usize,
+    operation: &str,
+) -> Result<Vec<String>, VmError> {
+    let Some(Value::Ref(array_reference)) = args.get(position).copied() else {
+        return Err(VmError::Native(format!(
+            "{operation} expects a Class[] argument"
+        )));
+    };
+    if array_reference.is_null() {
+        return Err(VmError::Native(format!(
+            "{operation} received a null Class[] argument"
+        )));
+    }
+    let classes = {
+        let heap = shared.heap();
+        let array = heap.array(array_reference).map_err(heap_error)?;
+        if array.kind != ArrayKind::Reference {
+            return Err(VmError::Native(format!(
+                "{operation} expects a Class[] argument, found a primitive array"
+            )));
+        }
+        let mut classes = Vec::with_capacity(array.elements.len());
+        for element in &array.elements {
+            let Value::Ref(reference) = *element else {
+                return Err(VmError::Native(format!(
+                    "{operation} parameter classes must be objects"
+                )));
+            };
+            if reference.is_null() {
+                return Err(VmError::Native(format!(
+                    "{operation} received a null parameter class"
+                )));
+            }
+            let class = heap.class(reference).map_err(|error| {
+                VmError::Native(format!(
+                    "{operation} parameter class is not a Class object: {error}"
+                ))
+            })?;
+            classes.push(class);
+        }
+        classes
+    };
+
+    let mut descriptors = Vec::with_capacity(classes.len());
+    for class in classes {
+        let entry = shared
+            .entry(class)
+            .ok_or_else(|| VmError::Loader(format!("class id {} is not loaded", class.0)))?;
+        let name = entry.name.clone();
+        if name.starts_with('[') {
+            return Err(VmError::Native(format!(
+                "{operation} does not support array parameter classes yet (M2.14): {name}"
+            )));
+        }
+        if is_primitive_class_name(&name) {
+            return Err(VmError::Native(format!(
+                "{operation} does not support primitive parameter classes yet (M2.14): {name}"
+            )));
+        }
+        descriptors.push(format!("L{name};"));
+    }
+    Ok(descriptors)
+}
+
+/// A binary name that denotes a primitive type rather than a reference type.
+fn is_primitive_class_name(name: &str) -> bool {
+    matches!(
+        name,
+        "boolean" | "byte" | "char" | "short" | "int" | "long" | "float" | "double" | "void"
+    )
+}
+
+/// The declared field `name`, first in class-file order.
+fn find_declared_field(
+    shared: &Shared,
+    class: ClassId,
+    name: &str,
+) -> Result<Option<FoundMember>, VmError> {
+    let entry = shared
+        .entry(class)
+        .ok_or_else(|| VmError::Loader(format!("class id {} is not loaded", class.0)))?;
+    let metadata = entry.metadata()?;
+    for field in &metadata.fields {
+        if field.name == name {
+            return Ok(Some(FoundMember {
+                class,
+                name: field.name.clone(),
+                descriptor: field.descriptor.clone(),
+            }));
+        }
+    }
+    Ok(None)
+}
+
+/// The declared method called `name` with `parameters`, first in class-file order.
+///
+/// A method's return type is not part of a reflective query, so the match compares only
+/// the name and the parameter descriptors parsed from each method's full descriptor.
+fn find_declared_method(
+    shared: &Shared,
+    class: ClassId,
+    name: &str,
+    parameters: &[String],
+) -> Result<Option<FoundMember>, VmError> {
+    let entry = shared
+        .entry(class)
+        .ok_or_else(|| VmError::Loader(format!("class id {} is not loaded", class.0)))?;
+    let metadata = entry.metadata()?;
+    for method in &metadata.methods {
+        if method.is_constructor() || method.is_class_initializer() {
+            continue;
+        }
+        if method.name != name || !parameter_match(&method.descriptor, parameters)? {
+            continue;
+        }
+        return Ok(Some(FoundMember {
+            class,
+            name: method.name.clone(),
+            descriptor: method.descriptor.clone(),
+        }));
+    }
+    Ok(None)
+}
+
+/// The `<init>` whose parameter descriptors equal `parameters`, first in class-file order.
+fn find_declared_constructor(
+    shared: &Shared,
+    class: ClassId,
+    parameters: &[String],
+) -> Result<Option<FoundMember>, VmError> {
+    let entry = shared
+        .entry(class)
+        .ok_or_else(|| VmError::Loader(format!("class id {} is not loaded", class.0)))?;
+    let metadata = entry.metadata()?;
+    for method in &metadata.methods {
+        if !method.is_constructor() || !parameter_match(&method.descriptor, parameters)? {
+            continue;
+        }
+        return Ok(Some(FoundMember {
+            class,
+            name: method.name.clone(),
+            descriptor: method.descriptor.clone(),
+        }));
+    }
+    Ok(None)
+}
+
+/// Does a method descriptor's parameter list equal the lookup's parameter descriptors?
+fn parameter_match(descriptor: &str, parameters: &[String]) -> Result<bool, VmError> {
+    let declared = parameter_descriptors(descriptor)?;
+    Ok(declared.len() == parameters.len()
+        && declared
+            .iter()
+            .zip(parameters)
+            .all(|(declared, expected)| *declared == expected.as_str()))
+}
+
+/// Turn a found member into its cached `Field`/`Method`/`Constructor` object.
+///
+/// A miss is `null`, which is the result this slice documents for every lookup miss. The
+/// JDK throws `NoSuchFieldException`/`NoSuchMethodException`, but this slice does not
+/// synthesize exception objects, so `null` is the honest, testable result here.
+fn member_value(
+    shared: &Shared,
+    found: Option<FoundMember>,
+    kind: MemberKind,
+) -> Result<Option<Value>, VmError> {
+    let Some(found) = found else {
+        return Ok(Some(Value::Ref(ObjRef::NULL)));
+    };
+    let reference = shared.reflect_member(found.class, kind, &found.name, &found.descriptor)?;
+    Ok(Some(Value::Ref(reference)))
+}
+
+/// The classes an inherited lookup visits, in order: the class itself, its superclass
+/// chain, and then interfaces, with every class visited once.
+///
+/// An interface's class file names `java/lang/Object` as its superclass but the JDK
+/// reports no superclass for an interface, so the chain does not follow that edge; the
+/// interface's own `interfaces` list is still visited. [`ClassId`]s are visited once, so
+/// a cyclic or diamond interface graph cannot loop.
+fn lookup_order(shared: &Shared, start: ClassId) -> Result<Vec<ClassId>, VmError> {
+    let mut order = Vec::new();
+    let mut visited = HashSet::new();
+    collect_lookup_order(shared, start, &mut visited, &mut order)?;
+    Ok(order)
+}
+
+fn collect_lookup_order(
+    shared: &Shared,
+    class: ClassId,
+    visited: &mut HashSet<ClassId>,
+    order: &mut Vec<ClassId>,
+) -> Result<(), VmError> {
+    if !visited.insert(class) {
+        return Ok(());
+    }
+    order.push(class);
+    let entry = shared
+        .entry(class)
+        .ok_or_else(|| VmError::Loader(format!("class id {} is not loaded", class.0)))?;
+    let loader = entry.loader;
+    let metadata = entry.metadata()?;
+    let is_interface = metadata.is_interface();
+    let interfaces = metadata.interfaces.clone();
+    if !is_interface {
+        if let Some(super_class) = shared.resolution_superclass(class)? {
+            collect_lookup_order(shared, super_class, visited, order)?;
+        }
+    }
+    for interface in interfaces {
+        let interface = shared.load_class(loader, &interface)?;
+        collect_lookup_order(shared, interface, visited, order)?;
+    }
+    Ok(())
 }
 
 /// The member identity behind a reflected-member receiver.
