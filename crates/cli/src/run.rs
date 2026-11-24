@@ -78,6 +78,7 @@ fn execute(options: &Options) -> Result<(), String> {
     // re-enter it; a runner that wants reflection must install them explicitly.
     rava_interp::reflect_invoke::register_natives(&shared);
     rava_interp::callbacks::register_natives(&shared);
+    rava_interp::streams::register_natives(&shared);
 
     let main_class = match shared.load_class(loader, &options.main_class) {
         Ok(class) => class,

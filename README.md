@@ -94,8 +94,7 @@ three constructors, the `String`/`Object`/`int`/`long`/`char`/`boolean`/`float`/
 constructors, `size`, `isEmpty`, both `add` and `remove` forms, `get`, `set`, `clear`,
 `contains` and `indexOf`, with reference-equality membership and typed bounds errors.
 `append(Object)` uses the VM's `String.valueOf`-shaped conversion rather than dispatching
-an overridden `toString`; iterators, streams, `StringBuffer` and reflection changes remain
-later slices. **M2.13 is done (2026-11-24):** a `HashMap` is a dedicated heap object
+an overridden `toString`; `StringBuffer` and reflection changes remain later slices. **M2.13 is done (2026-11-24):** a `HashMap` is a dedicated heap object
 (`HeapObject::Map`, insertion-ordered key/value pairs) selected by its class identity, so
 `getClass` and virtual dispatch report `java.util.HashMap`, and `Shared::roots` enumerates
 the keys and values it holds. The map implements both constructors, `size`, `isEmpty`,
@@ -106,8 +105,8 @@ or a non-reference argument is a typed error. `String.valueOf` covers `Object`, 
 `long`, `boolean`, `char`, `float` and `double`: null renders `"null"`, a `String` returns
 itself, a boxed `Integer` its decimal value, and any other object the VM's
 `ClassName@hex` shape, with `valueOf(int)` identical to `Integer.toString(int)`. Iterators,
-`entrySet`/`keySet`/`values`, streams, `StringBuffer`, `Objects` and the remaining
-`HashMap` methods remain later slices. **M2.14 is done (2026-11-24):**
+`entrySet`/`keySet`/`values`, `StringBuffer` and the remaining `HashMap` methods remain
+later slices. **M2.14 is done (2026-11-24):**
 `Class.getDeclaredField`/`getField`, `getDeclaredMethod`/`getMethod` and
 `getDeclaredConstructor`/`getConstructor` resolve a member from the C1 metadata: a field
 by name, a method or constructor by name plus the parameter descriptors built from a
@@ -219,14 +218,32 @@ declaring class's loader: a raw type is the existing `Class` object, while
 `List<String>`, `T[]`, `? extends Number`, `? super Integer` and `Map.Entry`, a generic
 method and generic constructors) drives the APIs through `invokevirtual`/`invokeinterface`.
 `getGenericExceptionTypes`, record/sealed views, annotation changes and Spring remain
-later slices. **M2.23 is blocked (2026-11-24):** the committed `demo.SpringSmoke` fixture
-and `crates/cli/tests/spring_context.rs` start a real Spring
-`AnnotationConfigApplicationContext` and assert the `hello` bean, but the local test exits
-1 at `java/util/stream/StreamSupport.stream` because the runtime library has no
-`java.util.stream` pipeline yet. The slice fixed the first blocker
-(`LinkedHashSet.<init>(I)V`) and the startup chain up to annotation metadata, including
-monitors, the missing numeric instructions, collection/iterator/array/string/logging/
-concurrency natives, and Java exception construction. The M2 gate is not claimed.
+later slices. **M2.24 is done (2026-11-24):** `java.util.stream` is an eager pipeline over
+new heap representations — `HeapObject::Stream`, `Spliterator`, `Collector`, `Optional`
+and an internal `Consumer` sink — whose `Shared::roots` entries cover every captured
+reference. `StreamSupport.stream` drains a VM spliterator directly and a Java spliterator
+through its own `tryAdvance` with a native consumer, so Spring's
+`AnnotationsSpliterator` runs unmodified. `filter`, `map`, `flatMap`, `distinct`,
+`sorted` (natural and comparator), `peek`, `limit`, `skip`, `forEach`, `toArray`,
+`collect`, `count`, `anyMatch`/`allMatch`/`noneMatch`, `findFirst`/`findAny`, `min`/`max`,
+`reduce`, `toList` and `iterator` are implemented, with `Collectors.toList`/`toSet`/
+`toCollection`/`joining`/`counting`/`toMap`, `Collector.of`, `Collection.stream`/
+`parallelStream`/`spliterator`/`removeIf`, the `Spliterator`/`Spliterators` surface,
+`Optional` and `Map.forEach`. Every callback runs through the interpreter and a throwable
+raised by one crosses the native ABI as a thrown object. The pipeline is eager, so there
+are no lazy stages, no parallel execution, no short-circuiting source and no close action.
+A committed `javac --release 17` fixture (`demo.StreamProbe` plus a real Java
+`WordSpliterator`) covers the operations, a capturing lambda and a caught and an uncaught
+throwing callback. **M2.23 is blocked (2026-11-24):** the committed `demo.SpringSmoke`
+fixture and `crates/cli/tests/spring_context.rs` start a real Spring
+`AnnotationConfigApplicationContext` and assert the `hello` bean, but the local test still
+fails — now at `java.lang.Byte.valueOf(byte)` in `BeanUtils`'s static initializer, which
+boxes every primitive type for its default-editor table; the VM models only `Integer`,
+`Character` and `Boolean` boxes. The
+startup chain before that point is in place: monitors, the missing numeric instructions,
+collections, iterators, logging, concurrency natives, exception construction, reflection
+and the stream pipeline. The remaining work is the full primitive-box family. The M2 gate
+is not claimed.
 
 ## What this project is
 

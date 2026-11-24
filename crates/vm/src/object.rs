@@ -38,6 +38,210 @@ pub fn register_natives(shared: &Shared) {
         "()Ljava/lang/String;",
         object_to_string,
     );
+    // `java.util.Objects` is a small, callback-free surface that Spring's startup path
+    // uses for null checks and defensive copies.
+    shared.register_native(
+        "java/util/Objects",
+        "requireNonNull",
+        "(Ljava/lang/Object;)Ljava/lang/Object;",
+        objects_require_non_null,
+    );
+    shared.register_native(
+        "java/util/Objects",
+        "requireNonNull",
+        "(Ljava/lang/Object;Ljava/lang/String;)Ljava/lang/Object;",
+        objects_require_non_null,
+    );
+    shared.register_native(
+        "java/util/Objects",
+        "isNull",
+        "(Ljava/lang/Object;)Z",
+        objects_is_null,
+    );
+    shared.register_native(
+        "java/util/Objects",
+        "nonNull",
+        "(Ljava/lang/Object;)Z",
+        objects_non_null,
+    );
+    shared.register_native(
+        "java/util/Objects",
+        "equals",
+        "(Ljava/lang/Object;Ljava/lang/Object;)Z",
+        objects_equals,
+    );
+    shared.register_native(
+        "java/util/Objects",
+        "hashCode",
+        "(Ljava/lang/Object;)I",
+        objects_hash_code,
+    );
+    shared.register_native(
+        "java/util/Objects",
+        "toString",
+        "(Ljava/lang/Object;)Ljava/lang/String;",
+        objects_to_string,
+    );
+    shared.register_native(
+        "java/util/Objects",
+        "toString",
+        "(Ljava/lang/Object;Ljava/lang/String;)Ljava/lang/String;",
+        objects_to_string_default,
+    );
+}
+
+/// `Objects.requireNonNull(Object[, String])`: the same reference, or an error for null.
+fn objects_require_non_null(
+    _shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let value = args.first().copied().unwrap_or(Value::Ref(ObjRef::NULL));
+    if matches!(value, Value::Ref(reference) if reference.is_null()) {
+        let message = match args.get(1).copied() {
+            Some(Value::Ref(reference)) if !reference.is_null() => {
+                format!(" (message {reference})")
+            }
+            _ => String::new(),
+        };
+        return Err(VmError::Native(format!(
+            "Objects.requireNonNull received null{message}"
+        )));
+    }
+    Ok(Some(value))
+}
+
+/// `Objects.isNull(Object)`.
+fn objects_is_null(
+    _shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let is_null = matches!(args.first(), Some(Value::Ref(reference)) if reference.is_null());
+    Ok(Some(Value::Int(i32::from(is_null))))
+}
+
+/// `Objects.nonNull(Object)`.
+fn objects_non_null(
+    _shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let non_null = !matches!(args.first(), Some(Value::Ref(reference)) if reference.is_null());
+    Ok(Some(Value::Int(i32::from(non_null))))
+}
+
+/// `Objects.equals(Object, Object)`: null-safe equality with the VM's content rules.
+fn objects_equals(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let left = args.first().copied().unwrap_or(Value::Ref(ObjRef::NULL));
+    let right = args.get(1).copied().unwrap_or(Value::Ref(ObjRef::NULL));
+    let (Value::Ref(left_ref), Value::Ref(right_ref)) = (left, right) else {
+        return Ok(Some(Value::Int(i32::from(left == right))));
+    };
+    if left_ref.is_null() || right_ref.is_null() {
+        return Ok(Some(Value::Int(i32::from(left_ref == right_ref))));
+    }
+    let equal = {
+        let heap = shared.heap();
+        match (
+            heap.get(left_ref)
+                .map_err(|error| VmError::Native(error.to_string()))?,
+            heap.get(right_ref)
+                .map_err(|error| VmError::Native(error.to_string()))?,
+        ) {
+            (HeapObject::Str(left), HeapObject::Str(right)) => left == right,
+            (
+                HeapObject::Boxed(crate::heap::BoxedPrimitive::Integer(left)),
+                HeapObject::Boxed(crate::heap::BoxedPrimitive::Integer(right)),
+            ) => left == right,
+            _ => left_ref == right_ref,
+        }
+    };
+    Ok(Some(Value::Int(i32::from(equal))))
+}
+
+/// `Objects.hashCode(Object)`: 0 for null, otherwise the VM's hash for the value.
+fn objects_hash_code(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    match args.first().copied() {
+        Some(Value::Ref(reference)) if reference.is_null() => Ok(Some(Value::Int(0))),
+        Some(Value::Ref(reference)) => {
+            let hash = {
+                let heap = shared.heap();
+                match heap
+                    .get(reference)
+                    .map_err(|error| VmError::Native(error.to_string()))?
+                {
+                    HeapObject::Str(text) => {
+                        let mut hash = 0i32;
+                        for unit in text.encode_utf16() {
+                            hash = hash.wrapping_mul(31).wrapping_add(i32::from(unit));
+                        }
+                        hash
+                    }
+                    HeapObject::Boxed(crate::heap::BoxedPrimitive::Integer(value)) => *value,
+                    _ => reference.identity_hash(),
+                }
+            };
+            Ok(Some(Value::Int(hash)))
+        }
+        Some(value) => Ok(Some(Value::Int(value.as_int().unwrap_or(0)))),
+        None => Ok(Some(Value::Int(0))),
+    }
+}
+
+/// `Objects.toString(Object)`: `"null"` for null, the value's text otherwise.
+fn objects_to_string(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let text = match args.first().copied() {
+        Some(Value::Ref(reference)) => {
+            crate::string::object_text(shared, reference, "Objects.toString")?
+        }
+        Some(Value::Int(value)) => value.to_string(),
+        Some(Value::Long(value)) => value.to_string(),
+        Some(Value::Float(value)) => crate::string::float_text(value),
+        Some(Value::Double(value)) => crate::string::double_text(value),
+        None => "null".to_owned(),
+    };
+    Ok(Some(Value::Ref(shared.heap().allocate_string(text))))
+}
+
+/// `Objects.toString(Object, String)`: the default for null.
+fn objects_to_string_default(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    if matches!(args.first(), Some(Value::Ref(reference)) if reference.is_null()) {
+        return Ok(Some(
+            args.get(1).copied().unwrap_or(Value::Ref(ObjRef::NULL)),
+        ));
+    }
+    objects_to_string(shared, _thread, _loader, _receiver, args)
 }
 
 /// `Object.equals(Object)`: reference identity, the JDK's default for a class that does
@@ -144,6 +348,11 @@ pub(crate) fn runtime_binary_name(shared: &Shared, receiver: ObjRef) -> Result<S
         Pattern,
         Matcher,
         Enumeration,
+        Stream,
+        Spliterator,
+        Collector,
+        Optional,
+        Sink,
     }
 
     let kind = {
@@ -178,6 +387,11 @@ pub(crate) fn runtime_binary_name(shared: &Shared, receiver: ObjRef) -> Result<S
             HeapObject::Pattern(_) => Kind::Pattern,
             HeapObject::Matcher(_) => Kind::Matcher,
             HeapObject::Enumeration(_) => Kind::Enumeration,
+            HeapObject::Stream(_) => Kind::Stream,
+            HeapObject::Spliterator(_) => Kind::Spliterator,
+            HeapObject::Collector(_) => Kind::Collector,
+            HeapObject::Optional(_) => Kind::Optional,
+            HeapObject::Sink(_) => Kind::Sink,
             HeapObject::Array(array) => Kind::Array(array.component.clone()),
             HeapObject::Lambda(lambda) => Kind::Lambda(lambda.interface),
             HeapObject::Type(ty) => Kind::Type(ty.class_name()),
@@ -224,6 +438,11 @@ pub(crate) fn runtime_binary_name(shared: &Shared, receiver: ObjRef) -> Result<S
         Kind::Pattern => Ok("java.util.regex.Pattern".to_owned()),
         Kind::Matcher => Ok("java.util.regex.Matcher".to_owned()),
         Kind::Enumeration => Ok("java.util.Enumeration".to_owned()),
+        Kind::Stream => Ok("java.util.stream.Stream".to_owned()),
+        Kind::Spliterator => Ok("java.util.Spliterator".to_owned()),
+        Kind::Collector => Ok("java.util.stream.Collector".to_owned()),
+        Kind::Optional => Ok("java.util.Optional".to_owned()),
+        Kind::Sink => Ok("java.util.function.Consumer".to_owned()),
     }
 }
 

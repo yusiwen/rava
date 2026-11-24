@@ -150,6 +150,78 @@ pub fn register_natives(shared: &Shared) {
         "()Ljava/lang/String;",
         enum_name,
     );
+    // `Enum` overrides `equals`/`hashCode` with the identity behavior and declares
+    // `getDeclaringClass`; all three are declared on the C1 stub and would otherwise be
+    // abstract. Spring compares enum constants (for example the annotation-filter
+    // settings) and reads their declaring class.
+    shared.register_native(
+        "java/lang/Enum",
+        "equals",
+        "(Ljava/lang/Object;)Z",
+        enum_equals,
+    );
+    shared.register_native("java/lang/Enum", "hashCode", "()I", enum_hash_code);
+    shared.register_native(
+        "java/lang/Enum",
+        "getDeclaringClass",
+        "()Ljava/lang/Class;",
+        enum_declaring_class,
+    );
+}
+
+/// `Enum.equals(Object)`: reference identity, which is what makes an enum constant its own
+/// equal.
+fn enum_equals(
+    _shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let argument = match args.first().copied() {
+        Some(Value::Ref(argument)) => argument,
+        _ => {
+            return Err(VmError::Native(
+                "Enum.equals expects a reference argument".to_owned(),
+            ));
+        }
+    };
+    Ok(Some(Value::Int(i32::from(receiver == argument))))
+}
+
+/// `Enum.hashCode()`: the identity hash the object already has.
+fn enum_hash_code(
+    _shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    _args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    Ok(Some(Value::Int(receiver.identity_hash())))
+}
+
+/// `Enum.getDeclaringClass()`: the enum class behind an `Enum` constant object or an
+/// ordinary instance allocated by that class's constructor.
+fn enum_declaring_class(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    _args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let class = {
+        let heap = shared.heap();
+        match heap.get(receiver).map_err(heap_error)? {
+            crate::HeapObject::Enum(constant) => constant.class,
+            crate::HeapObject::Instance(instance) => instance.class,
+            _ => {
+                return Err(VmError::Native(
+                    "Enum.getDeclaringClass receiver is not an enum".to_owned(),
+                ));
+            }
+        }
+    };
+    Ok(Some(Value::Ref(shared.class_object(class)?)))
 }
 
 fn heap_error(error: HeapError) -> VmError {
@@ -256,12 +328,10 @@ fn inherited_annotations(
         let entry = shared
             .entry(current)
             .ok_or_else(|| VmError::Loader(format!("class id {} is not loaded", current.0)))?;
-        let Some(super_name) = entry.file.super_class_name()? else {
+        let loader = entry.loader;
+        let Some(super_class) = shared.resolution_superclass(current)? else {
             break;
         };
-        let super_name = super_name.to_owned();
-        let loader = entry.loader;
-        let super_class = shared.load_class(loader, &super_name)?;
         let metadata = shared
             .entry(super_class)
             .ok_or_else(|| VmError::Loader(format!("class id {} is not loaded", super_class.0)))?

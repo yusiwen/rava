@@ -341,6 +341,31 @@ pub fn register_natives(shared: &Shared) {
         "([Ljava/lang/Object;)[Ljava/lang/Object;",
         collection_to_array_into,
     );
+    // Every concrete list and set declares its own `toArray` override in the C1 tree, so
+    // the interface entries alone are not reached through virtual dispatch.
+    for class in [
+        ARRAY_LIST_CLASS,
+        LINKED_LIST_CLASS,
+        COPY_ON_WRITE_ARRAY_LIST_CLASS,
+        ARRAY_DEQUE_CLASS,
+        HASH_SET_CLASS,
+        LINKED_HASH_SET_CLASS,
+        TREE_SET_CLASS,
+        COPY_ON_WRITE_ARRAY_SET_CLASS,
+    ] {
+        shared.register_native(
+            class,
+            "toArray",
+            "()[Ljava/lang/Object;",
+            abstract_collection_to_array,
+        );
+        shared.register_native(
+            class,
+            "toArray",
+            "([Ljava/lang/Object;)[Ljava/lang/Object;",
+            collection_to_array_into,
+        );
+    }
     shared.register_native(
         "java/util/List",
         "iterator",
@@ -438,6 +463,18 @@ fn register_collections_natives(shared: &Shared) {
     );
     shared.register_native(
         class,
+        "newSetFromMap",
+        "(Ljava/util/Map;)Ljava/util/Set;",
+        collections_new_set_from_map,
+    );
+    shared.register_native(
+        class,
+        "emptyIterator",
+        "()Ljava/util/Iterator;",
+        collections_empty_iterator,
+    );
+    shared.register_native(
+        class,
         "addAll",
         "(Ljava/util/Collection;[Ljava/lang/Object;)Z",
         collections_add_all,
@@ -481,7 +518,11 @@ fn register_collection_factories(shared: &Shared) {
             fixed_list_varargs,
         );
     }
-    for pairs in 1..=5usize {
+    // `Map.of` has one overload per pair count up to ten, exactly as `Set.of`/`List.of`
+    // do up to ten elements; Spring's `AnnotationUtils` builds an eighteen-argument
+    // attributes map with the nine-pair form.
+    shared.register_native("java/util/Map", "of", "()Ljava/util/Map;", fixed_map);
+    for pairs in 1..=10usize {
         let parameters = "Ljava/lang/Object;".repeat(pairs * 2);
         shared.register_native(
             "java/util/Map",
@@ -1830,6 +1871,42 @@ fn collections_singleton_map(
 ///
 /// M2.23 has one thread and no mutation through a wrapper in the startup path; enforcing
 /// immutability needs a view object, which is deferred.
+/// `Collections.newSetFromMap(Map)`: an empty VM set.
+///
+/// The JDK's result is backed by the map; this VM's set is the ordinary heap set, so the
+/// two do not share storage. Spring builds identity/thread-safe sets with this factory and
+/// uses only the set interface, which the ordinary set implements.
+fn collections_new_set_from_map(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let map = reference_argument(args, 0, "Collections.newSetFromMap")?;
+    if map.is_null() {
+        return Err(VmError::Native(
+            "Collections.newSetFromMap received a null map".to_owned(),
+        ));
+    }
+    let class = shared.load_library_class(LINKED_HASH_SET_CLASS)?;
+    Ok(Some(Value::Ref(shared.heap().allocate_set(class))))
+}
+
+/// `Collections.emptyIterator()`.
+fn collections_empty_iterator(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    _args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let class = shared.load_library_class(ITERATOR_CLASS)?;
+    Ok(Some(Value::Ref(
+        shared.heap().allocate_iterator(class, Vec::new()),
+    )))
+}
+
 fn collections_identity(
     _shared: &Shared,
     _thread: &ThreadState,

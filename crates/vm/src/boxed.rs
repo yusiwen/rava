@@ -161,16 +161,48 @@ pub fn is_reference_descriptor(descriptor: &str) -> bool {
 
 /// Convert one argument for a parameter of `descriptor`.
 ///
-/// `I` takes a `Value::Ref` to a boxed `Integer` and returns its `Value::Int`; a
-/// reference descriptor passes the same handle through, null included. Every other
-/// primitive descriptor is an error, because M2.10 has no `Boolean`, `Long`, `Float` or
-/// `Double` box.
+/// `I` takes a `Value::Ref` to a boxed `Integer` and returns its `Value::Int`; `Z` reads
+/// a boxed `Boolean`, `C` a boxed `Character` and `B`/`S` a boxed `Integer` (there is no
+/// `Byte`/`Short` box yet). A reference descriptor passes the same handle through, null
+/// included. `J`, `F` and `D` remain errors: those boxes are not modelled.
 pub fn unbox_argument(shared: &Shared, descriptor: &str, value: Value) -> Result<Value, VmError> {
-    if descriptor == "I" {
+    if descriptor == "I" || descriptor == "B" || descriptor == "S" {
         return match value {
             Value::Ref(reference) => Ok(Value::Int(shared.unbox_int(reference)?)),
             other => Err(VmError::Native(format!(
-                "expected a boxed Integer for an int parameter, found {other:?}"
+                "expected a boxed Integer for an {descriptor} parameter, found {other:?}"
+            ))),
+        };
+    }
+    if descriptor == "Z" || descriptor == "C" {
+        let Value::Ref(reference) = value else {
+            return Err(VmError::Native(format!(
+                "expected a boxed value for a {descriptor} parameter, found {value:?}"
+            )));
+        };
+        if reference.is_null() {
+            return Err(VmError::Native(format!(
+                "cannot unbox a null reference as {descriptor}"
+            )));
+        }
+        let boxed = {
+            let heap = shared.heap();
+            match heap.get(reference) {
+                Ok(HeapObject::Boxed(boxed)) => *boxed,
+                Ok(_) => {
+                    return Err(VmError::Native(format!(
+                        "{reference} is not a boxed primitive"
+                    )));
+                }
+                Err(error) => return Err(VmError::Native(error.to_string())),
+            }
+        };
+        return match (descriptor, boxed) {
+            ("Z", BoxedPrimitive::Boolean(value)) => Ok(Value::Int(i32::from(value))),
+            ("C", BoxedPrimitive::Character(value)) => Ok(Value::Int(value as i32)),
+            _ => Err(VmError::Native(format!(
+                "{reference} is a boxed {}, not the {descriptor} box",
+                boxed.binary_name()
             ))),
         };
     }
@@ -189,9 +221,12 @@ pub fn unbox_argument(shared: &Shared, descriptor: &str, value: Value) -> Result
 
 /// Convert an invoked method's result back to the reflective `Object` result.
 ///
-/// A primitive `int` is boxed; a reference passes through unchanged, which is what keeps
-/// a returned string reference-identical; `void` becomes null, as `Method.invoke` and
-/// `Constructor.newInstance` return null for a void method.
+/// `boolean`, `byte`, `short`, `char` and `int` are boxed (`byte`/`short` as
+/// `java.lang.Integer`, the only integer box this VM has); a reference passes through
+/// unchanged, which is what keeps a returned string reference-identical; `void` becomes
+/// null, as `Method.invoke` and `Constructor.newInstance` return null for a void method.
+/// Annotation element methods return these primitives, so `Method.invoke` on one must box
+/// them.
 pub fn box_result(
     shared: &Shared,
     descriptor: &str,
@@ -203,14 +238,35 @@ pub fn box_result(
             Some(value) => Err(VmError::Native(format!("a void method returned {value:?}"))),
         };
     }
-    if descriptor == "I" {
+    if descriptor == "I" || descriptor == "B" || descriptor == "S" {
         return match value {
             Some(Value::Int(value)) => Ok(Value::Ref(shared.box_int(value))),
-            Some(other) => Err(VmError::Native(format!("an int method returned {other:?}"))),
-            None => Err(VmError::Native(
-                "an int method returned no value".to_owned(),
-            )),
+            Some(other) => Err(VmError::Native(format!(
+                "an {descriptor} method returned {other:?}"
+            ))),
+            None => Err(VmError::Native(format!(
+                "an {descriptor} method returned no value"
+            ))),
         };
+    }
+    if descriptor == "Z" || descriptor == "C" {
+        let Some(Value::Int(value)) = value else {
+            return Err(match value {
+                Some(other) => VmError::Native(format!("a {descriptor} method returned {other:?}")),
+                None => VmError::Native(format!("a {descriptor} method returned no value")),
+            });
+        };
+        let boxed_result = if descriptor == "Z" {
+            shared.heap().allocate_boxed_boolean(value != 0)
+        } else {
+            let Some(character) = char::from_u32(value as u32) else {
+                return Err(VmError::Native(format!(
+                    "{value} is not a UTF-16 code unit for a char result"
+                )));
+            };
+            shared.heap().allocate_boxed_char(character)
+        };
+        return Ok(Value::Ref(boxed_result));
     }
     if is_reference_descriptor(descriptor) {
         return match value {

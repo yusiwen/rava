@@ -41,11 +41,11 @@ pub mod verify;
 pub use error::VmError;
 pub use heap::{
     AnnotationObject, Array, ArrayClass, ArrayKind, AtomicCell, BoxedPrimitive, ClassRef,
-    ConditionState, EnumConstant, EnumerationObject, FieldLayout, FieldSlot, GenericArrayType,
-    Heap, HeapError, HeapObject, Instance, IteratorObject, LambdaObject, LambdaTarget,
-    LambdaTargetKind, ListObject, MapEntry, MapObject, MemberKind, ObjRef, ParameterizedType,
-    PrimitiveKind, ReflectMember, SetObject, TypeDeclaration, TypeObject, TypeVariableType,
-    WildcardType,
+    CollectorKind, CollectorObject, ConditionState, EnumConstant, EnumerationObject, FieldLayout,
+    FieldSlot, GenericArrayType, Heap, HeapError, HeapObject, Instance, IteratorObject,
+    LambdaObject, LambdaTarget, LambdaTargetKind, ListObject, MapEntry, MapObject, MemberKind,
+    ObjRef, ParameterizedType, PrimitiveKind, ReflectMember, SetObject, SinkObject,
+    SpliteratorObject, StreamObject, TypeDeclaration, TypeObject, TypeVariableType, WildcardType,
 };
 pub use hooks::{ClassUnloadHook, Hooks, ReferenceHook};
 pub use loader::{ClassEntry, ClassId, ClassState, LoaderId};

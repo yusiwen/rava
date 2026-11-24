@@ -34,6 +34,7 @@ mod frame;
 mod instr;
 mod lambda;
 pub mod reflect_invoke;
+pub mod streams;
 
 pub use error::InterpError;
 pub use frame::Frame;
@@ -983,7 +984,7 @@ fn invoke_interface(
 /// that order wins. Only the interface's own method list is inspected, because an
 /// interface's class file names `Object` as its superclass but `Object` members are not
 /// inherited interface members.
-fn find_interface_method(
+pub(crate) fn find_interface_method(
     shared: &Shared,
     interface: ClassId,
     name: &str,
@@ -1830,6 +1831,11 @@ fn runtime_class_ref(shared: &Shared, reference: ObjRef) -> Result<ClassRef, Int
             HeapObject::Pattern(_) => RuntimeKind::Library("java/util/regex/Pattern"),
             HeapObject::Matcher(_) => RuntimeKind::Library("java/util/regex/Matcher"),
             HeapObject::Enumeration(_) => RuntimeKind::Library("java/util/Enumeration"),
+            HeapObject::Stream(_) => RuntimeKind::Library("java/util/stream/Stream"),
+            HeapObject::Spliterator(_) => RuntimeKind::Library("java/util/Spliterator"),
+            HeapObject::Collector(_) => RuntimeKind::Library("java/util/stream/Collector"),
+            HeapObject::Optional(_) => RuntimeKind::Library("java/util/Optional"),
+            HeapObject::Sink(_) => RuntimeKind::Library("java/util/function/Consumer"),
             HeapObject::Array(array) => {
                 RuntimeKind::Array(ClassRef::array(array.component.clone()))
             }
@@ -2044,6 +2050,21 @@ fn dispatch_class(
             }
             HeapObject::Enumeration(_) => {
                 ReceiverKind::Named(shared.load_library_class("java/util/Enumeration")?)
+            }
+            HeapObject::Stream(_) => {
+                ReceiverKind::Named(shared.load_library_class("java/util/stream/Stream")?)
+            }
+            HeapObject::Spliterator(_) => {
+                ReceiverKind::Named(shared.load_library_class("java/util/Spliterator")?)
+            }
+            HeapObject::Collector(_) => {
+                ReceiverKind::Named(shared.load_library_class("java/util/stream/Collector")?)
+            }
+            HeapObject::Optional(_) => {
+                ReceiverKind::Named(shared.load_library_class("java/util/Optional")?)
+            }
+            HeapObject::Sink(_) => {
+                ReceiverKind::Named(shared.load_library_class("java/util/function/Consumer")?)
             }
             HeapObject::Array(_) => ReceiverKind::Array,
             HeapObject::Lambda(lambda) => ReceiverKind::Lambda(lambda.interface),

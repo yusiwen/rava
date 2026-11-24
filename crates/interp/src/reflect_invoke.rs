@@ -294,14 +294,10 @@ fn is_assignable(shared: &Shared, mut from: ClassId, to: ClassId) -> Result<bool
         if from == to {
             return Ok(true);
         }
-        let entry = shared
-            .entry(from)
-            .ok_or_else(|| VmError::Loader(format!("class id {} is not loaded", from.0)))?;
-        let Some(super_name) = entry.file.super_class_name()? else {
+        let Some(super_class) = shared.resolution_superclass(from)? else {
             return Ok(false);
         };
-        let super_name = super_name.to_owned();
-        from = shared.load_class(entry.loader, &super_name)?;
+        from = super_class;
     }
 }
 

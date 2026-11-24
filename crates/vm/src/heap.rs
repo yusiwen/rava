@@ -749,6 +749,103 @@ pub struct EnumerationObject {
     pub position: usize,
 }
 
+/// A `java.util.stream.Stream` pipeline over an eagerly materialized element list.
+///
+/// The pipeline is eager: every intermediate operation runs while the stream is built
+/// and produces a new `StreamObject`, so `filter`/`map`/`sorted`/`limit` never defer
+/// work. Elements are [`Value`]s, so [`crate::Shared::roots`] enumerates their
+/// references. There is no lazy source, no parallel execution and no `Spliterator`-backed
+/// source after construction; `parallel` records what the caller asked for so
+/// `BaseStream.isParallel` can report it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StreamObject {
+    pub elements: Vec<Value>,
+    pub parallel: bool,
+}
+
+/// A `java.util.Spliterator` over a snapshot of values and a cursor.
+///
+/// The VM creates one for `Collection.spliterator` and `Spliterators.*`; a Java object
+/// that implements `Spliterator` stays an ordinary `Instance` and is drained through its
+/// own `tryAdvance`. `characteristics` is the bit set `Spliterator.characteristics`
+/// returns, and `position` is the next index `tryAdvance` consumes.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SpliteratorObject {
+    pub elements: Vec<Value>,
+    pub position: usize,
+    pub characteristics: i32,
+}
+
+/// The kind of a `java.util.stream.Collector` the VM can execute.
+///
+/// The built-in kinds (`toList`, `toSet`, `joining`, `counting`, `toMap`) carry the result
+/// shape directly. `ToCollection` keeps the supplier a caller passed, and `Custom` keeps
+/// the four callbacks of `Collector.of`; both run Java code through the interpreter, so
+/// [`CollectorObject::references`] reports every callback as a root.
+#[derive(Debug, Clone, PartialEq)]
+pub enum CollectorKind {
+    /// `Collectors.toList()` / `Collectors.toUnmodifiableList()`.
+    ToList,
+    /// `Collectors.toSet()` / `Collectors.toUnmodifiableSet()`.
+    ToSet,
+    /// `Collectors.toCollection(Supplier)`: the supplier creates the result collection.
+    ToCollection { supplier: ObjRef },
+    /// `Collectors.joining(...)`: the delimiter plus the optional prefix and suffix.
+    Joining {
+        delimiter: String,
+        prefix: String,
+        suffix: String,
+    },
+    /// `Collectors.counting()`: the result is a boxed `Long`.
+    Counting,
+    /// `Collectors.toMap(keyMapper, valueMapper)`: the result is a `HashMap`.
+    ToMap { key: ObjRef, value: ObjRef },
+    /// `Collector.of(...)`: the callbacks are invoked through the interpreter.
+    Custom {
+        supplier: ObjRef,
+        accumulator: ObjRef,
+        combiner: ObjRef,
+        finisher: ObjRef,
+    },
+}
+
+/// One `java.util.stream.Collector`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CollectorObject {
+    pub kind: CollectorKind,
+}
+
+impl CollectorObject {
+    /// Every reference this collector holds, for root enumeration.
+    pub fn references(&self) -> Vec<ObjRef> {
+        match &self.kind {
+            CollectorKind::ToCollection { supplier } => vec![*supplier],
+            CollectorKind::ToMap { key, value } => vec![*key, *value],
+            CollectorKind::Custom {
+                supplier,
+                accumulator,
+                combiner,
+                finisher,
+            } => vec![*supplier, *accumulator, *combiner, *finisher],
+            CollectorKind::ToList
+            | CollectorKind::ToSet
+            | CollectorKind::Joining { .. }
+            | CollectorKind::Counting => Vec::new(),
+        }
+    }
+}
+
+/// An internal `java.util.function.Consumer` that appends its argument to `destination`.
+///
+/// A VM native cannot execute Java code, so draining a Java `Spliterator` needs a
+/// consumer the Java `tryAdvance` can call back into. This object is that consumer: its
+/// class identity is `java.util.function.Consumer`, `accept` is a registry native, and
+/// the value it receives is pushed onto the destination stream's elements.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SinkObject {
+    pub destination: ObjRef,
+}
+
 /// One `java.util.regex.Pattern`: its Java source text.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PatternObject {
@@ -964,6 +1061,21 @@ pub enum HeapObject {
     Matcher(MatcherObject),
     /// One `java.util.Enumeration`.
     Enumeration(EnumerationObject),
+    /// One eagerly evaluated `java.util.stream.Stream` pipeline.
+    Stream(StreamObject),
+    /// One `java.util.Spliterator` cursor over a snapshot of values.
+    Spliterator(SpliteratorObject),
+    /// One `java.util.stream.Collector`.
+    Collector(CollectorObject),
+    /// One `java.util.Optional`: an absent value or one heap value.
+    ///
+    /// A present value is a [`Value`], so [`crate::Shared::roots`] enumerates a reference
+    /// it holds. `Optional.empty()` allocates a fresh object each call rather than the
+    /// JDK's singleton; identity of two empties is not relied on anywhere.
+    Optional(Option<Value>),
+    /// An internal `java.util.function.Consumer` that appends to a stream (see
+    /// [`SinkObject`]). It is never built by application code.
+    Sink(SinkObject),
     /// A lambda object created by a `LambdaMetafactory` bootstrap.
     ///
     /// The object stores the functional interface, the implementation method and the
@@ -1232,6 +1344,115 @@ impl Heap {
             _ => Err(HeapError::WrongObjectKind {
                 reference,
                 expected: "an Enumeration",
+            }),
+        }
+    }
+
+    /// Allocate one eagerly materialized stream pipeline.
+    pub fn allocate_stream(&mut self, elements: Vec<Value>, parallel: bool) -> ObjRef {
+        self.allocate(HeapObject::Stream(StreamObject { elements, parallel }))
+    }
+
+    /// The state behind a stream reference.
+    pub fn stream(&self, reference: ObjRef) -> Result<&StreamObject, HeapError> {
+        match self.get(reference)? {
+            HeapObject::Stream(stream) => Ok(stream),
+            _ => Err(HeapError::WrongObjectKind {
+                reference,
+                expected: "a Stream",
+            }),
+        }
+    }
+
+    /// The mutable state behind a stream reference.
+    pub fn stream_mut(&mut self, reference: ObjRef) -> Result<&mut StreamObject, HeapError> {
+        match self.get_mut(reference)? {
+            HeapObject::Stream(stream) => Ok(stream),
+            _ => Err(HeapError::WrongObjectKind {
+                reference,
+                expected: "a Stream",
+            }),
+        }
+    }
+
+    /// Allocate a spliterator over a snapshot of `elements`.
+    pub fn allocate_spliterator(&mut self, elements: Vec<Value>, characteristics: i32) -> ObjRef {
+        self.allocate(HeapObject::Spliterator(SpliteratorObject {
+            elements,
+            position: 0,
+            characteristics,
+        }))
+    }
+
+    /// The state behind a spliterator reference.
+    pub fn spliterator(&self, reference: ObjRef) -> Result<&SpliteratorObject, HeapError> {
+        match self.get(reference)? {
+            HeapObject::Spliterator(spliterator) => Ok(spliterator),
+            _ => Err(HeapError::WrongObjectKind {
+                reference,
+                expected: "a Spliterator",
+            }),
+        }
+    }
+
+    /// The mutable state behind a spliterator reference.
+    pub fn spliterator_mut(
+        &mut self,
+        reference: ObjRef,
+    ) -> Result<&mut SpliteratorObject, HeapError> {
+        match self.get_mut(reference)? {
+            HeapObject::Spliterator(spliterator) => Ok(spliterator),
+            _ => Err(HeapError::WrongObjectKind {
+                reference,
+                expected: "a Spliterator",
+            }),
+        }
+    }
+
+    /// Allocate one collector.
+    pub fn allocate_collector(&mut self, kind: CollectorKind) -> ObjRef {
+        self.allocate(HeapObject::Collector(CollectorObject { kind }))
+    }
+
+    /// The state behind a collector reference.
+    pub fn collector(&self, reference: ObjRef) -> Result<&CollectorObject, HeapError> {
+        match self.get(reference)? {
+            HeapObject::Collector(collector) => Ok(collector),
+            _ => Err(HeapError::WrongObjectKind {
+                reference,
+                expected: "a Collector",
+            }),
+        }
+    }
+
+    /// Allocate one optional holding `value`, or one absent optional.
+    pub fn allocate_optional(&mut self, value: Option<Value>) -> ObjRef {
+        self.allocate(HeapObject::Optional(value))
+    }
+
+    /// The value an optional holds, or `None` when it is absent.
+    pub fn optional(&self, reference: ObjRef) -> Result<Option<Value>, HeapError> {
+        match self.get(reference)? {
+            HeapObject::Optional(value) => Ok(*value),
+            _ => Err(HeapError::WrongObjectKind {
+                reference,
+                expected: "an Optional",
+            }),
+        }
+    }
+
+    /// Allocate the internal consumer that appends to `destination`.
+    pub fn allocate_sink(&mut self, destination: ObjRef) -> ObjRef {
+        self.allocate(HeapObject::Sink(SinkObject { destination }))
+    }
+
+    /// The destination behind an internal consumer reference.
+    pub fn sink(&self, reference: ObjRef) -> Result<&SinkObject, HeapError> {
+        match self.get(reference)? {
+            HeapObject::Sink(sink) => Ok(sink),
+            _ => Err(HeapError::WrongObjectKind {
+                reference,
+                expected: "a consumer sink",
             }),
         }
     }

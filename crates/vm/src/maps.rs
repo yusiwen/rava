@@ -60,10 +60,12 @@ pub const MAP_ENTRY_CLASS: &str = "java/util/Map$Entry";
 pub fn register_natives(shared: &Shared) {
     for class in [
         HASH_MAP_CLASS,
+        LINKED_HASH_MAP_CLASS,
         TREE_MAP_CLASS,
         IDENTITY_HASH_MAP_CLASS,
         CONCURRENT_HASH_MAP_CLASS,
         HASHTABLE_CLASS,
+        PROPERTIES_CLASS,
     ] {
         register_map_surface(shared, class);
     }

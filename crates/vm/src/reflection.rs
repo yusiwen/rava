@@ -1078,8 +1078,10 @@ fn named_assignable(shared: &Shared, target: ClassId, from: ClassId) -> Result<b
         let entry = shared
             .entry(current)
             .ok_or_else(|| VmError::Loader(format!("class id {} is not loaded", current.0)))?;
-        if let Some(super_name) = entry.file.super_class_name()? {
-            stack.push(shared.load_class(entry.loader, super_name)?);
+        // The library walk skips a platform superclass the C1 tree does not ship (see
+        // `Shared::resolution_superclass`), so assignability still reaches `Object`.
+        if let Some(super_class) = shared.resolution_superclass(current)? {
+            stack.push(super_class);
         }
         for interface_name in entry.file.interface_names()? {
             match shared.load_class(entry.loader, interface_name) {
@@ -1893,14 +1895,10 @@ fn is_assignable(shared: &Shared, mut from: ClassId, to: ClassId) -> Result<bool
         if from == to {
             return Ok(true);
         }
-        let entry = shared
-            .entry(from)
-            .ok_or_else(|| VmError::Loader(format!("class id {} is not loaded", from.0)))?;
-        let Some(super_name) = entry.file.super_class_name()? else {
+        let Some(super_class) = shared.resolution_superclass(from)? else {
             return Ok(false);
         };
-        let super_name = super_name.to_owned();
-        from = shared.load_class(entry.loader, &super_name)?;
+        from = super_class;
     }
 }
 

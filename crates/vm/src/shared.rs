@@ -758,6 +758,11 @@ impl Shared {
             Pattern,
             Matcher,
             Enumeration,
+            Stream,
+            Spliterator,
+            Collector,
+            Optional,
+            Sink,
         }
 
         let kind = {
@@ -790,6 +795,11 @@ impl Shared {
                 HeapObject::Pattern(_) => Kind::Pattern,
                 HeapObject::Matcher(_) => Kind::Matcher,
                 HeapObject::Enumeration(_) => Kind::Enumeration,
+                HeapObject::Stream(_) => Kind::Stream,
+                HeapObject::Spliterator(_) => Kind::Spliterator,
+                HeapObject::Collector(_) => Kind::Collector,
+                HeapObject::Optional(_) => Kind::Optional,
+                HeapObject::Sink(_) => Kind::Sink,
                 HeapObject::Array(array) => Kind::Array(array.component.clone()),
                 HeapObject::Lambda(lambda) => Kind::Lambda(lambda.interface),
                 HeapObject::Type(ty) => Kind::Type(ty.class_name()),
@@ -856,6 +866,26 @@ impl Shared {
             }
             Kind::Enumeration => {
                 let class = self.load_library_class("java/util/Enumeration")?;
+                self.class_object(class)
+            }
+            Kind::Stream => {
+                let class = self.load_library_class("java/util/stream/Stream")?;
+                self.class_object(class)
+            }
+            Kind::Spliterator => {
+                let class = self.load_library_class("java/util/Spliterator")?;
+                self.class_object(class)
+            }
+            Kind::Collector => {
+                let class = self.load_library_class("java/util/stream/Collector")?;
+                self.class_object(class)
+            }
+            Kind::Optional => {
+                let class = self.load_library_class("java/util/Optional")?;
+                self.class_object(class)
+            }
+            Kind::Sink => {
+                let class = self.load_library_class("java/util/function/Consumer")?;
                 self.class_object(class)
             }
         }
@@ -1275,6 +1305,31 @@ impl Shared {
                         for value in &lambda.captured {
                             push_container_root(&mut roots, &mut seen, *value);
                         }
+                    }
+                    HeapObject::Stream(stream) => {
+                        for value in &stream.elements {
+                            push_container_root(&mut roots, &mut seen, *value);
+                        }
+                    }
+                    HeapObject::Spliterator(spliterator) => {
+                        for value in &spliterator.elements {
+                            push_container_root(&mut roots, &mut seen, *value);
+                        }
+                    }
+                    HeapObject::Collector(collector) => {
+                        for reference in collector.references() {
+                            if !reference.is_null() && seen.insert(reference) {
+                                roots.push(reference);
+                            }
+                        }
+                    }
+                    HeapObject::Optional(Some(value)) => {
+                        push_container_root(&mut roots, &mut seen, *value);
+                    }
+                    HeapObject::Sink(sink)
+                        if !sink.destination.is_null() && seen.insert(sink.destination) =>
+                    {
+                        roots.push(sink.destination);
                     }
                     _ => {}
                 }

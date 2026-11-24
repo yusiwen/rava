@@ -781,7 +781,7 @@ pub(crate) fn object_text(
 /// The JDK's `Float.toString` chooses its own shortest representation; Rust's `Display`
 /// agrees for the ordinary values this slice covers, but an exponential value is printed
 /// in plain decimal here. The slice boundary records that difference.
-pub(crate) fn float_text(value: f32) -> String {
+pub fn float_text(value: f32) -> String {
     if value.is_nan() {
         return "NaN".to_owned();
     }
@@ -800,7 +800,7 @@ pub(crate) fn float_text(value: f32) -> String {
 }
 
 /// Java's shortest round-trip text for a `double`, with the mandatory `.0`.
-pub(crate) fn double_text(value: f64) -> String {
+pub fn double_text(value: f64) -> String {
     if value.is_nan() {
         return "NaN".to_owned();
     }

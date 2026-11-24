@@ -198,10 +198,16 @@ pub(crate) fn invoke_sam(
                 )));
             }
             let remaining = values.split_off(1);
+            // `REF_invokeVirtual`/`REF_invokeInterface` method references dispatch on the
+            // receiver, not on the compile-time owner. Spring passes
+            // `MergedAnnotation::isDirectlyPresent`, whose implementation lives on the
+            // runtime class's superclass, so resolving on the interface would reach an
+            // abstract declaration and fail.
+            let declaring = virtual_target_class(shared, receiver, &lambda.target)?;
             run_instance_method(
                 shared,
                 thread,
-                lambda.target.class,
+                declaring,
                 &lambda.target.name,
                 &lambda.target.descriptor,
                 receiver,
@@ -222,6 +228,46 @@ pub(crate) fn invoke_sam(
             Ok(Some(Value::Ref(instance)))
         }
     }
+}
+
+/// The class that declares an instance target for this receiver.
+///
+/// The receiver's runtime class chain wins, exactly as JVMS §5.4.5 resolves an instance
+/// method; when no class declares it, the target owner's interface hierarchy supplies a
+/// default method. A receiver that is not an `Instance` (a VM heap object) still reports
+/// its class through [`rava_vm::Shared::get_class`], so a method reference to
+/// `ArrayList::size` keeps working.
+fn virtual_target_class(
+    shared: &Shared,
+    receiver: ObjRef,
+    target: &LambdaTarget,
+) -> Result<ClassId, InterpError> {
+    let class_object = shared.get_class(receiver)?;
+    let mut current = Some(shared.heap().class(class_object)?);
+    while let Some(class) = current {
+        let entry = shared
+            .entry(class)
+            .ok_or_else(|| InterpError::Decode(format!("class {} is not loaded", class.0)))?;
+        if entry
+            .file
+            .find_method(&target.name, &target.descriptor)?
+            .is_some()
+        {
+            return Ok(class);
+        }
+        current = shared.resolution_superclass(class)?;
+    }
+    if let Some(interface) =
+        crate::find_interface_method(shared, target.class, &target.name, &target.descriptor)?
+    {
+        return Ok(interface);
+    }
+    Err(InterpError::Lambda(format!(
+        "instance target {}::{}:{} does not resolve on the receiver",
+        target_name(shared, target.class),
+        target.name,
+        target.descriptor
+    )))
 }
 
 /// The typed `metafactory` arguments: `samMethodType`, `implMethod`,
