@@ -22,8 +22,11 @@ signature stub tree under `stdlib/c1/classes/` (980 class files, 952 projected f
 host JDK's `lib/ct.sym` release-17 signatures and 28 header-only placeholders for
 owners Java 17 does not define) with a faithful class-file writer, and a normalized
 metadata check whose diff is 0 across the 952 referenced classes. `stdlib/classes/` is
-unchanged and the M1 gate still passes. **M2.3 (promote the C1 tree to the runtime
-library) is next.**
+unchanged and the M1 gate still passes. **M2.3 is done (2026-11-24):** the C1 tree is
+the bootstrap class source, read through the existing `DirectorySource` with
+`(loader, name)` identity; `Shared::with_library_dir`, `Shared::load_library_class`,
+`Shared::library_metadata` and `ClassEntry::metadata()` expose its metadata without a
+`Code` attribute or executing a class. **M2.4 is next.**
 
 ## What this project is
 
@@ -132,8 +135,16 @@ cargo run -p rava-cli -- compat c1-stubs
 cargo run -p rava-cli -- compat metadata --check
 ```
 
-`stdlib/classes/` and `stdlib/c1/classes/` are generated deliverables, not the runtime
-class library; see [`stdlib/README.md`](stdlib/README.md) and
+The bootstrap loader reads the committed C1 tree through a `DirectorySource`; the
+runtime loading test needs no JDK:
+
+```sh
+cargo test -p rava-vm --test c1_runtime
+```
+
+`stdlib/c1/classes/` is the committed C1 class library the bootstrap loader reads;
+`stdlib/classes/` is the generated M1 surface-stub deliverable, not the runtime library.
+See [`stdlib/README.md`](stdlib/README.md) and
 [`stdlib/c1/README.md`](stdlib/c1/README.md) for what each tree does and does not
 contain.
 

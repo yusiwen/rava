@@ -2,8 +2,8 @@
 
 This directory is a **generated, committed** tree of class files, separate from the
 M1 `stdlib/classes/` surface stubs. It is the C1 metadata reference the reflection
-work will build on. M2.3 promotes it to the runtime class library; until then nothing
-loads it.
+work builds on and, since M2.3, the class library the VM's bootstrap loader reads
+through a `DirectorySource`.
 
 The committed tree has 980 class files:
 
@@ -19,6 +19,10 @@ The committed tree has 980 class files:
   `java/lang/Object` superclass, version 61.0 and a `RavaC1Unreferenced.java`
   `SourceFile`; they have no members and no metadata claim. The owner list is
   `compat/surface/c1-unreferenced.txt`.
+
+The VM's bootstrap loader reads this tree through the ordinary `DirectorySource`;
+`cargo test -p rava-vm --test c1_runtime` loads library classes and decodes their
+metadata without requiring a `Code` attribute, executing a class, or needing a JDK.
 
 ## What is preserved
 

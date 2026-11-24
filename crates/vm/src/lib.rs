@@ -25,6 +25,7 @@ pub use hooks::{ClassUnloadHook, Hooks, ReferenceHook};
 pub use loader::{ClassEntry, ClassId, ClassState, LoaderId};
 pub use memory::{MemoryError, MemoryRegion};
 pub use metadata::dump_class;
+pub use rava_classfile::{ClassMetadata, ElementValue};
 pub use shared::{LockHeld, NativeFn, NativeKey, Shared, SharedLock};
 pub use source::{ClassSource, DirectorySource, JarSource};
 pub use thread::{FrameRootsGuard, ThreadState};

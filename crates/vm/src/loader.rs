@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use rava_classfile::ClassFile;
+use rava_classfile::{ClassFile, ClassMetadata};
 
 use crate::error::VmError;
 use crate::source::ClassSource;
@@ -53,6 +53,17 @@ pub struct ClassEntry {
     pub file: Arc<ClassFile>,
     pub statics: Mutex<std::collections::HashMap<(String, String), crate::value::Value>>,
     pub state: Mutex<ClassState>,
+}
+
+impl ClassEntry {
+    /// Decode this class's C1 metadata (ADR-0006).
+    ///
+    /// The metadata model reads class, field, method and record-component attributes; it
+    /// never decodes `Code`. A signature-only stub therefore yields metadata without an
+    /// execution body. Decoding happens on each call and is not cached.
+    pub fn metadata(&self) -> Result<ClassMetadata, VmError> {
+        Ok(self.file.metadata()?)
+    }
 }
 
 #[derive(Debug)]

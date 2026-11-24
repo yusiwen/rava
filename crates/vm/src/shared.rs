@@ -7,6 +7,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fmt;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::{Mutex, MutexGuard, RwLock};
 
@@ -14,9 +15,11 @@ use crate::VmError;
 use crate::heap::{Heap, ObjRef};
 use crate::hooks::Hooks;
 use crate::loader::{ClassEntry, ClassId, ClassTable, LoaderId};
-use crate::source::ClassSource;
+use crate::source::{ClassSource, DirectorySource};
 use crate::thread::ThreadState;
 use crate::value::Value;
+
+use rava_classfile::ClassMetadata;
 
 pub type NativeFn = fn(&Shared, &ThreadState, LoaderId, &[Value]) -> Result<Option<Value>, VmError>;
 
@@ -80,6 +83,16 @@ impl Shared {
         }
     }
 
+    /// Build a `Shared` whose bootstrap loader reads a class-library directory.
+    ///
+    /// This is the class-library entry point: `stdlib/c1/classes` is read through the
+    /// ordinary [`DirectorySource`], so classes get the same `(loader, name)` identity as
+    /// any other source and no second class table is introduced. The loader does not read
+    /// the directory up front; a class is parsed when it is first loaded.
+    pub fn with_library_dir(root: impl Into<PathBuf>) -> Self {
+        Self::with_bootstrap(Arc::new(DirectorySource::new(root)))
+    }
+
     pub fn add_loader(
         &self,
         parent: LoaderId,
@@ -96,6 +109,25 @@ impl Shared {
             .write()
             .expect("class table lock poisoned")
             .load_class(loader, name)
+    }
+
+    /// Load a class from the bootstrap (class-library) loader.
+    ///
+    /// The class is located through the delegation chain, so a child loader's request for a
+    /// library class still defines it in the bootstrap loader.
+    pub fn load_library_class(&self, name: &str) -> Result<ClassId, VmError> {
+        self.load_class(LoaderId::BOOTSTRAP, name)
+    }
+
+    /// Load a library class and decode its C1 metadata in one step.
+    ///
+    /// Decoding reads attributes only. A signature-only stub with no `Code` attribute
+    /// loads and exposes its metadata; nothing is initialized or executed.
+    pub fn library_metadata(&self, name: &str) -> Result<ClassMetadata, VmError> {
+        let id = self.load_library_class(name)?;
+        self.entry(id)
+            .ok_or_else(|| VmError::Loader(format!("class id {} is not loaded", id.0)))?
+            .metadata()
     }
 
     pub fn define_class(

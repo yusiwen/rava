@@ -6,8 +6,8 @@
   committed manifest. The M1 gate links the manifest against it. It stays in place
   unchanged; M2.2 added the C1 tree beside it.
 - `stdlib/c1/classes/` (M2.2): JDK 17 signature stubs with real metadata, regenerated
-  from the host `ct.sym`. See [`c1/README.md`](c1/README.md). M2.3 promotes this tree
-  to the runtime library.
+  from the host `ct.sym`. See [`c1/README.md`](c1/README.md). M2.3 makes this tree the
+  runtime class library the VM's bootstrap loader reads.
 
 The rest of this document describes the M1.3 tree only.
 
