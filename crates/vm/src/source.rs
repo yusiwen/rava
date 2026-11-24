@@ -17,6 +17,81 @@ pub trait ClassSource: Send + Sync + std::fmt::Debug {
     fn read(&self, binary_name: &str) -> Result<Option<Vec<u8>>, VmError>;
 }
 
+/// A classpath searched in order: a list of directories and jars.
+///
+/// Each path is opened when the source is built. A directory is read with
+/// [`DirectorySource`] and a file with [`JarSource`]; the first entry that supplies a
+/// class wins, which is Java's classpath order. A class no entry supplies is `None`, so
+/// the loader reports [`VmError::ClassNotFound`] exactly as it does for a single source.
+#[derive(Debug, Default)]
+pub struct ClassPathSource {
+    entries: Vec<ClassPathEntry>,
+}
+
+#[derive(Debug)]
+enum ClassPathEntry {
+    Directory(DirectorySource),
+    Jar(JarSource),
+}
+
+impl ClassPathSource {
+    /// An empty classpath. Every lookup misses.
+    pub fn empty() -> Self {
+        Self::default()
+    }
+
+    /// Open `paths` in order, treating a directory as a tree and anything else as a jar.
+    ///
+    /// A path that does not exist fails while opening its jar, so a mistyped entry is
+    /// reported instead of silently changing which classes are reachable.
+    pub fn from_paths<I, P>(paths: I) -> Result<Self, VmError>
+    where
+        I: IntoIterator<Item = P>,
+        P: Into<PathBuf>,
+    {
+        let mut source = Self::empty();
+        for path in paths {
+            source.add_path(path)?;
+        }
+        Ok(source)
+    }
+
+    /// Append one directory or jar to the search order.
+    pub fn add_path(&mut self, path: impl Into<PathBuf>) -> Result<(), VmError> {
+        let path = path.into();
+        let entry = if path.is_dir() {
+            ClassPathEntry::Directory(DirectorySource::new(path))
+        } else {
+            ClassPathEntry::Jar(JarSource::open(path)?)
+        };
+        self.entries.push(entry);
+        Ok(())
+    }
+
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+}
+
+impl ClassSource for ClassPathSource {
+    fn read(&self, binary_name: &str) -> Result<Option<Vec<u8>>, VmError> {
+        for entry in &self.entries {
+            let bytes = match entry {
+                ClassPathEntry::Directory(source) => source.read(binary_name)?,
+                ClassPathEntry::Jar(source) => source.read(binary_name)?,
+            };
+            if bytes.is_some() {
+                return Ok(bytes);
+            }
+        }
+        Ok(None)
+    }
+}
+
 /// A directory tree containing `<binary/name>.class` files.
 #[derive(Debug, Clone)]
 pub struct DirectorySource {
@@ -235,4 +310,55 @@ fn u16_at(bytes: &[u8], offset: usize) -> Option<u16> {
 fn u32_at(bytes: &[u8], offset: usize) -> Option<u32> {
     let slice = bytes.get(offset..offset + 4)?;
     Some(u32::from_le_bytes([slice[0], slice[1], slice[2], slice[3]]))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn scratch(name: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("rava-classpath-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn classpath_returns_the_first_entry_that_supplies_a_class() {
+        let first = scratch("order-first");
+        let second = scratch("order-second");
+        std::fs::write(first.join("Hello.class"), b"first").unwrap();
+        std::fs::write(second.join("Hello.class"), b"second").unwrap();
+
+        let source = ClassPathSource::from_paths([first, second]).unwrap();
+        assert_eq!(
+            source.read("Hello").unwrap().as_deref(),
+            Some(&b"first"[..])
+        );
+    }
+
+    #[test]
+    fn classpath_searches_directories_and_jars_in_order() {
+        let empty = scratch("jar-empty");
+        let jar = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/hello.jar");
+
+        let source = ClassPathSource::from_paths([empty, jar]).unwrap();
+        let bytes = source
+            .read("Hello")
+            .unwrap()
+            .expect("the jar supplies Hello");
+        assert_eq!(&bytes[..4], &[0xCA, 0xFE, 0xBA, 0xBE]);
+    }
+
+    #[test]
+    fn classpath_misses_are_none_and_an_empty_path_has_no_entries() {
+        let empty = ClassPathSource::empty();
+        assert!(empty.is_empty());
+        assert_eq!(empty.read("Hello").unwrap(), None);
+
+        let source = ClassPathSource::from_paths([scratch("missing")]).unwrap();
+        assert_eq!(source.len(), 1);
+        assert_eq!(source.read("Hello").unwrap(), None);
+    }
 }

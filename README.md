@@ -179,7 +179,16 @@ references, a capturing lambda and a no-argument void `Runnable` are covered by 
 `javac --release 17` fixture plus assembled probes; a lambda's class identity is its
 interface, `altMetafactory` rejects serializable lambdas, and argument adaptation,
 `MethodHandle`/`VarHandle` execution, call-site caching and Spring remain later slices.
-**M2.20 is next.**
+**M2.20 is done (2026-11-24):** `rava run <MainClass> --stdlib <dir> --cp <path-list>`
+executes a class's static `main([Ljava/lang/String;)V` from a directory or jar
+classpath. A `rava-vm` `ClassPathSource` searches directories and jars in order through
+the existing `DirectorySource`/`JarSource`, one application loader is parented to the
+bootstrap loader in the existing `(loader, name)` class table, and a single
+`rava-vm::library::register_all` entry point installs the existing natives plus a
+minimal `System.out`/`System.err` and `PrintStream`. The runner validates the entry
+point, allocates the `String[]` with the heap's array machinery, invokes `main` through
+the interpreter, flushes the captured stdout, and exits 0 on success, 1 on a runtime
+error and 2 on a usage error. Spring does not start yet. **M2.21 is next.**
 
 ## What this project is
 
@@ -235,6 +244,20 @@ The Rust toolchain is pinned by `rust-toolchain.toml`; the local gate is:
 
 ```sh
 cargo xtask ci
+```
+
+A class runs from a directory or jar classpath with:
+
+```sh
+cargo run -p rava-cli -- run demo.HelloRun --stdlib stdlib/c1/classes --cp crates/cli/tests/fixtures/run/classes
+```
+
+The same class is committed as a stored jar, so
+`--cp crates/cli/tests/fixtures/run/HelloRun.jar` is the jar form; `--cp` is repeatable
+and colon-separated. The runner's tests need no JDK:
+
+```sh
+cargo test -p rava-cli --test classpath_run
 ```
 
 The pinned target and jar set are checked with:

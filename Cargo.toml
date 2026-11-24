@@ -19,4 +19,5 @@ rust-version = "1.85"
 [workspace.dependencies]
 rava-classfile = { path = "crates/classfile" }
 rava-vm = { path = "crates/vm" }
+rava-interp = { path = "crates/interp" }
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }

@@ -13,3 +13,4 @@ toml = { version = "0.9", default-features = false, features = ["parse", "serde"
 flate2.workspace = true
 rava-classfile.workspace = true
 rava-vm.workspace = true
+rava-interp.workspace = true

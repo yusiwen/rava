@@ -12,6 +12,7 @@ pub mod error;
 pub mod heap;
 pub mod hooks;
 pub mod instance;
+pub mod library;
 pub mod loader;
 pub mod maps;
 pub mod memory;
@@ -38,7 +39,7 @@ pub use memory::{MemoryError, MemoryRegion};
 pub use metadata::dump_class;
 pub use rava_classfile::{ClassMetadata, ElementValue};
 pub use shared::{LockHeld, NativeFn, NativeKey, Shared, SharedLock};
-pub use source::{ClassSource, DirectorySource, JarSource};
+pub use source::{ClassPathSource, ClassSource, DirectorySource, JarSource};
 pub use thread::{FrameRootsGuard, ThreadState};
 pub use value::Value;
 pub use verify::{

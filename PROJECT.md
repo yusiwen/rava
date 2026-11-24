@@ -7,8 +7,8 @@
 
 > Ledger. P0 and P1 were accepted on 2026-11-23. M1 is complete; M2 is in progress
 > (M2.1, M2.2, M2.3, M2.4, M2.5, M2.6, M2.7, M2.8, M2.9, M2.10, M2.11, M2.12,
-> M2.13, M2.14, M2.15, M2.16, M2.17, M2.18 and M2.19 done). Keep this file honest and
-> terse.
+> M2.13, M2.14, M2.15, M2.16, M2.17, M2.18, M2.19 and M2.20 done). Keep this file
+> honest and terse.
 
 ## Phase status
 
@@ -29,7 +29,7 @@ release process, if wanted, becomes its own phase.
 > Gates are defined in `docs/requirements.md` § Milestones. P0 and P1 are accepted;
 > M0 and M1 are complete, and both gate reviews have passed. M2 is in progress, with
 > M2.1, M2.2, M2.3, M2.4, M2.5, M2.6, M2.7, M2.8, M2.9, M2.10, M2.11, M2.12, M2.13,
-> M2.14, M2.15, M2.16, M2.17, M2.18 and M2.19 done.
+> M2.14, M2.15, M2.16, M2.17, M2.18, M2.19 and M2.20 done.
 
 | Milestone | Delivers | Gate | Status |
 | :--- | :--- | :--- | :--- |
@@ -79,12 +79,12 @@ release process, if wanted, becomes its own phase.
 | M2.17 | `ldc`/`ldc_w` class constants and class literals | R3 | `cargo test -p rava-interp --test class_literals` exits 0 | done |
 | M2.18 | `invokedynamic` string concatenation | R3 | `cargo test -p rava-interp --test invokedynamic_concat` exits 0 | done |
 | M2.19 | Lambda metafactory and `invokeinterface` | R3 | `cargo test -p rava-interp --test lambdas` exits 0 | done |
-| M2.20 | Classpath runner (`rava run`) | R3 | `cargo test -p rava-cli --test classpath_run` exits 0 | todo |
+| M2.20 | Classpath runner (`rava run`) | R3 | `cargo test -p rava-cli --test classpath_run` exits 0 | done |
 
 P0 and P1 are accepted; P2 is done because the M2 increments are sliced. All M0 and
 M1 slices are done, and both gate reviews passed. M2.1, M2.2, M2.3, M2.4, M2.5,
 M2.6, M2.7, M2.8, M2.9, M2.10, M2.11, M2.12, M2.13, M2.14, M2.15, M2.16, M2.17,
-M2.18 and M2.19 are done; M2.20 is next.
+M2.18, M2.19 and M2.20 are done; M2.21 is next.
 
 ## Slice log
 
@@ -121,6 +121,7 @@ M2.18 and M2.19 are done; M2.20 is next.
 | M2.17 | `cargo test -p rava-interp --test class_literals` | 0 | 2026-11-24 | `ldc`/`ldc_w` decode a `CONSTANT_Class` into `Instr::LdcClass(name)` and execute by resolving through the executing frame's loader: a named class through `load_class`, a primitive name through `Shared::primitive_class` and an array descriptor through `Shared::class_ref_for_descriptor`, so a child loader's own class keeps its identity while a library class still delegates to the bootstrap loader; the class is loaded but not initialized (JVMS §5.4.3); `ldc` of a `String` still interns, `ldc_w`'s u2 index is decoded, and `Integer`/`Float`/`Long`/`Double` and every other constant kind are typed decode errors (there is no `ldc2_w`); repeated execution pushes the same cached `ObjRef` from the class, primitive and array caches, which `Shared::roots` enumerates; `if_acmpeq`/`if_acmpne` were added so the fixture can compare two literals with `==`; the assembled `ClassLiteralProbe` covers `String.class`, `int.class`, `int[].class`, `String[].class`, `int[].class.getName()` and `int.class == int.class`, and one class constant above index 255 exercises `ldc_w`; a `ChildLiteralProbe` defined in a child `MapSource` loader proves the loader-relative resolution; a missing class (`VmError::ClassNotFound`), a malformed `[Q`/`[V`/`[L;` descriptor (`VmError::Native`) and a `Long` constant (`InterpError::Decode`) are typed errors; 5 new tests; `cargo test -p rava-interp` 130, `rava-vm` 47, `rava-classfile` 50 and `rava-cli` 67 pass, workspace 294; |
 | M2.18 | `cargo test -p rava-interp --test invokedynamic_concat` | 0 | 2026-11-24 | `CONSTANT_InvokeDynamic` at opcode `0xba` decodes its u2 index, its reserved zero bytes, its call-site name and descriptor and its bootstrap method index; `ClassFile::bootstrap_method` materializes a `BootstrapMethods` entry on demand as a `REF_invokeStatic` handle plus `String`/`Class`/`int`/`long`/`float`/`double` static arguments, and an out-of-range index, a non-`MethodHandle` reference, a non-static handle or an unsupported argument is `Error::BadBootstrapMethod`; `rava-vm`'s `string_concat` module implements `StringConcatFactory.makeConcat` (every argument, no recipe) and `makeConcatWithConstants` (`\u0001` consumes the next dynamic argument, `\u0002` the next recipe constant, and both sides must be consumed exactly), converts dynamic arguments through the M2.9/M2.13 `String.valueOf` rules (String, boxed Integer, null, int/long/boolean/char/float/double, Object `ClassName@hex`) and pushes an interned String result; any other bootstrap owner or method is `VmError::UnsupportedBootstrapMethod`; the committed release-17 `demo/ConcatProbe` carries four javac-emitted `makeConcatWithConstants` call sites, one using a `\u0002` recipe constant, and assembled probes cover `makeConcat`, every supported primitive descriptor, static recipe constants, a recipe/descriptor mismatch and the malformed and out-of-range bootstrap references; 13 tests; `cargo test -p rava-interp` 143, `rava-vm` 47, `rava-classfile` 50 and `rava-cli` 67 pass, workspace 307; `cargo xtask ci` exits 0; |
 | M2.19 | `cargo test -p rava-interp --test lambdas` | 0 | 2026-11-24 | `invokeinterface` (`0xb9`) decodes its u2 interface-method reference, u1 argument count and u1 reserved zero byte (a non-zero byte is a decode error) and executes: the interface method is resolved on the receiver's runtime class first, then as a default method in the instruction's interface hierarchy, and the ordinary native-registry-before-`Code` path runs it; a class chain without the method falls back to a declaration in the interface hierarchy, an interface-assignability check rejects a wrong receiver with a typed `NotAssignable`, and a missing transitive interface in the C1 tree is skipped instead of masking the result. `HeapObject::Lambda` carries the functional-interface `ClassId`, the SAM name and `samMethodType` descriptor, the `instantiatedMethodType`, a target (owner `ClassId`, name, descriptor and static/instance/constructor kind) and the captured `Value`s; the lambda's class identity is the interface (there is no synthetic class file), `Shared::get_class`/`Object.toString` report that interface and `Shared::roots` enumerates the captured references. `LambdaMetafactory.metafactory` and `altMetafactory` parse their `MethodType`/`MethodHandle` static arguments (the class-file `BootstrapMethods` view now types both), capture the call-site arguments and create the lambda; the SAM call concatenates captured and call arguments, uses the first value as the receiver for an instance target, allocates for a constructor target, and runs through the existing `run_static_method`/`run_instance_method`; `altMetafactory` rejects `FLAG_SERIALIZABLE` and skips marker/bridge tables. The committed release-17 fixture (`demo/IntFn`, `demo/Sink`, `demo/IntFnImpl`, `demo/SinkFactory`, `demo/LambdaProbe`) covers a capturing static lambda, a no-argument void `Runnable`, static/unbound/bound/constructor method references and ordinary/String/ArrayList receivers through `invokeinterface`; assembled probes cover `altMetafactory`, a wrong receiver, a wrong SAM name, an unsupported bootstrap owner, a serializable flag and missing metafactory arguments; 13 tests; `cargo test -p rava-interp` 156, `rava-vm` 47, `rava-classfile` 50 and `rava-cli` 67 pass, workspace 320; `cargo xtask ci` exits 0; |
+| M2.20 | `cargo test -p rava-cli --test classpath_run` | 0 | 2026-11-24 | `ClassPathSource` searches directories and jars in classpath order through the existing `ClassSource`/`DirectorySource`/`JarSource` and reports a missing class as `ClassNotFound`; the CLI adds one application loader parented to the bootstrap loader (no second class table, `(loader, name)` identity) and `rava run` loads `MainClass`, requires a static `main([Ljava/lang/String;)V`, allocates a `String[]` through the heap's `ClassRef` machinery and invokes it; `rava-vm::library::register_all` installs the existing Object/String/builder/list/map/Integer/annotation/reflection/instance natives plus a minimal `PrintStream` and initializes `System.out`/`System.err`, and the runner also registers the interpreter's reflective-invocation natives; a committed `javac --release 17` `demo/HelloRun` class and its stored jar, 10 CLI tests (directory, jar, classpath order through a colon list, repeated `--cp`, missing class, missing main, non-static main, usage exit codes, the default stdlib and program arguments) plus 3 `ClassPathSource` tests; `cargo test -p rava-cli` passes 77, `rava-vm` 50, `rava-interp` 156, `rava-classfile` 50, workspace 333; `cargo xtask ci` exits 0 |
 
 M0.6 boundary: the reference and class-unloading hooks are registration points only.
 M0 has no collector, so no weak/soft/phantom reference is cleared and no class is
@@ -690,8 +691,39 @@ skipped while a missing class elsewhere is still a loader error. Arrays keep M2.
 `java/lang/Object` dispatch; there is no interface `default`-method selection beyond the
 first declaration in the interface walk. `pop` (`0x57`) was added only so the fixture can
 discard `ArrayList.add`'s boolean result; `pop2` and the rest of the opcode space remain
-absent. Serialization, method handles and Spring stay out of this boundary; M2.20 is
-next.
+absent. Serialization, method handles and Spring stay out of this boundary.
+
+M2.20 boundary: `rava run <MainClass> --stdlib <dir> --cp <path-list>` is the only
+execution entry point this slice adds; there is no `verify`, `disasm`, `bench` or `-jar`
+yet. A classpath is a `ClassPathSource`, an ordered list of directories and jars opened
+through the existing `DirectorySource`/`JarSource`: the first entry that supplies a class
+wins, an entry that does not exist fails while opening, and a class no entry supplies is
+`VmError::ClassNotFound`. The application loader is one `add_loader` child of the
+bootstrap loader in the existing class table, so identity is still `(loader, name)` and
+parent-first delegation applies: a class the bootstrap library also defines resolves to
+the bootstrap identity and an application copy cannot shadow it. `--cp` is repeatable and
+colon-separated; `--stdlib` defaults to `stdlib/c1/classes`, the classpath defaults to
+empty, and `--` ends option parsing. `rava-vm::library::register_all` is the single
+registration entry point for the existing natives (Object, String, StringBuilder,
+ArrayList, HashMap, Integer, annotation, Class/reflection and Object.<init>); it also
+installs a minimal `java.io.PrintStream` (`print(String)`, `println(String)`, `println()`)
+and writes one `PrintStream` into each of `System.out` and `System.err` because the C1
+stubs have no initializer `Code`. Both streams write the VM's captured stdout, so there
+is no separate error stream. `Method.invoke`/`Constructor.newInstance` stay in
+`rava-interp` and the runner registers that module separately; string concatenation is
+not a registry native because the interpreter dispatches it directly. The runner resolves
+the main class through the application loader, requires a static
+`main([Ljava/lang/String;)V`, allocates a `String[]` with the ordinary heap array and
+component class reference, and invokes it through `run_static_method`; program arguments
+after the main class are interned into that array. The VM's captured stdout is flushed
+before an error is reported, so output printed before a failure is not lost. Exit codes
+are 0 for normal return, 1 for a runtime error and 2 for a usage error. Limits: no module
+path, wildcard classpath, manifest `Class-Path`, nested jar, multi-release selection or
+remote classpath entry, and no verification pass before execution; `PrintStream` has only
+the three methods above, so `println(int)`, `printf`, `format` and `System.exit` fail
+loudly as missing natives; a `System.err` line is indistinguishable from stdout; there is
+no classpath deduplication or canonicalisation, so the same directory listed twice is
+searched twice. This slice does not start Spring and adds no Spring or module behavior.
 
 ## Decision log
 
@@ -786,7 +818,13 @@ A fresh session should:
     and `invokeinterface`: the `HeapObject::Lambda` representation, `LambdaMetafactory`'s
     `metafactory`/`altMetafactory` bootstraps, SAM dispatch through the existing
     static/instance machinery, and the committed release-17 lambda fixture
-    (`cargo test -p rava-interp --test lambdas`). M2.20 is next.
+    (`cargo test -p rava-interp --test lambdas`). M2.20 landed the classpath runner:
+    `rava-vm`'s ordered `ClassPathSource` over directories and jars, one application
+    loader parented to the bootstrap loader, the single `library::register_all` entry
+    point, a minimal `System.out`/`System.err` and `PrintStream`, and `rava run`, which
+    takes `<MainClass> --stdlib <dir> --cp <path-list>`, requires a static
+    `main([Ljava/lang/String;)V`, allocates its `String[]` and invokes it with exit codes
+    0/1/2 (`cargo test -p rava-cli --test classpath_run`). M2.21 is next.
 4. Do not write runtime code outside a defined slice.
 
 ## Open decisions
