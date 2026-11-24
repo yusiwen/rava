@@ -62,9 +62,8 @@ No retrospective explanation documents remain in the P0–P2 backlog. The next
 explanation documents will be added when a new milestone's code and acceptance commands
 land; future M3–M9 material stays in requirements/ADRs/PROJECT until then.
 
-M2 history is a **History** document under `docs/notes/`, not an explanation; it is
-added there when the milestone note is written. The explanation backlog does not absorb
-future or historical material.
+M2 history is a **History** document under [`docs/notes/M2.md`](../notes/M2.md), not an
+explanation; the explanation backlog does not absorb future or historical material.
 
 ## Current boundaries
 
