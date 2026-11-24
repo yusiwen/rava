@@ -4,11 +4,13 @@ A Java 17 runtime in Rust, built to run Spring — not just a corpus.
 
 ## Status
 
-**Decisions accepted (2026-11-23). M0 is complete; M1.1 is done (2026-11-24):**
-workspace, parser, loader identity, heap/seams, the interpreter core, Hello,
-safepoint/GC-root and no-lock-across-Java-call invariants, the verifier dataflow
-skeleton with the metadata dump fixture, and the pinned target lock with the
-reference application and its 35-jar set. **M1.2 (surface manifest) is next.**
+**Decisions accepted (2026-11-23). M0 is complete; M1.1 and M1.2 are done
+(2026-11-24):** workspace, parser, loader identity, heap/seams, the interpreter core,
+Hello, safepoint/GC-root and no-lock-across-Java-call invariants, the verifier
+dataflow skeleton with the metadata dump fixture, the pinned target lock with the
+reference application and its 35-jar set, and the static surface manifest
+(`compat/surface/spring-boot-3.5.16.txt`: 980 classes, 177 fields, 3,626 methods,
+1,048 interface methods). **M1.3 (stub library surface and link-check) is next.**
 
 ## What this project is
 
@@ -71,6 +73,13 @@ The pinned target and jar set are checked with:
 ```sh
 cargo run -p rava-cli -- compat target
 bash compat/fetch-jars.sh --check
+```
+
+The static surface manifest is generated and checked with:
+
+```sh
+cargo run -p rava-cli -- compat manifest
+cargo run -p rava-cli -- compat manifest --check
 ```
 
 `bash compat/fetch-jars.sh` (re)fetches the jars from Maven Central and needs

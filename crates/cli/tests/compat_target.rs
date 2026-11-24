@@ -79,6 +79,9 @@ source_sha256 = "{}"
 directory = "compat/jars"
 lock = "compat/jars.lock"
 count = {jar_count}
+
+[manifest]
+path = "compat/surface/test.txt"
 "#,
         "a".repeat(64)
     )

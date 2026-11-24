@@ -69,6 +69,8 @@ version = "0.1.0"
 name = "rava-cli"
 version = "0.1.0"
 dependencies = [
+ "rava-classfile",
+ "rava-vm",
  "toml",
 ]
 

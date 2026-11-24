@@ -1,15 +1,16 @@
 //! `rava compat` — compatibility tooling.
 //!
-//! M1.1 adds `compat target`; the manifest (M1.2) and link-check (M1.3) commands
-//! join it later.
+//! M1.1 adds `compat target`, M1.2 adds `compat manifest`; link-check (M1.3)
+//! joins them later.
 
 use std::process::ExitCode;
 
-use crate::target;
+use crate::{manifest, target};
 
 pub fn run(args: &[String]) -> ExitCode {
     match args.first().map(String::as_str) {
         Some("target") => target::command(&args[1..]),
+        Some("manifest") => manifest::command(&args[1..]),
         Some("-h" | "--help" | "help") => {
             print_usage();
             ExitCode::SUCCESS
@@ -31,5 +32,6 @@ fn print_usage() {
     println!("usage: rava compat <command>");
     println!();
     println!("commands:");
-    println!("  target   print the pinned target and validate the target and jar locks");
+    println!("  target     print the pinned target and validate the target and jar locks");
+    println!("  manifest   generate the static surface manifest, or --check the committed one");
 }

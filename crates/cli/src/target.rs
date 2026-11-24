@@ -51,6 +51,7 @@ pub struct TargetLock {
     pub jars_dir: String,
     pub jars_lock: String,
     pub jar_count: usize,
+    pub manifest_path: String,
 }
 
 impl TargetLock {
@@ -70,6 +71,7 @@ impl TargetLock {
         let platform = table(&document, "platform")?;
         let reference_app = table(&document, "reference_app")?;
         let jars = table(&document, "jars")?;
+        let manifest = table(&document, "manifest")?;
 
         let lock = Self {
             schema,
@@ -85,6 +87,7 @@ impl TargetLock {
             jars_dir: string(jars, "jars", "directory")?,
             jars_lock: string(jars, "jars", "lock")?,
             jar_count: count(jars, "jars", "count")?,
+            manifest_path: string(manifest, "manifest", "path")?,
         };
         lock.validate()?;
         Ok(lock)
@@ -128,6 +131,7 @@ impl TargetLock {
             ("reference_app.path", &self.app_path),
             ("jars.directory", &self.jars_dir),
             ("jars.lock", &self.jars_lock),
+            ("manifest.path", &self.manifest_path),
         ] {
             if !is_safe_relative(value) {
                 return Err(LockError::new(format!(
@@ -261,6 +265,34 @@ pub fn command(args: &[String]) -> ExitCode {
 
 /// Checks the lock and the jar set below `root`, returning the stable report text.
 fn report(root: &Path) -> Result<String, LockError> {
+    let (lock, jar_lock) = load(root)?;
+
+    let mut output = String::from("rava compat target\n");
+    line(&mut output, "schema", &lock.schema.to_string());
+    line(&mut output, "java", &lock.java);
+    line(&mut output, "class file", &lock.class_file);
+    line(&mut output, "spring boot", &lock.spring_boot);
+    line(&mut output, "spring framework", &lock.spring_framework);
+    line(&mut output, "tomcat", &lock.tomcat);
+    line(
+        &mut output,
+        "reference app",
+        &format!("{} {}", lock.app_path, lock.app_version),
+    );
+    line(&mut output, "main class", &lock.app_main_class);
+    line(&mut output, "source sha256", &lock.app_source_sha256);
+    line(&mut output, "jar directory", &lock.jars_dir);
+    line(&mut output, "jar lock", &lock.jars_lock);
+    line(&mut output, "jar count", &jar_lock.count.to_string());
+    line(&mut output, "manifest", &lock.manifest_path);
+    output.push_str("target lock: ok\n");
+    Ok(output)
+}
+
+/// Loads the target lock and the jar lock and checks that the jar directory matches.
+///
+/// `compat manifest` reuses this so both commands reject the same broken target.
+pub fn load(root: &Path) -> Result<(TargetLock, JarLock), LockError> {
     let target_path = root.join(TARGET_LOCK);
     let target_text = fs::read_to_string(&target_path).map_err(|error| {
         LockError::new(format!(
@@ -301,25 +333,7 @@ fn report(root: &Path) -> Result<String, LockError> {
         )));
     }
 
-    let mut output = String::from("rava compat target\n");
-    line(&mut output, "schema", &lock.schema.to_string());
-    line(&mut output, "java", &lock.java);
-    line(&mut output, "class file", &lock.class_file);
-    line(&mut output, "spring boot", &lock.spring_boot);
-    line(&mut output, "spring framework", &lock.spring_framework);
-    line(&mut output, "tomcat", &lock.tomcat);
-    line(
-        &mut output,
-        "reference app",
-        &format!("{} {}", lock.app_path, lock.app_version),
-    );
-    line(&mut output, "main class", &lock.app_main_class);
-    line(&mut output, "source sha256", &lock.app_source_sha256);
-    line(&mut output, "jar directory", &lock.jars_dir);
-    line(&mut output, "jar lock", &lock.jars_lock);
-    line(&mut output, "jar count", &jar_lock.count.to_string());
-    output.push_str("target lock: ok\n");
-    Ok(output)
+    Ok((lock, jar_lock))
 }
 
 /// Counts the top-level `*.jar` files in the pinned jar directory.
@@ -349,7 +363,7 @@ fn line(output: &mut String, label: &str, value: &str) {
 }
 
 /// Finds the repository root by walking up from the current directory.
-fn find_root() -> Result<PathBuf, LockError> {
+pub fn find_root() -> Result<PathBuf, LockError> {
     let current = std::env::current_dir()
         .map_err(|error| LockError::new(format!("cannot read the current directory: {error}")))?;
     for ancestor in current.ancestors() {
@@ -473,6 +487,9 @@ source_sha256 = "{}"
 directory = "compat/jars"
 lock = "compat/jars.lock"
 count = 2
+
+[manifest]
+path = "compat/surface/test.txt"
 "#,
             source_hash()
         )
@@ -501,6 +518,7 @@ count = 2
         assert_eq!(lock.jars_dir, "compat/jars");
         assert_eq!(lock.jars_lock, "compat/jars.lock");
         assert_eq!(lock.jar_count, 2);
+        assert_eq!(lock.manifest_path, "compat/surface/test.txt");
     }
 
     #[test]

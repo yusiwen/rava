@@ -84,6 +84,37 @@ impl JarSource {
         &self.path
     }
 
+    /// Every file entry in the jar, sorted lexicographically.
+    ///
+    /// Directory entries are not returned: the central-directory parser drops names that
+    /// end in `/`. The order is stable regardless of the hash map's iteration order.
+    pub fn entry_names(&self) -> Vec<&str> {
+        let mut names: Vec<&str> = self.entries.keys().map(String::as_str).collect();
+        names.sort_unstable();
+        names
+    }
+
+    /// The `.class` entries in the jar, as jar paths (for example `java/lang/Object.class`),
+    /// sorted lexicographically. These are entry names, not binary names.
+    pub fn class_entry_names(&self) -> Vec<&str> {
+        let mut names: Vec<&str> = self
+            .entries
+            .keys()
+            .filter(|name| name.ends_with(".class"))
+            .map(String::as_str)
+            .collect();
+        names.sort_unstable();
+        names
+    }
+
+    /// Reads one entry by its exact jar path. `Ok(None)` means the jar has no such entry.
+    ///
+    /// [`ClassSource::read`] is the binary-name view of this method; scanning tools that
+    /// already hold entry names use this one directly.
+    pub fn read_entry(&self, name: &str) -> Result<Option<Vec<u8>>, VmError> {
+        self.bytes_for(name)
+    }
+
     fn relative(binary_name: &str) -> String {
         format!("{}.class", binary_name.replace('.', "/"))
     }
@@ -138,7 +169,7 @@ impl JarSource {
 
 impl ClassSource for JarSource {
     fn read(&self, binary_name: &str) -> Result<Option<Vec<u8>>, VmError> {
-        self.bytes_for(&Self::relative(binary_name))
+        self.read_entry(&Self::relative(binary_name))
     }
 }
 
