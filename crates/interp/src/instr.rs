@@ -1,8 +1,10 @@
 //! The decoded instruction form.
 //!
 //! Decoding happens once per method; the dispatch loop never reads raw bytes. The
-//! subset here is the M0.5a slice: integer constants, loads/stores, arithmetic,
-//! `invokestatic` and the two returns.
+//! subset here is the M0.5a slice plus M2.5's instance instructions: integer and
+//! reference constants, loads/stores, arithmetic, static/instance field access,
+//! `new`/`dup`, the three invoke forms and the returns. Branches are still decoded by
+//! the verifier only; no fixture in this slice needs them.
 
 use rava_classfile::{ClassFile, Constant};
 
@@ -14,6 +16,12 @@ pub enum Instr {
     ILoad(u8),
     ALoad(u8),
     IStore(u8),
+    AStore(u8),
+    AconstNull,
+    New {
+        class: String,
+    },
+    Dup,
     IAdd,
     ISub,
     IMul,
@@ -24,12 +32,27 @@ pub enum Instr {
         name: String,
         descriptor: String,
     },
+    GetField {
+        class: String,
+        name: String,
+        descriptor: String,
+    },
+    PutField {
+        class: String,
+        name: String,
+        descriptor: String,
+    },
     InvokeStatic {
         class: String,
         name: String,
         descriptor: String,
     },
     InvokeVirtual {
+        class: String,
+        name: String,
+        descriptor: String,
+    },
+    InvokeSpecial {
         class: String,
         name: String,
         descriptor: String,
@@ -73,6 +96,7 @@ pub fn decode(file: &ClassFile, attribute_data: &[u8]) -> Result<DecodedMethod, 
         let opcode = code[pc];
         pc += 1;
         let instr = match opcode {
+            0x01 => Instr::AconstNull,
             0x02..=0x08 => Instr::Iconst(i32::from(opcode) - 3),
             0x10 => {
                 let value = i8::from_be_bytes([byte(code, pc)?]);
@@ -101,7 +125,14 @@ pub fn decode(file: &ClassFile, attribute_data: &[u8]) -> Result<DecodedMethod, 
                 pc += 1;
                 Instr::IStore(index)
             }
+            0x3a => {
+                let index = byte(code, pc)?;
+                pc += 1;
+                Instr::AStore(index)
+            }
             0x3b..=0x3e => Instr::IStore(opcode - 0x3b),
+            0x4b..=0x4e => Instr::AStore(opcode - 0x4b),
+            0x59 => Instr::Dup,
             0x60 => Instr::IAdd,
             0x64 => Instr::ISub,
             0x68 => Instr::IMul,
@@ -124,11 +155,41 @@ pub fn decode(file: &ClassFile, attribute_data: &[u8]) -> Result<DecodedMethod, 
                     descriptor,
                 }
             }
+            0xb4 => {
+                let index = u16::from_be_bytes([byte(code, pc)?, byte(code, pc + 1)?]);
+                pc += 2;
+                let (class, name, descriptor) = resolve_field(file, index)?;
+                Instr::GetField {
+                    class,
+                    name,
+                    descriptor,
+                }
+            }
+            0xb5 => {
+                let index = u16::from_be_bytes([byte(code, pc)?, byte(code, pc + 1)?]);
+                pc += 2;
+                let (class, name, descriptor) = resolve_field(file, index)?;
+                Instr::PutField {
+                    class,
+                    name,
+                    descriptor,
+                }
+            }
             0xb6 => {
                 let index = u16::from_be_bytes([byte(code, pc)?, byte(code, pc + 1)?]);
                 pc += 2;
                 let (class, name, descriptor) = resolve_method(file, index, true)?;
                 Instr::InvokeVirtual {
+                    class,
+                    name,
+                    descriptor,
+                }
+            }
+            0xb7 => {
+                let index = u16::from_be_bytes([byte(code, pc)?, byte(code, pc + 1)?]);
+                pc += 2;
+                let (class, name, descriptor) = resolve_method(file, index, false)?;
+                Instr::InvokeSpecial {
                     class,
                     name,
                     descriptor,
@@ -142,6 +203,13 @@ pub fn decode(file: &ClassFile, attribute_data: &[u8]) -> Result<DecodedMethod, 
                     class,
                     name,
                     descriptor,
+                }
+            }
+            0xbb => {
+                let index = u16::from_be_bytes([byte(code, pc)?, byte(code, pc + 1)?]);
+                pc += 2;
+                Instr::New {
+                    class: resolve_class(file, index)?,
                 }
             }
             other => {
@@ -169,6 +237,15 @@ fn resolve_ldc(file: &ClassFile, index: u16) -> Result<Instr, InterpError> {
     Ok(Instr::LdcString(
         file.constant_pool.utf8(*string_index)?.to_owned(),
     ))
+}
+
+fn resolve_class(file: &ClassFile, index: u16) -> Result<String, InterpError> {
+    let Constant::Class { name_index } = file.constant_pool.get(index)? else {
+        return Err(InterpError::Decode(format!(
+            "constant {index} is not a Class"
+        )));
+    };
+    Ok(file.constant_pool.utf8(*name_index)?.to_owned())
 }
 
 fn resolve_field(file: &ClassFile, index: u16) -> Result<(String, String, String), InterpError> {

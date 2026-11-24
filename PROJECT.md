@@ -6,7 +6,7 @@
 **Started:** 2026-11-22
 
 > Ledger. P0 and P1 were accepted on 2026-11-23. M1 is complete; M2 is in progress
-> (M2.1, M2.2, M2.3 and M2.4 done). Keep this file honest and terse.
+> (M2.1, M2.2, M2.3, M2.4 and M2.5 done). Keep this file honest and terse.
 
 ## Phase status
 
@@ -26,7 +26,7 @@ release process, if wanted, becomes its own phase.
 
 > Gates are defined in `docs/requirements.md` § Milestones. P0 and P1 are accepted;
 > M0 and M1 are complete, and both gate reviews have passed. M2 is in progress, with
-> M2.1, M2.2, M2.3 and M2.4 done.
+> M2.1, M2.2, M2.3, M2.4 and M2.5 done.
 
 | Milestone | Delivers | Gate | Status |
 | :--- | :--- | :--- | :--- |
@@ -61,11 +61,11 @@ release process, if wanted, becomes its own phase.
 | M2.2 | JDK 17 signature stubs and zero metadata diff | R3 | `cargo run -p rava-cli -- compat metadata --check` exits 0 | done |
 | M2.3 | `stdlib/c1/classes` as the bootstrap library and its metadata through the VM | R3 | `cargo test -p rava-vm --test c1_runtime` exits 0 | done |
 | M2.4 | Class objects and basic `Object`/`Class` reflection | R3 | `cargo test -p rava-interp --test class_objects` exits 0 | done |
-| M2.5 | Instance allocation, constructors, fields and instance calls | R3 | `cargo test -p rava-interp --test instance_execution` exits 0 | todo |
+| M2.5 | Instance allocation, constructors, fields and instance calls | R3 | `cargo test -p rava-interp --test instance_execution` exits 0 | done |
 
 P0 and P1 are accepted; P2 is done because the M2 increments are sliced. All M0 and
-M1 slices are done, and both gate reviews passed. M2.1, M2.2, M2.3 and M2.4 are done;
-M2.5 is next.
+M1 slices are done, and both gate reviews passed. M2.1, M2.2, M2.3, M2.4 and M2.5 are
+done; M2.6 is next.
 
 ## Slice log
 
@@ -87,6 +87,7 @@ M2.5 is next.
 | M2.2 | `cargo run -p rava-cli -- compat metadata --check` | 0 | 2026-11-24 | `stdlib/c1/classes/` holds 980 committed class files: 952 projected from the host JDK 25 `lib/ct.sym` release-17 view (1,104 fields, 13,008 methods, class-file version 61.0) and 28 header-only placeholders for manifest owners Java 17 does not define, listed in `compat/surface/c1-unreferenced.txt`; the normalized M2.1 metadata dump has 0 differences across the 952 referenced classes, the only normalization being the class-file version line (ct.sym stores 69); `stdlib/classes` is untouched and `compat check` still resolves 980 classes and 4,851 member records with `unresolved 0`; `cargo test -p rava-cli` passes 67 tests; `cargo xtask ci` exits 0 |
 | M2.3 | `cargo test -p rava-vm --test c1_runtime` | 0 | 2026-11-24 | `stdlib/c1/classes` is the bootstrap class source through the existing `DirectorySource` and `(loader, name)` identity; `Shared::with_library_dir`, `Shared::load_library_class`, `Shared::library_metadata` and `ClassEntry::metadata()` decode C1 metadata without a `Code` attribute; the test loads `java.lang.String`, `java.lang.Class`, `java.util.List`, sealed `java.lang.reflect.Executable` and annotation type `java.lang.Deprecated`, checks superclass/interfaces/signatures/field and method descriptors/annotations/permitted subclasses, a second loader's distinct identity and no `Code` on any stub method; 7 tests; `cargo test -p rava-vm` passes 42 tests; `cargo xtask ci` exits 0 |
 | M2.4 | `cargo test -p rava-interp --test class_objects` | 0 | 2026-11-24 | `HeapObject::Class(ClassId)`, its heap allocator/accessor, `Shared::class_object` (one cached object per `(loader, name)` identity) and `Shared::get_class` for `Str`/`Instance`/`Class` (arrays return a typed error); cached class objects are enumerated by `Shared::roots`; the native ABI takes the receiver `ObjRef` (`ObjRef::NULL` for static calls), and `run_static_method`/`invokevirtual` consult the registry before `Code`, so the C1 stubs (no `Code`, no `ACC_NATIVE`) execute; `invokevirtual` resolves `HeapObject::Class` as `java/lang/Class` and `HeapObject::Str` as `java/lang/String`, walking the superclass chain; `Object.getClass`, `Class.getName/getModifiers/isInterface/isArray/getSuperclass/forName`; `ReflectProbe` fixture; 8 tests; `cargo test -p rava-interp` 16, `cargo test -p rava-vm` 42 and `cargo test -p rava-cli` 67 pass, workspace 175; `cargo xtask ci` exits 0 |
+| M2.5 | `cargo test -p rava-interp --test instance_execution` | 0 | 2026-11-24 | `new`, `dup`, `aconst_null`, `invokespecial`, `getfield`, `putfield` and narrow/wide `aload`/`astore` decode and execute; `run_instance_method` reuses the existing `Frame`, puts `this` in local 0 and leaves static calls on the unchanged path; `Shared::field_layout` builds superclass-first instance layouts (static fields excluded) and `Shared::allocate_instance` allocates with field defaults; `new` resolves and initializes the class from the current class's loader; `getfield`/`putfield` resolve the exact owner/name/descriptor, use the receiver's runtime layout and reject a static field through an instance opcode and a descriptor mismatch; `invokespecial` resolves on the instruction's owner while `invokevirtual` dispatches from the receiver's class, and both prefer the native registry before executing `Code`; `instance::register_natives` supplies `java/lang/Object.<init>()V` as a no-op for the C1 stub that has no `Code`; `Point`/`PointProbe` fixture; 8 tests; `cargo test -p rava-interp` 24, `cargo test -p rava-vm` 42 and `cargo test -p rava-cli` 67 pass, workspace 183; `cargo xtask ci` exits 0 |
 
 M0.6 boundary: the reference and class-unloading hooks are registration points only.
 M0 has no collector, so no weak/soft/phantom reference is cleared and no class is
@@ -214,6 +215,30 @@ returns the binary name with `.`, `getModifiers` reports `Modifier.classModifier
 `Field`, `Method`, `Constructor`, annotation proxies, generic types, records and Spring
 remain later slices.
 
+M2.5 boundary: `new` allocates the instance immediately, with the layout's default field
+values; the JVM's "uninitialized" state between `new` and `<init>` is not modeled, so an
+instruction between them would observe a usable object, and `new`/`dup`/`invokespecial` is
+the supported construction sequence. `new` does not reject an abstract class or an
+interface, and it performs no access-control check on the class or its constructor. The
+instance layout holds non-static fields only, superclass slots first and then the class's
+own fields, so a field resolved in a superclass keeps its index in every subclass; it is rebuilt per access and not cached. `getfield` and
+`putfield` resolve name and descriptor on the instruction's owner (walking its superclass
+chain), then read the slot from the receiver's runtime layout; a static field through an
+instance opcode is an error, a name that exists under another descriptor is an error, and
+the receiver must be an instance assignable to the owner. Static access keeps its existing
+`getstatic` path; `putstatic`, interface field inheritance and `invokeinterface` are still
+absent. `invokespecial` resolves on the instruction's owner, which is what keeps `<init>` and
+superclass calls non-virtual; `invokevirtual` still resolves from the receiver's runtime
+class and walks superclasses only, so interface dispatch and default methods are absent.
+`run_instance_method` initializes the class on entry as a convenience for direct callers;
+JVMS only requires initialization at `new`, and the interpreter's `new` does it there.
+Only the instructions in this slice are decoded by the interpreter: `if*`/`goto` remain
+verifier-only, and `tableswitch`/`lookupswitch`, `wide`, `invokeinterface`, `checkcast`,
+`instanceof` and exceptions are still unsupported. Arrays exist in the heap but this slice
+adds no array instruction, array class identity or array reflection. `Object.<init>()V` is
+the only new native; `Field`, `Method` and `Constructor` objects, annotations, generics,
+records and Spring are later slices.
+
 ## Decision log
 
 | ADR | Decision | Status |
@@ -243,7 +268,10 @@ A fresh session should:
    --check` gate. M2.3 landed the runtime loading path: that tree is the bootstrap class
    source and its metadata is readable without `Code` (`cargo test -p rava-vm --test
    c1_runtime`). M2.4 landed class objects and the basic `Object`/`Class` natives
-   (`cargo test -p rava-interp --test class_objects`). M2.5 is next.
+   (`cargo test -p rava-interp --test class_objects`). M2.5 landed instance allocation,
+   constructors, instance fields and instance method calls, including the
+   `Object.<init>()V` no-op (`cargo test -p rava-interp --test instance_execution`).
+   M2.6 is next.
 4. Do not write runtime code outside a defined slice.
 
 ## Open decisions

@@ -30,7 +30,11 @@ the bootstrap class source, read through the existing `DirectorySource` with
 heap objects cached once per `(loader, name)` identity and enumerated as GC roots;
 `Object.getClass` and `Class.getName`, `getModifiers`, `isInterface`, `isArray`,
 `getSuperclass` and `forName` are native registry entries, and the registry overrides the
-C1 stubs that carry neither `Code` nor `ACC_NATIVE`. **M2.5 is next.**
+C1 stubs that carry neither `Code` nor `ACC_NATIVE`. **M2.5 is done (2026-11-24):**
+`new`/`dup`/`invokespecial`/`getfield`/`putfield` and the reference loads/stores execute;
+`run_instance_method` puts `this` in local 0 on the existing frame, the VM owns the
+superclass-first instance layout and allocation, and instance calls prefer the native
+registry, then `Code`, including the registered no-op `Object.<init>()V`. **M2.6 is next.**
 
 ## What this project is
 

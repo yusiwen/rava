@@ -12,7 +12,7 @@ use std::sync::Arc;
 use std::sync::{Mutex, MutexGuard, RwLock};
 
 use crate::VmError;
-use crate::heap::{Heap, HeapObject, ObjRef};
+use crate::heap::{FieldLayout, Heap, HeapObject, ObjRef};
 use crate::hooks::Hooks;
 use crate::loader::{ClassEntry, ClassId, ClassTable, LoaderId};
 use crate::source::{ClassSource, DirectorySource};
@@ -211,6 +211,52 @@ impl Shared {
                 self.class_object(class)
             }
         }
+    }
+
+    /// The instance-field layout of a class: superclass slots first, then this class's
+    /// non-static fields in class-file order.
+    ///
+    /// This is the layout [`crate::Heap::allocate_instance`] fills with defaults and the
+    /// one `getfield`/`putfield` index into, so a field resolved in a superclass keeps its
+    /// index in every subclass. Static fields are excluded: the layout describes object
+    /// state only. The superclass chain is walked through the defining loader, so the
+    /// layout is built from the same class identities as the rest of the VM.
+    pub fn field_layout(&self, class: ClassId) -> Result<FieldLayout, VmError> {
+        let mut layout = FieldLayout::new();
+        self.collect_instance_fields(class, &mut layout)?;
+        Ok(layout)
+    }
+
+    fn collect_instance_fields(
+        &self,
+        class: ClassId,
+        layout: &mut FieldLayout,
+    ) -> Result<(), VmError> {
+        let entry = self
+            .entry(class)
+            .ok_or_else(|| VmError::Loader(format!("class id {} is not loaded", class.0)))?;
+        // Load the superclass before pushing this class's fields, so the parent prefix
+        // stays at the front of the layout.
+        if let Some(super_name) = entry.file.super_class_name()? {
+            let super_name = super_name.to_owned();
+            let super_class = self.load_class(entry.loader, &super_name)?;
+            self.collect_instance_fields(super_class, layout)?;
+        }
+        for field in &entry.file.fields {
+            if !field.is_static() {
+                layout.push(
+                    entry.file.field_name(field)?,
+                    entry.file.field_descriptor(field)?,
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// Allocate an instance of `class`, with defaults for every field in its layout.
+    pub fn allocate_instance(&self, class: ClassId) -> Result<ObjRef, VmError> {
+        let layout = self.field_layout(class)?;
+        Ok(self.heap().allocate_instance(class, &layout))
     }
 
     pub fn define_class(

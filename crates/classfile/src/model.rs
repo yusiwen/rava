@@ -28,6 +28,12 @@ pub struct Field {
     pub attributes: Vec<Attribute>,
 }
 
+impl Field {
+    pub fn is_static(&self) -> bool {
+        self.access_flags & ACC_STATIC != 0
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Method {
     pub access_flags: u16,

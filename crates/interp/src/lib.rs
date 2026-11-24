@@ -1,7 +1,9 @@
 //! Bytecode decoding, frames and the interpreter.
 //!
-//! M0.5a implements the integer subset and `invokestatic`; the decoded form and the
-//! frame are the contracts a later JIT consumes.
+//! M0.5a implements the integer subset and `invokestatic`; M2.4 added native dispatch
+//! through the receiver-carrying ABI, and M2.5 adds instance allocation, constructors,
+//! instance fields and instance method calls. The decoded form and the frame are the
+//! contracts a later JIT consumes; there is no second frame model.
 
 #![forbid(unsafe_code)]
 
@@ -15,6 +17,7 @@ pub use instr::{DecodedMethod, Instr, decode};
 
 use std::sync::Arc;
 
+use rava_classfile::model::ACC_STATIC;
 use rava_vm::{
     ClassEntry, ClassId, ClassState, FrameRootsGuard, HeapObject, ObjRef, Shared, ThreadState,
     Value,
@@ -27,6 +30,51 @@ pub fn run_static_method(
     class: ClassId,
     name: &str,
     descriptor: &str,
+    args: Vec<Value>,
+) -> Result<Option<Value>, InterpError> {
+    run_method(shared, thread, class, name, descriptor, None, args)
+}
+
+/// Run an instance method on `receiver` and return its result (`None` for `void`).
+///
+/// `class` is the class that declares `name` and `descriptor`; a virtual caller resolves
+/// the method first, then passes the declaring class. `receiver` becomes local 0 (`this`)
+/// and `args` fill the following locals, in the same [`Frame`] a static method uses.
+/// The class is initialized on entry, so a direct caller that allocated through
+/// [`rava_vm::Shared::allocate_instance`] still triggers `<clinit>`.
+pub fn run_instance_method(
+    shared: &Shared,
+    thread: &ThreadState,
+    class: ClassId,
+    name: &str,
+    descriptor: &str,
+    receiver: ObjRef,
+    args: Vec<Value>,
+) -> Result<Option<Value>, InterpError> {
+    if receiver.is_null() {
+        return Err(InterpError::WrongValue);
+    }
+    run_method(
+        shared,
+        thread,
+        class,
+        name,
+        descriptor,
+        Some(receiver),
+        args,
+    )
+}
+
+/// The one execution path: resolve on `class`, consult the native registry, then decode
+/// and run `Code`. `receiver` selects the instance shape (local 0) and the native ABI's
+/// receiver; `None` is a static call.
+fn run_method(
+    shared: &Shared,
+    thread: &ThreadState,
+    class: ClassId,
+    name: &str,
+    descriptor: &str,
+    receiver: Option<ObjRef>,
     args: Vec<Value>,
 ) -> Result<Option<Value>, InterpError> {
     shared.check_no_locks_held()?;
@@ -48,7 +96,14 @@ pub fn run_static_method(
     // are not marked `ACC_NATIVE`, so "has a native implementation" is a registry
     // question, not an access-flag question.
     if let Some(native) = shared.native(&entry.name, name, descriptor) {
-        return native(shared, thread, entry.loader, ObjRef::NULL, &args).map_err(InterpError::Vm);
+        return native(
+            shared,
+            thread,
+            entry.loader,
+            receiver.unwrap_or(ObjRef::NULL),
+            &args,
+        )
+        .map_err(InterpError::Vm);
     }
     if method.is_native() {
         return Err(InterpError::Decode(format!(
@@ -70,15 +125,42 @@ pub fn run_static_method(
         })?;
     let decoded = decode(&file, &code.data)?;
 
+    // A bytecode method's receiver must be an instance of the declaring class (or a
+    // subclass). Natives keep their own receiver rules, so this runs only on the `Code`
+    // path.
+    if let Some(reference) = receiver {
+        let actual = shared.heap().instance(reference)?.class;
+        if !is_assignable(shared, actual, class)? {
+            let actual_name = shared
+                .entry(actual)
+                .map(|entry| entry.name.clone())
+                .unwrap_or_else(|| format!("class {}", actual.0));
+            return Err(InterpError::NotAssignable {
+                expected: entry.name.clone(),
+                found: actual_name,
+            });
+        }
+    }
+
     let mut locals = vec![Value::Int(0); usize::from(decoded.max_locals)];
-    if args.len() > locals.len() {
+    let base = match receiver {
+        Some(reference) => {
+            let slot = locals
+                .first_mut()
+                .ok_or_else(|| InterpError::Decode("instance method has no local 0".to_owned()))?;
+            *slot = Value::Ref(reference);
+            1
+        }
+        None => 0,
+    };
+    if args.len() + base > locals.len() {
         return Err(InterpError::Decode(format!(
             "{} args do not fit in {} locals",
             args.len(),
-            locals.len()
+            locals.len() - base
         )));
     }
-    locals[..args.len()].copy_from_slice(&args);
+    locals[base..base + args.len()].copy_from_slice(&args);
     let mut frame = Frame::new(class, locals, decoded.instructions, decoded.max_stack);
     let guard = thread.enter_frame();
     guard.publish(&frame.roots());
@@ -104,13 +186,28 @@ fn execute(
 
         match instruction {
             Instr::Iconst(value) => frame.push(Value::Int(value))?,
+            Instr::AconstNull => frame.push(Value::Ref(ObjRef::NULL))?,
+            Instr::Dup => {
+                let value = *frame.stack.last().ok_or(InterpError::StackUnderflow)?;
+                frame.push(value)?;
+            }
+            Instr::New { class } => {
+                // `new` initializes the class, then allocates an instance with the
+                // layout's default field values. The JVM's "uninitialized" state until
+                // `<init>` is not modeled: the constructor still runs and initializes
+                // the fields, and no instruction can observe the object in between.
+                let target = resolve_from(shared, frame.class, &class)?;
+                ensure_initialized(shared, thread, target)?;
+                let reference = shared.allocate_instance(target)?;
+                frame.push(Value::Ref(reference))?;
+            }
             Instr::ILoad(index) | Instr::ALoad(index) => {
                 let value = *frame.locals.get(usize::from(index)).ok_or_else(|| {
                     InterpError::Decode(format!("local {index} is outside the frame"))
                 })?;
                 frame.push(value)?;
             }
-            Instr::IStore(index) => {
+            Instr::IStore(index) | Instr::AStore(index) => {
                 let value = frame.pop()?;
                 let slot = frame.locals.get_mut(usize::from(index)).ok_or_else(|| {
                     InterpError::Decode(format!("local {index} is outside the frame"))
@@ -145,52 +242,89 @@ fn execute(
                     })?;
                 frame.push(value)?;
             }
+            Instr::GetField {
+                class,
+                name,
+                descriptor,
+            } => {
+                let (declaring, is_static) =
+                    resolve_field(shared, frame.class, &class, &name, &descriptor)?;
+                if is_static {
+                    return Err(InterpError::StaticFieldAccess {
+                        class,
+                        name,
+                        descriptor,
+                    });
+                }
+                let receiver = pop_receiver(frame)?;
+                let slot = instance_field_slot(shared, receiver, declaring, &name, &descriptor)?;
+                let value = shared.heap().instance(receiver)?.fields[slot];
+                frame.push(value)?;
+            }
+            Instr::PutField {
+                class,
+                name,
+                descriptor,
+            } => {
+                let (declaring, is_static) =
+                    resolve_field(shared, frame.class, &class, &name, &descriptor)?;
+                if is_static {
+                    return Err(InterpError::StaticFieldAccess {
+                        class,
+                        name,
+                        descriptor,
+                    });
+                }
+                // JVMS §6.5.putfield: the value is on top, the object reference below it.
+                let value = frame.pop()?;
+                let receiver = pop_receiver(frame)?;
+                let slot = instance_field_slot(shared, receiver, declaring, &name, &descriptor)?;
+                shared.heap().instance_mut(receiver)?.fields[slot] = value;
+            }
             Instr::InvokeVirtual {
                 class: _,
                 name,
                 descriptor,
             } => {
-                let count = argument_count(&descriptor)?;
-                let mut args = Vec::with_capacity(count);
-                for _ in 0..count {
-                    args.push(frame.pop()?);
-                }
-                args.reverse();
-                let receiver = frame.pop()?;
-                let Value::Ref(reference) = receiver else {
-                    return Err(InterpError::WrongValue);
-                };
-                let start = dispatch_class(shared, frame.class, reference)?;
-                let (entry, is_native) = resolve_virtual(shared, start, &name, &descriptor)?;
-                // Registry first: a C1 stub method has no `Code` and no `ACC_NATIVE`
-                // flag, and the native is still the implementation.
-                let Some(native) = shared.native(&entry.name, &name, &descriptor) else {
-                    if is_native {
-                        return Err(InterpError::Decode(format!(
-                            "no native implementation for {}.{name}{descriptor}",
-                            entry.name
-                        )));
-                    }
-                    return Err(InterpError::Decode(format!(
-                        "non-native instance call {}.{name}{descriptor} is not implemented",
-                        entry.name
-                    )));
-                };
-                shared.check_no_locks_held()?;
-                // The receiver and arguments have been popped from the frame; publish
-                // them with the frame's roots so the native call cannot lose them.
-                let mut call_roots = args.clone();
-                call_roots.push(Value::Ref(reference));
-                publish_roots(guard, frame, &call_roots);
-                let result = native(shared, thread, entry.loader, reference, &args)
-                    .map_err(InterpError::Vm)?;
-                if !descriptor.ends_with(")V") {
-                    frame.push(
-                        result.ok_or_else(|| {
-                            InterpError::Decode("missing return value".to_owned())
-                        })?,
-                    )?;
-                }
+                let args = pop_arguments(frame, &descriptor)?;
+                let receiver = pop_receiver(frame)?;
+                let start = dispatch_class(shared, frame.class, receiver)?;
+                let result = invoke_instance(
+                    shared,
+                    thread,
+                    frame,
+                    guard,
+                    start,
+                    receiver,
+                    args,
+                    &name,
+                    &descriptor,
+                )?;
+                push_result(frame, &descriptor, result)?;
+            }
+            Instr::InvokeSpecial {
+                class,
+                name,
+                descriptor,
+            } => {
+                let args = pop_arguments(frame, &descriptor)?;
+                let receiver = pop_receiver(frame)?;
+                // `invokespecial` resolves on the instruction's owner, not the receiver's
+                // class: that is what keeps a constructor on its declared class and a
+                // superclass call non-virtual.
+                let owner = resolve_from(shared, frame.class, &class)?;
+                let result = invoke_instance(
+                    shared,
+                    thread,
+                    frame,
+                    guard,
+                    owner,
+                    receiver,
+                    args,
+                    &name,
+                    &descriptor,
+                )?;
+                push_result(frame, &descriptor, result)?;
             }
             Instr::IAdd | Instr::ISub | Instr::IMul | Instr::IDiv => {
                 let right = int(frame.pop()?)?;
@@ -233,6 +367,177 @@ fn execute(
             Instr::Return => return Ok(None),
         }
     }
+}
+
+fn pop_arguments(frame: &mut Frame, descriptor: &str) -> Result<Vec<Value>, InterpError> {
+    let count = argument_count(descriptor)?;
+    let mut args = Vec::with_capacity(count);
+    for _ in 0..count {
+        args.push(frame.pop()?);
+    }
+    args.reverse();
+    Ok(args)
+}
+
+/// Pop the receiver of an instance call and require a non-null reference.
+fn pop_receiver(frame: &mut Frame) -> Result<ObjRef, InterpError> {
+    match frame.pop()? {
+        Value::Ref(reference) if !reference.is_null() => Ok(reference),
+        _ => Err(InterpError::WrongValue),
+    }
+}
+
+/// Push a call's result unless the descriptor returns `void`.
+fn push_result(
+    frame: &mut Frame,
+    descriptor: &str,
+    result: Option<Value>,
+) -> Result<(), InterpError> {
+    if descriptor.ends_with(")V") {
+        return Ok(());
+    }
+    let value = result.ok_or_else(|| InterpError::Decode("missing return value".to_owned()))?;
+    frame.push(value)
+}
+
+/// Resolve an instance call from `start`, then prefer the native registry and fall back
+/// to the method's `Code`.
+///
+/// The receiver and arguments have already been popped from `frame`; they are published
+/// as call roots before the call so a callee (or a native) cannot lose them.
+#[allow(clippy::too_many_arguments)]
+fn invoke_instance(
+    shared: &Shared,
+    thread: &ThreadState,
+    frame: &Frame,
+    guard: &FrameRootsGuard<'_>,
+    start: ClassId,
+    receiver: ObjRef,
+    args: Vec<Value>,
+    name: &str,
+    descriptor: &str,
+) -> Result<Option<Value>, InterpError> {
+    let (entry, is_native) = resolve_virtual(shared, start, name, descriptor)?;
+    shared.check_no_locks_held()?;
+    let mut call_roots = args.clone();
+    call_roots.push(Value::Ref(receiver));
+    publish_roots(guard, frame, &call_roots);
+    // Registry first: a C1 stub method has no `Code` and no `ACC_NATIVE` flag, and the
+    // native is still the implementation.
+    if let Some(native) = shared.native(&entry.name, name, descriptor) {
+        return native(shared, thread, entry.loader, receiver, &args).map_err(InterpError::Vm);
+    }
+    if is_native {
+        return Err(InterpError::Decode(format!(
+            "no native implementation for {}.{name}{descriptor}",
+            entry.name
+        )));
+    }
+    run_instance_method(shared, thread, entry.id, name, descriptor, receiver, args)
+}
+
+/// Resolve `owner.name:descriptor` up the superclass chain from the instruction's owner.
+///
+/// Returns the declaring class and whether the field is `static`. A field with the right
+/// name but the wrong descriptor is an error, not a silent miss: the interpreter never
+/// reinterprets a slot under another type.
+fn resolve_field(
+    shared: &Shared,
+    current: ClassId,
+    owner: &str,
+    name: &str,
+    descriptor: &str,
+) -> Result<(ClassId, bool), InterpError> {
+    let mut target = resolve_from(shared, current, owner)?;
+    let mut mismatch: Option<(String, String)> = None;
+    loop {
+        let entry = shared
+            .entry(target)
+            .ok_or_else(|| InterpError::Decode("field owner vanished".to_owned()))?;
+        for field in &entry.file.fields {
+            let field_name = entry.file.field_name(field)?;
+            if field_name != name {
+                continue;
+            }
+            let field_descriptor = entry.file.field_descriptor(field)?;
+            if field_descriptor == descriptor {
+                return Ok((target, field.access_flags & ACC_STATIC != 0));
+            }
+            if mismatch.is_none() {
+                mismatch = Some((entry.name.clone(), field_descriptor.to_owned()));
+            }
+        }
+        let Some(super_name) = entry.file.super_class_name()? else {
+            break;
+        };
+        let super_name = super_name.to_owned();
+        target = shared.load_class(entry.loader, &super_name)?;
+    }
+    match mismatch {
+        Some((class, found)) => Err(InterpError::FieldDescriptorMismatch {
+            class,
+            name: name.to_owned(),
+            found,
+        }),
+        None => Err(InterpError::FieldNotFound {
+            class: owner.to_owned(),
+            name: name.to_owned(),
+            descriptor: descriptor.to_owned(),
+        }),
+    }
+}
+
+/// The layout slot of `name:descriptor` on the receiver's runtime class.
+///
+/// The field was resolved on the instruction's owner; the slot is read from the
+/// receiver's own layout, so a subclass keeps the superclass prefix and inheritance
+/// works without a second offset table.
+fn instance_field_slot(
+    shared: &Shared,
+    receiver: ObjRef,
+    declaring: ClassId,
+    name: &str,
+    descriptor: &str,
+) -> Result<usize, InterpError> {
+    let actual = shared.heap().instance(receiver)?.class;
+    if !is_assignable(shared, actual, declaring)? {
+        return Err(InterpError::NotAssignable {
+            expected: class_name(shared, declaring),
+            found: class_name(shared, actual),
+        });
+    }
+    let layout = shared.field_layout(actual)?;
+    layout.slot(name, descriptor).ok_or_else(|| {
+        InterpError::Decode(format!(
+            "class {} has no slot for field {name}:{descriptor}",
+            class_name(shared, actual)
+        ))
+    })
+}
+
+/// Is `from` the same class as `to`, or a subclass of it?
+fn is_assignable(shared: &Shared, from: ClassId, to: ClassId) -> Result<bool, InterpError> {
+    let mut current = from;
+    loop {
+        if current == to {
+            return Ok(true);
+        }
+        let entry = shared
+            .entry(current)
+            .ok_or_else(|| InterpError::Decode(format!("class {} is not loaded", current.0)))?;
+        let Some(super_name) = entry.file.super_class_name()? else {
+            return Ok(false);
+        };
+        let super_name = super_name.to_owned();
+        current = shared.load_class(entry.loader, &super_name)?;
+    }
+}
+
+fn class_name(shared: &Shared, class: ClassId) -> String {
+    shared
+        .entry(class)
+        .map(|entry| entry.name.clone())
+        .unwrap_or_else(|| format!("class {}", class.0))
 }
 
 fn int(value: Value) -> Result<i32, InterpError> {

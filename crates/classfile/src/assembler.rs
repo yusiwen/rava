@@ -6,8 +6,9 @@
 //! both, for the opcodes implemented here.
 //!
 //! What it covers is exactly what the fixtures need: integer constants, integer and
-//! reference loads and stores, `iadd`, `iinc`, two conditional branches, `goto`,
-//! `getstatic`, `invokevirtual`, `ldc`, and the `ireturn`/`areturn`/`return` forms.
+//! reference loads and stores, `iinc`, `aconst_null`, `dup`, two conditional branches,
+//! `goto`, `getstatic`, `getfield`, `putfield`, `new`, `invokevirtual`, `invokespecial`,
+//! `invokestatic` through [`op`](Assembler::op), and the `ireturn`/`areturn`/`return` forms.
 //! Everything else is still raw bytes through [`Assembler::op`].
 //!
 //! `tableswitch` and `lookupswitch` are deliberately absent: their padding depends on the switch
@@ -83,6 +84,16 @@ impl Assembler {
         }
     }
 
+    /// `aconst_null`: push the null reference.
+    pub fn aconst_null(&mut self) {
+        self.bytes.push(0x01);
+    }
+
+    /// `dup`: duplicate the top operand-stack value.
+    pub fn dup(&mut self) {
+        self.bytes.push(0x59);
+    }
+
     pub fn iload(&mut self, slot: u8) {
         self.op(0x15, &[slot]);
     }
@@ -97,6 +108,14 @@ impl Assembler {
 
     pub fn istore(&mut self, slot: u8) {
         self.op(0x36, &[slot]);
+    }
+
+    /// `astore` for a reference local. Slots 0..=3 use the implicit one-byte form.
+    pub fn astore(&mut self, slot: u8) {
+        match slot {
+            0..=3 => self.bytes.push(0x4b + slot),
+            _ => self.op(0x3a, &[slot]),
+        }
     }
 
     pub fn iinc(&mut self, slot: u8, increment: i8) {
@@ -117,8 +136,30 @@ impl Assembler {
         self.op(0xb2, &index.to_be_bytes());
     }
 
+    /// `getfield`: read an instance field through a `CONSTANT_Fieldref`.
+    pub fn getfield(&mut self, index: u16) {
+        self.op(0xb4, &index.to_be_bytes());
+    }
+
+    /// `putfield`: write an instance field through a `CONSTANT_Fieldref`.
+    pub fn putfield(&mut self, index: u16) {
+        self.op(0xb5, &index.to_be_bytes());
+    }
+
+    /// `new`: allocate an instance of the class named by a `CONSTANT_Class`.
+    ///
+    /// Named `new_instance` because [`Assembler::new`] is the constructor.
+    pub fn new_instance(&mut self, index: u16) {
+        self.op(0xbb, &index.to_be_bytes());
+    }
+
     pub fn invokevirtual(&mut self, index: u16) {
         self.op(0xb6, &index.to_be_bytes());
+    }
+
+    /// `invokespecial`: constructors, private methods and superclass calls.
+    pub fn invokespecial(&mut self, index: u16) {
+        self.op(0xb7, &index.to_be_bytes());
     }
 
     /// `ifeq`, `ifne`, `iflt`, `ifge`, `ifgt`, `ifle` by their JVMS opcodes.

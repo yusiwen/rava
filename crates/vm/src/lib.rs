@@ -8,6 +8,7 @@
 pub mod error;
 pub mod heap;
 pub mod hooks;
+pub mod instance;
 pub mod loader;
 pub mod memory;
 pub mod metadata;
