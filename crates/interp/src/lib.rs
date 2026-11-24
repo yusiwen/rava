@@ -5,8 +5,10 @@
 //! instance fields and instance method calls, M2.6 adds primitive/reference arrays and
 //! the integer control-flow instructions, M2.7 adds `athrow` and the decoded exception
 //! table, and M2.8 dispatches a reflected `Field`/`Method`/`Constructor` receiver to its
-//! `java.lang.reflect` class. The decoded form and the frame are the contracts a later
-//! JIT consumes; there is no second frame model.
+//! `java.lang.reflect` class. M2.9 adds the `java.lang.Object` and `java.lang.String`
+//! natives in `rava-vm`; the interpreter needed no new instruction or dispatch path for
+//! them. The decoded form and the frame are the contracts a later JIT consumes; there is
+//! no second frame model.
 
 #![forbid(unsafe_code)]
 
@@ -315,7 +317,10 @@ fn execute(
                 }
             }
             Instr::LdcString(text) => {
-                let reference = shared.heap().allocate_string(text);
+                // JVMS §5.1: a string constant is interned. Using the intern table here
+                // makes `ldc` of the same constant reference-identical and keeps a loop
+                // from allocating one fresh string per execution.
+                let reference = shared.intern_string(&text);
                 frame.push(Value::Ref(reference))?;
             }
             Instr::GetStatic {

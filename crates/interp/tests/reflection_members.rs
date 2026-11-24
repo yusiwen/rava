@@ -4,8 +4,8 @@
 //! reads the declared members of a class through the real `Class` and member stubs,
 //! walks the returned arrays with `arraylength`/`aaload`, and calls the read-only member
 //! methods. The only non-reflection helper is `same(String, String)`, a test-only native
-//! used to match a member name: `java.lang.String.equals` is not implemented in this
-//! slice, and the point of the fixture is the member object, not string comparison.
+//! used to match a member name; it keeps the fixture independent of the string natives
+//! M2.9 adds later, and the point here is the member object, not string comparison.
 //!
 //! Expected values are derived from the same `ClassFile` the VM reads, so the tests
 //! assert exact metadata without hard-coding JDK-private member counts.
@@ -27,8 +27,8 @@ fn c1_classes() -> PathBuf {
 
 /// A tiny `String` equality native, registered only by this test.
 ///
-/// Names are compared here instead of in Java because `String.equals` has no native
-/// implementation yet; the fixture still performs the declared-member loop in bytecode.
+/// Names are compared here with a test-local native so this fixture does not depend on
+/// the `String` natives; the fixture still performs the declared-member loop in bytecode.
 fn same(
     shared: &Shared,
     _thread: &ThreadState,

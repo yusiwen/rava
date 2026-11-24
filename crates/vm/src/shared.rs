@@ -38,6 +38,7 @@ pub enum SharedLock {
     Heap,
     ClassObjects,
     ReflectMembers,
+    InternedStrings,
     NativeRegistry,
     Stdout,
 }
@@ -49,6 +50,7 @@ impl fmt::Display for SharedLock {
             Self::Heap => write!(f, "heap"),
             Self::ClassObjects => write!(f, "class-object cache"),
             Self::ReflectMembers => write!(f, "reflected-member cache"),
+            Self::InternedStrings => write!(f, "interned-string table"),
             Self::NativeRegistry => write!(f, "native registry"),
             Self::Stdout => write!(f, "stdout"),
         }
@@ -80,6 +82,10 @@ pub struct Shared {
     /// the objects, which are never freed while `Shared` lives and are reported as roots
     /// by [`Shared::roots`].
     reflect_members: Mutex<HashMap<(ClassId, MemberKind, String, String), ObjRef>>,
+    /// One canonical string object per interned text. The table owns the objects, which
+    /// are never freed while `Shared` lives and are reported as roots by
+    /// [`Shared::roots`].
+    interned_strings: Mutex<HashMap<String, ObjRef>>,
     natives: RwLock<HashMap<NativeKey, NativeFn>>,
     stdout: Mutex<Vec<u8>>,
     hooks: Hooks,
@@ -92,6 +98,7 @@ impl Shared {
             heap: Mutex::new(Heap::new()),
             class_objects: Mutex::new(HashMap::new()),
             reflect_members: Mutex::new(HashMap::new()),
+            interned_strings: Mutex::new(HashMap::new()),
             natives: RwLock::new(HashMap::new()),
             stdout: Mutex::new(Vec::new()),
             hooks: Hooks::default(),
@@ -219,6 +226,32 @@ impl Shared {
             });
         cache.insert(key, reference);
         Ok(reference)
+    }
+
+    /// The canonical string object for `text`, allocated on first use.
+    ///
+    /// `String.intern` promises one object per text, so this is a side table keyed by the
+    /// content and holding the canonical [`ObjRef`]. The table owns the objects: they are
+    /// never freed while `Shared` lives and [`Shared::roots`] reports them, so an interned
+    /// string is a permanent root instead of inferred retention.
+    ///
+    /// Lock order is table, then heap, matching [`Shared::class_object`]. No path takes
+    /// the heap lock before this cache, which keeps the pair deadlock-free.
+    pub fn intern_string(&self, text: &str) -> ObjRef {
+        let mut table = self
+            .interned_strings
+            .lock()
+            .expect("interned-string table lock poisoned");
+        if let Some(reference) = table.get(text) {
+            return *reference;
+        }
+        let reference = self
+            .heap
+            .lock()
+            .expect("heap lock poisoned")
+            .allocate_string(text);
+        table.insert(text.to_owned(), reference);
+        reference
     }
 
     /// The class object of a heap object: `Object.getClass` without the dispatch.
@@ -421,6 +454,18 @@ impl Shared {
             }
         }
 
+        {
+            let interned_strings = self
+                .interned_strings
+                .lock()
+                .expect("interned-string table lock poisoned");
+            for reference in interned_strings.values() {
+                if seen.insert(*reference) {
+                    roots.push(*reference);
+                }
+            }
+        }
+
         for thread in threads {
             for reference in thread.frame_roots() {
                 if seen.insert(reference) {
@@ -457,6 +502,11 @@ impl Shared {
         {
             let _guard = self.reflect_members.try_lock().map_err(|_| LockHeld {
                 lock: SharedLock::ReflectMembers,
+            })?;
+        }
+        {
+            let _guard = self.interned_strings.try_lock().map_err(|_| LockHeld {
+                lock: SharedLock::InternedStrings,
             })?;
         }
         {

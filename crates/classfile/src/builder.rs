@@ -84,14 +84,18 @@ impl ClassBuilder {
     }
 
     /// A `CONSTANT_Utf8`, deduplicated.
+    ///
+    /// The payload is encoded as modified UTF-8 (CESU-8 for supplementary characters), the
+    /// only encoding a class file accepts; plain UTF-8 would write a four-byte sequence.
     pub fn utf8(&mut self, text: &str) -> u16 {
         let key = format!("U{text}");
         if let Some(index) = self.index.get(&key) {
             return *index;
         }
+        let bytes = crate::mutf8::encode(text);
         let mut entry = vec![1u8];
-        entry.extend_from_slice(&(text.len() as u16).to_be_bytes());
-        entry.extend_from_slice(text.as_bytes());
+        entry.extend_from_slice(&(bytes.len() as u16).to_be_bytes());
+        entry.extend_from_slice(&bytes);
         self.push(key, entry, 1)
     }
 

@@ -54,7 +54,18 @@ name and descriptor; one object per member is cached and enumerated as a GC root
 `Class.getDeclaredFields`, `getDeclaredMethods` and `getDeclaredConstructors` return real
 heap reference arrays; and the read-only member natives report names, modifiers,
 declaring classes, field and return types and parameter counts. Reflective invocation,
-annotations and generic types remain later slices. **M2.9 is next.**
+annotations and generic types remain later slices. **M2.9 is done (2026-11-24):**
+`java.lang.String` keeps the existing `HeapObject::Str` and implements `length`,
+`isEmpty`, `charAt`, `equals`, `hashCode`, `compareTo`, `concat`, both `substring`
+overloads, `startsWith`, `endsWith`, `indexOf`, `replace`, `toCharArray`, `toString` and
+`intern` over UTF-16 code units, including surrogate pairs; `java.lang.Object` gains
+reference-identity `equals`, a stable identity `hashCode` and a `ClassName@hash`
+`toString`; and interned strings, including `ldc` constants, are permanent roots of a
+content-keyed table. A lone
+surrogate, a null argument and an out-of-range index are typed errors because exception
+objects are not synthesized yet. `String.valueOf`, `StringBuilder`, `Integer`,
+collections, reflection invocation, annotations and generics remain later slices.
+**M2.10 is next.**
 
 ## What this project is
 

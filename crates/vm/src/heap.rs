@@ -36,6 +36,24 @@ impl ObjRef {
     pub fn generation(self) -> u32 {
         self.generation
     }
+
+    /// A stable identity hash for this object handle.
+    ///
+    /// The handle's `(index, generation)` pair is the VM's object identity: it is fixed
+    /// for the object's lifetime and a freed slot gets a new generation, so a reused
+    /// index never repeats a live object's hash. The value is a deterministic mix of the
+    /// two fields with odd multipliers; both steps are injective modulo 2^32, so two live
+    /// handles that differ only in index get different hashes. No side table is needed
+    /// because the input never changes, so `Object.hashCode` is stable by construction.
+    ///
+    /// This is a runtime identity hash, not a content hash: `java.lang.String` overrides
+    /// `hashCode` with the `31*h + c` content algorithm and only reaches this value
+    /// through an explicit `Object.hashCode` call.
+    pub fn identity_hash(self) -> i32 {
+        let index = self.index.wrapping_mul(0x9E37_79B1);
+        let generation = self.generation.wrapping_mul(0x85EB_CA6B);
+        (index ^ generation).wrapping_add(0x7F4A_7C15) as i32
+    }
 }
 
 impl fmt::Display for ObjRef {
@@ -211,8 +229,10 @@ pub struct ReflectMember {
 pub enum HeapObject {
     Instance(Instance),
     Array(Array),
-    /// A minimal string object for `ldc` and native printing. The class-library
-    /// `java.lang.String` representation arrives with the library slice.
+    /// A string object. Stored as a Rust `String` (valid UTF-8); the `java.lang.String`
+    /// natives view it as UTF-16 code units through `String::encode_utf16`, so no second
+    /// string representation exists. A lone surrogate cannot be stored in a Rust
+    /// `String`, so a string operation that would produce one is a typed error.
     Str(String),
     /// A class object (`java.lang.Class`): one heap object per class identity.
     ///
