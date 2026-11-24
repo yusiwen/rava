@@ -10,8 +10,8 @@
 //! `goto`, `getstatic`, `getfield`, `putfield`, `new`, array creation and access
 //! (`newarray`, `anewarray`, `multianewarray`, `arraylength`, `iaload`/`iastore` and
 //! `aaload`/`aastore`), `invokevirtual`, `invokespecial`, `invokestatic` through
-//! [`op`](Assembler::op), and the `ireturn`/`areturn`/`return` forms. Everything else is
-//! still raw bytes through [`Assembler::op`].
+//! [`op`](Assembler::op), `athrow`, and the `ireturn`/`areturn`/`return` forms.
+//! Everything else is still raw bytes through [`Assembler::op`].
 //!
 //! `tableswitch` and `lookupswitch` are deliberately absent: their padding depends on the switch
 //! opcode's own address, which is a different encoding problem (and the decoder already handles the
@@ -61,6 +61,15 @@ impl Assembler {
     /// Binds `label` to the current offset.
     pub fn place(&mut self, label: Label) {
         self.labels[label.0] = Some(self.bytes.len());
+    }
+
+    /// The byte offset `label` currently names, or `None` while it is unbound.
+    ///
+    /// A `Code` exception table names byte offsets rather than labels, so a fixture that
+    /// uses labels for handler ranges reads them back here before
+    /// [`finish`](Self::finish) consumes the assembler.
+    pub fn offset(&self, label: Label) -> Option<usize> {
+        self.labels[label.0]
     }
 
     /// Emits a raw opcode and operands, for anything without a helper.
@@ -204,6 +213,11 @@ impl Assembler {
     /// Named `new_instance` because [`Assembler::new`] is the constructor.
     pub fn new_instance(&mut self, index: u16) {
         self.op(0xbb, &index.to_be_bytes());
+    }
+
+    /// `athrow`: throw the reference on top of the operand stack.
+    pub fn athrow(&mut self) {
+        self.bytes.push(0xbf);
     }
 
     pub fn invokevirtual(&mut self, index: u16) {

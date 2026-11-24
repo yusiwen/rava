@@ -39,7 +39,16 @@ registry, then `Code`, including the registered no-op `Object.<init>()V`. **M2.6
 load/store opcodes allocate and access the existing heap arrays; `goto`, the
 `if<cond>`/`if_icmp<cond>` comparisons, `ifnull`/`ifnonnull` and `iinc` execute with
 branch targets resolved to instruction indices at decode time; and bounds, null,
-negative-size and element-kind failures are typed errors. **M2.7 is next.**
+negative-size and element-kind failures are typed errors. **M2.7 is done
+(2026-11-24):** the `Code` exception table is decoded into instruction ranges,
+`athrow` throws, and a throwing instruction or a throwing callee searches the
+current frame's table in class-file order for a range that contains it and a catch
+type assignable through the superclass chain; a match clears the operand stack,
+pushes the throwable and jumps to the handler, while an uncaught throw leaves the
+frame as a typed `Thrown` carrying the same object. A catch-all entry
+(`catch_type = 0`) decodes, but `finally` duplication, stack traces,
+exception-object synthesis and interfaces are not implemented, and nothing checks that
+the thrown object or the catch type is a `Throwable`. **M2.8 is next.**
 
 ## What this project is
 

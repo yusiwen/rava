@@ -1,8 +1,8 @@
-//! A call frame: locals, operand stack and decoded instructions.
+//! A call frame: locals, operand stack, decoded instructions and the exception table.
 
 use rava_vm::{ClassId, ObjRef, Value};
 
-use crate::instr::Instr;
+use crate::instr::{ExceptionHandler, Instr};
 
 #[derive(Debug)]
 pub struct Frame {
@@ -11,6 +11,9 @@ pub struct Frame {
     pub stack: Vec<Value>,
     pub max_stack: usize,
     pub instructions: Vec<Instr>,
+    /// The method's exception table; `athrow` and a propagating callee search it in this
+    /// order.
+    pub handlers: Vec<ExceptionHandler>,
     pub pc: usize,
 }
 
@@ -19,6 +22,7 @@ impl Frame {
         class: ClassId,
         locals: Vec<Value>,
         instructions: Vec<Instr>,
+        handlers: Vec<ExceptionHandler>,
         max_stack: u16,
     ) -> Self {
         Self {
@@ -27,6 +31,7 @@ impl Frame {
             stack: Vec::with_capacity(usize::from(max_stack)),
             max_stack: usize::from(max_stack),
             instructions,
+            handlers,
             pc: 0,
         }
     }
@@ -73,6 +78,7 @@ mod tests {
         let mut frame = Frame::new(
             ClassId(0),
             vec![Value::Ref(local), Value::Ref(ObjRef::NULL), Value::Int(7)],
+            Vec::new(),
             Vec::new(),
             4,
         );

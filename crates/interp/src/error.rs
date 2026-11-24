@@ -2,7 +2,7 @@
 
 use std::fmt;
 
-use rava_vm::{ArrayKind, VmError};
+use rava_vm::{ArrayKind, ObjRef, VmError};
 
 #[derive(Debug)]
 pub enum InterpError {
@@ -53,6 +53,19 @@ pub enum InterpError {
     },
     /// `newarray`/`anewarray`/`multianewarray` was given a negative length.
     NegativeArraySize(i32),
+    /// `athrow` popped a null reference.
+    ///
+    /// The JVM would raise a `NullPointerException`; this slice has no
+    /// exception-object synthesis, so the condition is a typed error instead.
+    NullThrow,
+    /// `athrow` popped a value that is not a reference.
+    NonReferenceThrow,
+    /// A throwable left the frame that raised it.
+    ///
+    /// Carries the object `athrow` popped, unchanged: the frame's exception table did
+    /// not catch it, and every caller that can catch it receives this same handle. An
+    /// error surfacing from a top-level call is an uncaught exception.
+    Thrown(ObjRef),
     StackUnderflow,
     WrongValue,
     BadDescriptor(String),
@@ -104,6 +117,9 @@ impl fmt::Display for InterpError {
                 write!(f, "array kind mismatch: expected {expected}, found {found}")
             }
             Self::NegativeArraySize(size) => write!(f, "negative array size {size}"),
+            Self::NullThrow => write!(f, "athrow of a null reference"),
+            Self::NonReferenceThrow => write!(f, "athrow of a non-reference value"),
+            Self::Thrown(throwable) => write!(f, "uncaught exception {throwable}"),
             Self::StackUnderflow => write!(f, "operand stack underflow"),
             Self::WrongValue => write!(f, "operand has the wrong type"),
             Self::BadDescriptor(descriptor) => write!(f, "unsupported descriptor {descriptor}"),

@@ -2,9 +2,10 @@
 //!
 //! M0.5a implements the integer subset and `invokestatic`; M2.4 added native dispatch
 //! through the receiver-carrying ABI, M2.5 adds instance allocation, constructors,
-//! instance fields and instance method calls, and M2.6 adds primitive/reference arrays
-//! and the integer control-flow instructions. The decoded form and the frame are the
-//! contracts a later JIT consumes; there is no second frame model.
+//! instance fields and instance method calls, M2.6 adds primitive/reference arrays and
+//! the integer control-flow instructions, and M2.7 adds `athrow` and the decoded
+//! exception table. The decoded form and the frame are the contracts a later JIT
+//! consumes; there is no second frame model.
 
 #![forbid(unsafe_code)]
 
@@ -14,7 +15,7 @@ mod instr;
 
 pub use error::InterpError;
 pub use frame::Frame;
-pub use instr::{DecodedMethod, Instr, IntCondition, decode};
+pub use instr::{DecodedMethod, ExceptionHandler, Instr, IntCondition, decode};
 
 use std::sync::Arc;
 
@@ -162,7 +163,13 @@ fn run_method(
         )));
     }
     locals[base..base + args.len()].copy_from_slice(&args);
-    let mut frame = Frame::new(class, locals, decoded.instructions, decoded.max_stack);
+    let mut frame = Frame::new(
+        class,
+        locals,
+        decoded.instructions,
+        decoded.handlers,
+        decoded.max_stack,
+    );
     let guard = thread.enter_frame();
     guard.publish(&frame.roots());
     execute(shared, thread, &mut frame, &guard)
@@ -378,6 +385,7 @@ fn execute(
                 name,
                 descriptor,
             } => {
+                let caller_pc = frame.pc - 1;
                 let args = pop_arguments(frame, &descriptor)?;
                 let receiver = pop_receiver(frame)?;
                 let start = dispatch_class(shared, frame.class, receiver)?;
@@ -391,14 +399,15 @@ fn execute(
                     args,
                     &name,
                     &descriptor,
-                )?;
-                push_result(frame, &descriptor, result)?;
+                );
+                deliver_call(shared, frame, caller_pc, &descriptor, result)?;
             }
             Instr::InvokeSpecial {
                 class,
                 name,
                 descriptor,
             } => {
+                let caller_pc = frame.pc - 1;
                 let args = pop_arguments(frame, &descriptor)?;
                 let receiver = pop_receiver(frame)?;
                 // `invokespecial` resolves on the instruction's owner, not the receiver's
@@ -415,8 +424,8 @@ fn execute(
                     args,
                     &name,
                     &descriptor,
-                )?;
-                push_result(frame, &descriptor, result)?;
+                );
+                deliver_call(shared, frame, caller_pc, &descriptor, result)?;
             }
             Instr::IAdd | Instr::ISub | Instr::IMul | Instr::IDiv => {
                 let right = int(frame.pop()?)?;
@@ -437,6 +446,7 @@ fn execute(
                 name,
                 descriptor,
             } => {
+                let caller_pc = frame.pc - 1;
                 let count = argument_count(&descriptor)?;
                 let mut args = Vec::with_capacity(count);
                 for _ in 0..count {
@@ -448,11 +458,18 @@ fn execute(
                 // The arguments have been popped from this frame; publish them so
                 // they stay roots while the callee runs.
                 publish_roots(guard, frame, &args);
-                let result = run_static_method(shared, thread, target, &name, &descriptor, args)?;
-                if !descriptor.ends_with(")V") {
-                    let value = result
-                        .ok_or_else(|| InterpError::Decode("missing return value".to_owned()))?;
-                    frame.push(value)?;
+                let result = run_static_method(shared, thread, target, &name, &descriptor, args);
+                deliver_call(shared, frame, caller_pc, &descriptor, result)?;
+            }
+            Instr::Athrow => {
+                let throwable = throw_reference(frame)?;
+                // `frame.pc` already names the next instruction, so the throwing one is
+                // the index just behind it.
+                let throwing_pc = frame.pc - 1;
+                if !handle_thrown(shared, frame, throwing_pc, throwable)? {
+                    // No handler here: the throwable leaves this frame unchanged and the
+                    // caller's table gets the same handle.
+                    return Err(InterpError::Thrown(throwable));
                 }
             }
             Instr::IReturn | Instr::AReturn => return Ok(Some(frame.pop()?)),
@@ -469,6 +486,97 @@ fn pop_arguments(frame: &mut Frame, descriptor: &str) -> Result<Vec<Value>, Inte
     }
     args.reverse();
     Ok(args)
+}
+
+/// Pop `athrow`'s reference, distinguishing a null handle from a non-reference value.
+///
+/// Java would raise a `NullPointerException` for the null case; this slice has no
+/// exception-object synthesis, so both violations are typed interpreter errors and
+/// neither searches the handler table.
+fn throw_reference(frame: &mut Frame) -> Result<ObjRef, InterpError> {
+    match frame.pop()? {
+        Value::Ref(reference) if reference.is_null() => Err(InterpError::NullThrow),
+        Value::Ref(reference) => Ok(reference),
+        _ => Err(InterpError::NonReferenceThrow),
+    }
+}
+
+/// Route a throwable through `frame`'s exception table.
+///
+/// Entries are searched in class-file order for one whose protected range contains the
+/// throwing instruction and whose catch type is assignable from the throwable's runtime
+/// class; a catch-all entry (`catch_type = 0`) matches any throwable. On a match the
+/// operand stack is cleared, the throwable becomes its only value and the frame jumps to
+/// the handler. Returns `false` when no entry matches, leaving the throwable for the
+/// caller.
+fn handle_thrown(
+    shared: &Shared,
+    frame: &mut Frame,
+    throwing_pc: usize,
+    throwable: ObjRef,
+) -> Result<bool, InterpError> {
+    // The runtime class is resolved lazily: a frame whose matching entry is the
+    // catch-all does not need it.
+    let mut throwable_class: Option<ClassId> = None;
+    let mut target: Option<usize> = None;
+    for handler in &frame.handlers {
+        if throwing_pc < handler.start || throwing_pc >= handler.end {
+            continue;
+        }
+        let catches = match &handler.catch_type {
+            None => true,
+            Some(catch_type) => {
+                let actual = match throwable_class {
+                    Some(class) => class,
+                    None => {
+                        let class = dispatch_class(shared, frame.class, throwable)?;
+                        throwable_class = Some(class);
+                        class
+                    }
+                };
+                let expected = resolve_from(shared, frame.class, catch_type)?;
+                is_assignable(shared, actual, expected)?
+            }
+        };
+        if catches {
+            target = Some(handler.handler);
+            break;
+        }
+    }
+
+    let Some(target) = target else {
+        return Ok(false);
+    };
+    frame.stack.clear();
+    frame.push(Value::Ref(throwable))?;
+    frame.pc = target;
+    Ok(true)
+}
+
+/// Deliver a call's outcome to the caller frame.
+///
+/// A `Thrown` error is not the caller's failure: it searches the caller's exception
+/// table at `caller_pc` and either jumps to a handler or re-raises the same throwable.
+/// Every other error is returned unchanged, so a VM error is never mistaken for a Java
+/// exception.
+fn deliver_call(
+    shared: &Shared,
+    frame: &mut Frame,
+    caller_pc: usize,
+    descriptor: &str,
+    result: Result<Option<Value>, InterpError>,
+) -> Result<(), InterpError> {
+    match result {
+        Ok(value) => push_result(frame, descriptor, value),
+        Err(InterpError::Thrown(throwable)) => {
+            if handle_thrown(shared, frame, caller_pc, throwable)? {
+                Ok(())
+            } else {
+                Err(InterpError::Thrown(throwable))
+            }
+        }
+        Err(error) => Err(error),
+    }
 }
 
 /// Pop the receiver of an instance call and require a non-null reference.

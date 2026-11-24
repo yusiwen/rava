@@ -10,6 +10,10 @@
 //! here from the class file's signed byte offset. The dispatch loop therefore never
 //! computes a byte address, and a target that is not an instruction boundary is a decode
 //! error rather than a runtime jump into the middle of an operand.
+//!
+//! M2.7 adds the exception table: `start_pc`/`end_pc`/`handler_pc` are resolved to the
+//! same instruction indices at decode time, so handler search at run time is a range
+//! check over instruction positions, never a byte-address comparison.
 
 use std::collections::HashMap;
 
@@ -17,6 +21,21 @@ use rava_classfile::{ClassFile, Constant};
 use rava_vm::ArrayKind;
 
 use crate::error::InterpError;
+
+/// One entry of a method's `Code` exception table, resolved to instruction indices.
+///
+/// `start` is inclusive and `end` is exclusive, the same half-open range as the class
+/// file's `start_pc`/`end_pc` pair. `start`, `end` and `handler` are indices into
+/// [`DecodedMethod::instructions`], not byte offsets. `catch_type` is the catch class's
+/// binary name, or `None` for a catch-all entry (`catch_type = 0`, the shape `finally`
+/// compiles to; `finally` duplication itself is not implemented).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExceptionHandler {
+    pub start: usize,
+    pub end: usize,
+    pub handler: usize,
+    pub catch_type: Option<String>,
+}
 
 /// The six integer comparisons shared by `if<cond>` and `if_icmp<cond>`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -126,6 +145,8 @@ pub enum Instr {
     IfICmp(IntCondition, usize),
     IfNull(usize),
     IfNonNull(usize),
+    /// `athrow`: pop a reference and throw it; `0xbf`.
+    Athrow,
     IReturn,
     AReturn,
     Return,
@@ -134,6 +155,9 @@ pub enum Instr {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DecodedMethod {
     pub instructions: Vec<Instr>,
+    /// The exception table, in class-file order. The order is the search order: the
+    /// first matching entry wins (JVMS §4.7.3).
+    pub handlers: Vec<ExceptionHandler>,
     pub max_stack: u16,
     pub max_locals: u16,
 }
@@ -287,6 +311,7 @@ pub fn decode(file: &ClassFile, attribute_data: &[u8]) -> Result<DecodedMethod, 
             0xac => Instr::IReturn,
             0xb0 => Instr::AReturn,
             0xb1 => Instr::Return,
+            0xbf => Instr::Athrow,
             0x12 => {
                 let index = byte(code, pc)?;
                 pc += 1;
@@ -396,11 +421,97 @@ pub fn decode(file: &ClassFile, attribute_data: &[u8]) -> Result<DecodedMethod, 
         };
     }
 
+    // The exception table follows the code array in the `Code` attribute. It is
+    // resolved against the same boundaries map, so a handler can only name a real
+    // instruction.
+    let handlers = decode_handlers(file, attribute_data, end, code.len(), &boundaries)?;
+
     Ok(DecodedMethod {
         instructions,
+        handlers,
         max_stack,
         max_locals,
     })
+}
+
+/// Decodes a `Code` attribute's exception table, which starts at byte `offset` (the end
+/// of the code array).
+///
+/// `start_pc` and `handler_pc` must be instruction boundaries; `end_pc` must be a
+/// boundary too, or the code length, which is one past the last instruction (JVMS
+/// §4.7.3). A table entry that names any other byte, runs backwards, or has a
+/// `catch_type` that is not a `CONSTANT_Class` is a decode error, not a silently ignored
+/// handler.
+fn decode_handlers(
+    file: &ClassFile,
+    data: &[u8],
+    mut offset: usize,
+    code_len: usize,
+    boundaries: &HashMap<usize, usize>,
+) -> Result<Vec<ExceptionHandler>, InterpError> {
+    let count = table_u2(data, &mut offset)?;
+    let mut handlers = Vec::with_capacity(usize::from(count));
+    for _ in 0..count {
+        let start_pc = table_u2(data, &mut offset)?;
+        let end_pc = table_u2(data, &mut offset)?;
+        let handler_pc = table_u2(data, &mut offset)?;
+        let catch_type = table_u2(data, &mut offset)?;
+
+        let start = instruction_index(boundaries, start_pc, "start_pc")?;
+        // `end_pc` is exclusive and may equal `code_length`, which is not itself a
+        // boundary any instruction starts on.
+        let end = if usize::from(end_pc) == code_len {
+            boundaries.len()
+        } else {
+            instruction_index(boundaries, end_pc, "end_pc")?
+        };
+        let handler = instruction_index(boundaries, handler_pc, "handler_pc")?;
+        if start >= end {
+            return Err(InterpError::Decode(format!(
+                "exception handler covers start_pc {start_pc} to end_pc {end_pc}, which is empty or reversed"
+            )));
+        }
+        let catch_type = if catch_type == 0 {
+            None
+        } else {
+            Some(resolve_class(file, catch_type)?)
+        };
+        handlers.push(ExceptionHandler {
+            start,
+            end,
+            handler,
+            catch_type,
+        });
+    }
+    Ok(handlers)
+}
+
+/// An exception-table byte offset as an instruction index.
+fn instruction_index(
+    boundaries: &HashMap<usize, usize>,
+    offset: u16,
+    field: &str,
+) -> Result<usize, InterpError> {
+    boundaries
+        .get(&usize::from(offset))
+        .copied()
+        .ok_or_else(|| {
+            InterpError::Decode(format!(
+                "exception handler {field} byte {offset} is not an instruction boundary"
+            ))
+        })
+}
+
+/// A big-endian `u16` from the `Code` payload, advancing `offset`.
+fn table_u2(data: &[u8], offset: &mut usize) -> Result<u16, InterpError> {
+    let end = offset
+        .checked_add(2)
+        .ok_or_else(|| InterpError::Decode("Code attribute offset overflows".to_owned()))?;
+    let bytes = data.get(*offset..end).ok_or_else(|| {
+        InterpError::Decode("Code attribute is truncated inside its exception table".to_owned())
+    })?;
+    *offset = end;
+    Ok(u16::from_be_bytes([bytes[0], bytes[1]]))
 }
 
 /// The element kind an array load/store opcode addresses.
