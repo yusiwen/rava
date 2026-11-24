@@ -8,3 +8,5 @@ authors.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+rava-classfile.workspace = true
+rava-vm.workspace = true

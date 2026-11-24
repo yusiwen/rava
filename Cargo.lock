@@ -54,6 +54,10 @@ version = "0.1.0"
 [[package]]
 name = "rava-interp"
 version = "0.1.0"
+dependencies = [
+ "rava-classfile",
+ "rava-vm",
+]
 
 [[package]]
 name = "rava-native"
