@@ -87,6 +87,7 @@ release process, if wanted, becomes its own phase.
 | M2.23 | Spring `AnnotationConfigApplicationContext` bean graph | R3 | `RAVA_SPRING_ACCEPTANCE=1 cargo test -p rava-cli --test spring_context` exits 0 | blocked |
 | M2.24 | `java.util.stream` pipeline for Spring's annotation metadata | R3 | `cargo test -p rava-interp --test streams` exits 0 | done |
 | M2.25 | Full primitive-box family and Number accessors | R3 | `cargo test -p rava-interp --test primitive_boxes` exits 0 | done |
+| M2.26 | `instanceof(null)` correctness and map constructor surface | R3 | `cargo test -p rava-interp --test spring_fixes` exits 0 | todo |
 
 P0 and P1 are accepted; P2 is done because the M2 increments are sliced. All M0 and
 M1 slices are done, and both gate reviews passed. M2.1, M2.2, M2.3, M2.4, M2.5,
