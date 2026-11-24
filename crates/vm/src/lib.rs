@@ -13,6 +13,7 @@ pub mod heap;
 pub mod hooks;
 pub mod instance;
 pub mod loader;
+pub mod maps;
 pub mod memory;
 pub mod metadata;
 pub mod object;

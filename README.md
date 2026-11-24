@@ -94,8 +94,20 @@ three constructors, the `String`/`Object`/`int`/`long`/`char`/`boolean`/`float`/
 constructors, `size`, `isEmpty`, both `add` and `remove` forms, `get`, `set`, `clear`,
 `contains` and `indexOf`, with reference-equality membership and typed bounds errors.
 `append(Object)` uses the VM's `String.valueOf`-shaped conversion rather than dispatching
-an overridden `toString`; iterators, streams, `HashMap`, `StringBuffer` and reflection
-changes remain later slices. **M2.13 is next.**
+an overridden `toString`; iterators, streams, `StringBuffer` and reflection changes remain
+later slices. **M2.13 is done (2026-11-24):** a `HashMap` is a dedicated heap object
+(`HeapObject::Map`, insertion-ordered key/value pairs) selected by its class identity, so
+`getClass` and virtual dispatch report `java.util.HashMap`, and `Shared::roots` enumerates
+the keys and values it holds. The map implements both constructors, `size`, `isEmpty`,
+`put`, `get`, `containsKey`, `containsValue`, `remove` and `clear`; `put` returns the
+previous value, null keys and values are stored, a string key compares by content, a boxed
+`Integer` key by value and every other key by reference identity, and a negative capacity
+or a non-reference argument is a typed error. `String.valueOf` covers `Object`, `int`,
+`long`, `boolean`, `char`, `float` and `double`: null renders `"null"`, a `String` returns
+itself, a boxed `Integer` its decimal value, and any other object the VM's
+`ClassName@hex` shape, with `valueOf(int)` identical to `Integer.toString(int)`. Iterators,
+`entrySet`/`keySet`/`values`, streams, `StringBuffer`, `Objects` and the remaining
+`HashMap` methods remain later slices. **M2.14 is next.**
 
 ## What this project is
 

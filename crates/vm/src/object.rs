@@ -102,12 +102,13 @@ fn object_to_string(
 ///
 /// An instance reports its defining class, a string `java.lang.String`, a class object
 /// `java.lang.Class`, a reflected member its `java.lang.reflect` class, a box its boxed
-/// class (`java.lang.Integer`), a builder `java.lang.StringBuilder` and a list
-/// `java.util.ArrayList`. An array has no class identity in this slice, so it returns a
-/// typed error instead of a wrong name, the same choice `Shared::get_class` makes.
+/// class (`java.lang.Integer`), a builder `java.lang.StringBuilder`, a list
+/// `java.util.ArrayList` and a map `java.util.HashMap`. An array has no class identity in
+/// this slice, so it returns a typed error instead of a wrong name, the same choice
+/// `Shared::get_class` makes.
 ///
-/// [`crate::collections`] reuses this for `StringBuilder.append(Object)`'s
-/// `String.valueOf`-shaped conversion.
+/// [`crate::string::object_text`] reuses this for `String.valueOf(Object)` and
+/// [`crate::collections`] for `StringBuilder.append(Object)`.
 pub(crate) fn runtime_binary_name(shared: &Shared, receiver: ObjRef) -> Result<String, VmError> {
     enum Kind {
         Instance(ClassId),
@@ -119,6 +120,7 @@ pub(crate) fn runtime_binary_name(shared: &Shared, receiver: ObjRef) -> Result<S
         Enum(ClassId),
         StringBuilder,
         List,
+        Map,
         Array,
     }
 
@@ -137,6 +139,7 @@ pub(crate) fn runtime_binary_name(shared: &Shared, receiver: ObjRef) -> Result<S
             HeapObject::Enum(constant) => Kind::Enum(constant.class),
             HeapObject::StringBuilder(_) => Kind::StringBuilder,
             HeapObject::List(_) => Kind::List,
+            HeapObject::Map(_) => Kind::Map,
             HeapObject::Array(_) => Kind::Array,
         }
     };
@@ -161,6 +164,7 @@ pub(crate) fn runtime_binary_name(shared: &Shared, receiver: ObjRef) -> Result<S
         }
         Kind::StringBuilder => Ok("java.lang.StringBuilder".to_owned()),
         Kind::List => Ok("java.util.ArrayList".to_owned()),
+        Kind::Map => Ok("java.util.HashMap".to_owned()),
         Kind::Array => Err(VmError::Native(
             "array class names are not supported yet (M2.9)".to_owned(),
         )),

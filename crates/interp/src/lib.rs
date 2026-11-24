@@ -10,9 +10,10 @@
 //! natives (`Method.invoke`, `Constructor.newInstance`) in [`reflect_invoke`], which
 //! re-enter this crate's existing instance/static machinery. M2.12 dispatches a
 //! `StringBuilder` and an `ArrayList` receiver to `java/lang/StringBuilder` and
-//! `java/util/ArrayList`, whose natives live in `rava-vm`'s `collections` module. The
-//! decoded form and the frame are the contracts a later JIT consumes; there is no second
-//! frame model.
+//! `java/util/ArrayList`, whose natives live in `rava-vm`'s `collections` module. M2.13
+//! dispatches a `HashMap` receiver to `java/util/HashMap`, whose natives live in
+//! `rava-vm`'s `maps` module. The decoded form and the frame are the contracts a later JIT
+//! consumes; there is no second frame model.
 
 #![forbid(unsafe_code)]
 
@@ -940,12 +941,12 @@ fn resolve_from(shared: &Shared, current: ClassId, name: &str) -> Result<ClassId
 /// The class a virtual call starts resolution from.
 ///
 /// An instance dispatches from its defining class. A string, a class object, a box, a
-/// `StringBuilder` or an `ArrayList` has no `ClassId` of its own in the heap, so it
-/// dispatches from `java/lang/String`, `java/lang/Class`, its boxed class
-/// (`java/lang/Integer`), `java/lang/StringBuilder` or `java/util/ArrayList`, resolved
-/// through the caller's loader. An array has no class identity yet; `Object` methods
-/// (including `getClass`, which reports a typed error) still dispatch, and any other
-/// method fails resolution normally.
+/// `StringBuilder`, an `ArrayList` or a `HashMap` has no `ClassId` of its own in the heap,
+/// so it dispatches from `java/lang/String`, `java/lang/Class`, its boxed class
+/// (`java/lang/Integer`), `java/lang/StringBuilder`, `java/util/ArrayList` or
+/// `java/util/HashMap`, resolved through the caller's loader. An array has no class
+/// identity yet; `Object` methods (including `getClass`, which reports a typed error) still
+/// dispatch, and any other method fails resolution normally.
 fn dispatch_class(
     shared: &Shared,
     current: ClassId,
@@ -961,6 +962,7 @@ fn dispatch_class(
         Enum(ClassId),
         StringBuilder,
         List,
+        Map,
         Array,
     }
 
@@ -976,6 +978,7 @@ fn dispatch_class(
             HeapObject::Enum(constant) => ReceiverKind::Enum(constant.class),
             HeapObject::StringBuilder(_) => ReceiverKind::StringBuilder,
             HeapObject::List(_) => ReceiverKind::List,
+            HeapObject::Map(_) => ReceiverKind::Map,
             HeapObject::Array(_) => ReceiverKind::Array,
         }
     };
@@ -991,6 +994,7 @@ fn dispatch_class(
             resolve_from(shared, current, rava_vm::collections::STRING_BUILDER_CLASS)
         }
         ReceiverKind::List => resolve_from(shared, current, rava_vm::collections::ARRAY_LIST_CLASS),
+        ReceiverKind::Map => resolve_from(shared, current, rava_vm::maps::HASH_MAP_CLASS),
         ReceiverKind::Array => resolve_from(shared, current, "java/lang/Object"),
     }
 }

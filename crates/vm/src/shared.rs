@@ -377,8 +377,9 @@ impl Shared {
     /// class (`java.lang.Integer`), an annotation reports
     /// `java.lang.annotation.Annotation` (its `annotationType()` names the annotation
     /// type), an enum constant reports its enum class, a `StringBuilder` reports
-    /// `java.lang.StringBuilder` and an `ArrayList` reports `java.util.ArrayList`; those
-    /// VM-level objects use the bootstrap class library as their identity. Array class
+    /// `java.lang.StringBuilder`, an `ArrayList` reports `java.util.ArrayList` and a
+    /// `HashMap` reports `java.util.HashMap`; those VM-level objects use the bootstrap
+    /// class library as their identity. Array class
     /// identity (`[I`, `[Ljava/lang/String;`) is not modeled in M2.4, so an array returns
     /// a typed error instead of a wrong class object.
     pub fn get_class(&self, reference: ObjRef) -> Result<ObjRef, VmError> {
@@ -392,6 +393,7 @@ impl Shared {
             Enum(ClassId),
             StringBuilder,
             List,
+            Map,
         }
 
         let kind = {
@@ -409,6 +411,7 @@ impl Shared {
                 HeapObject::Enum(constant) => Kind::Enum(constant.class),
                 HeapObject::StringBuilder(_) => Kind::StringBuilder,
                 HeapObject::List(_) => Kind::List,
+                HeapObject::Map(_) => Kind::Map,
                 HeapObject::Array(_) => {
                     return Err(VmError::Native(
                         "array class objects are not supported yet (M2.4)".to_owned(),
@@ -446,6 +449,10 @@ impl Shared {
             }
             Kind::List => {
                 let class = self.load_library_class(crate::collections::ARRAY_LIST_CLASS)?;
+                self.class_object(class)
+            }
+            Kind::Map => {
+                let class = self.load_library_class(crate::maps::HASH_MAP_CLASS)?;
                 self.class_object(class)
             }
         }
@@ -532,6 +539,9 @@ impl Shared {
             crate::collections::ARRAY_LIST_CLASS => {
                 return Ok(self.heap().allocate_list());
             }
+            crate::maps::HASH_MAP_CLASS => {
+                return Ok(self.heap().allocate_map());
+            }
             _ => {}
         }
         let layout = self.field_layout(class)?;
@@ -589,8 +599,8 @@ impl Shared {
     }
 
     /// Collect the VM roots: every non-null class static field, every cached class object
-    /// and reflected member, the references held by a heap list, plus the roots the given
-    /// threads' active frames published.
+    /// and reflected member, the references held by a heap list or map, plus the roots the
+    /// given threads' active frames published.
     ///
     /// The class table is snapshotted before any per-class statics lock is taken, and
     /// each statics lock is released before the next class is visited, so this never
@@ -668,22 +678,27 @@ impl Shared {
 
         {
             // A container holds references that are not themselves roots of the class
-            // table or a cache. The list's elements are enumerated here so a future
-            // collector sees them; there is no collector yet, so this over-retains an
-            // element whose list is otherwise unreachable, which is the honest state
-            // until M5 traverses the object graph.
+            // table or a cache. A list's elements and a map's keys and values are
+            // enumerated here so a future collector sees them; there is no collector yet,
+            // so this over-retains an element whose container is otherwise unreachable,
+            // which is the honest state until M5 traverses the object graph. A null
+            // key or value is stored by the map but is not a root, exactly as a null
+            // element is not one.
             let heap = self.heap.lock().expect("heap lock poisoned");
             for object in heap.live_objects() {
-                let HeapObject::List(elements) = object else {
-                    continue;
-                };
-                for value in elements {
-                    let Value::Ref(reference) = *value else {
-                        continue;
-                    };
-                    if !reference.is_null() && seen.insert(reference) {
-                        roots.push(reference);
+                match object {
+                    HeapObject::List(elements) => {
+                        for value in elements {
+                            push_container_root(&mut roots, &mut seen, *value);
+                        }
                     }
+                    HeapObject::Map(entries) => {
+                        for (key, value) in entries {
+                            push_container_root(&mut roots, &mut seen, *key);
+                            push_container_root(&mut roots, &mut seen, *value);
+                        }
+                    }
+                    _ => {}
                 }
             }
         }
@@ -790,5 +805,18 @@ impl Shared {
 
     pub fn stdout(&self) -> String {
         String::from_utf8_lossy(&self.stdout.lock().expect("stdout lock poisoned")).into_owned()
+    }
+}
+
+/// Add a container element to the root set unless it is null or already present.
+///
+/// A list element and a map key or value use the same rule: only a non-null reference is a
+/// root, and the first occurrence wins so the result is deterministic.
+fn push_container_root(roots: &mut Vec<ObjRef>, seen: &mut HashSet<ObjRef>, value: Value) {
+    let Value::Ref(reference) = value else {
+        return;
+    };
+    if !reference.is_null() && seen.insert(reference) {
+        roots.push(reference);
     }
 }

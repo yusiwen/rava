@@ -333,6 +333,13 @@ pub enum HeapObject {
     /// that reference must be enumerated by [`crate::Shared::roots`]. Lists are ordinary
     /// heap objects, not permanent roots.
     List(Vec<Value>),
+    /// A `java.util.HashMap`: its `(key, value)` entries in insertion order.
+    ///
+    /// A `Vec` of pairs is the whole representation: this slice has no hashing, tree
+    /// bins or resizing, and insertion order is stable. Keys and values are [`Value`]s, so
+    /// both can be references (null included) and [`crate::Shared::roots`] enumerates the
+    /// non-null ones. Maps are ordinary heap objects, not permanent roots.
+    Map(Vec<(Value, Value)>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -471,6 +478,13 @@ impl Heap {
         self.allocate(HeapObject::List(Vec::new()))
     }
 
+    /// Allocate an empty `java.util.HashMap`. The map's class is named by
+    /// [`crate::maps::HASH_MAP_CLASS`]; [`crate::Shared::allocate_instance`] is the entry
+    /// point that creates one for `new` and reflection.
+    pub fn allocate_map(&mut self) -> ObjRef {
+        self.allocate(HeapObject::Map(Vec::new()))
+    }
+
     /// Every live object, in slot order.
     ///
     /// Root enumeration uses this to reach the references a container such as a list
@@ -519,6 +533,28 @@ impl Heap {
             _ => Err(HeapError::WrongObjectKind {
                 reference,
                 expected: "a list",
+            }),
+        }
+    }
+
+    /// The `(key, value)` entries behind a `java.util.HashMap` reference.
+    pub fn map(&self, reference: ObjRef) -> Result<&[(Value, Value)], HeapError> {
+        match self.get(reference)? {
+            HeapObject::Map(entries) => Ok(entries),
+            _ => Err(HeapError::WrongObjectKind {
+                reference,
+                expected: "a map",
+            }),
+        }
+    }
+
+    /// The mutable `(key, value)` entries behind a `java.util.HashMap` reference.
+    pub fn map_mut(&mut self, reference: ObjRef) -> Result<&mut Vec<(Value, Value)>, HeapError> {
+        match self.get_mut(reference)? {
+            HeapObject::Map(entries) => Ok(entries),
+            _ => Err(HeapError::WrongObjectKind {
+                reference,
+                expected: "a map",
             }),
         }
     }

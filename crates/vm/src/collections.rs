@@ -30,7 +30,7 @@ use crate::VmError;
 use crate::heap::{HeapError, HeapObject, ObjRef};
 use crate::loader::LoaderId;
 use crate::shared::Shared;
-use crate::string::{string_from_utf16, utf16_units};
+use crate::string::{double_text, float_text, object_text, string_from_utf16, utf16_units};
 use crate::thread::ThreadState;
 use crate::value::Value;
 
@@ -347,89 +347,6 @@ fn append_text(
         .map_err(heap_error)?
         .push_str(text);
     Ok(Some(Value::Ref(receiver)))
-}
-
-/// The `String.valueOf(Object)`-shaped text of a reference.
-///
-/// A string and a builder contribute their content, a boxed `Integer` its decimal value,
-/// and null the text `"null"`. Any other object uses the VM's `Object.toString` shape
-/// (`ClassName@hexIdentityHash`) instead of dispatching a Java `toString` override: a VM
-/// native cannot re-enter the interpreter. An array has no class identity in this slice,
-/// so it is a typed error.
-fn object_text(
-    shared: &Shared,
-    reference: ObjRef,
-    method: &'static str,
-) -> Result<String, VmError> {
-    if reference.is_null() {
-        return Ok("null".to_owned());
-    }
-    enum Text {
-        Known(String),
-        Other,
-    }
-    let text = {
-        let heap = shared.heap();
-        match heap.get(reference).map_err(heap_error)? {
-            HeapObject::Str(text) => Text::Known(text.clone()),
-            HeapObject::StringBuilder(text) => Text::Known(text.clone()),
-            HeapObject::Boxed(boxed) => match boxed.as_int() {
-                Some(value) => Text::Known(value.to_string()),
-                None => Text::Other,
-            },
-            _ => Text::Other,
-        }
-    };
-    match text {
-        Text::Known(text) => Ok(text),
-        Text::Other => {
-            let name = crate::object::runtime_binary_name(shared, reference)
-                .map_err(|error| VmError::Native(format!("{method}: {error}")))?;
-            Ok(format!("{name}@{:x}", reference.identity_hash() as u32))
-        }
-    }
-}
-
-/// Java's shortest round-trip text for a `float`, with the mandatory `.0`.
-///
-/// The JDK's `Float.toString` chooses its own shortest representation; Rust's `Display`
-/// agrees for the ordinary values this slice covers, but an exponential value is printed
-/// in plain decimal here. The slice boundary records that difference.
-fn float_text(value: f32) -> String {
-    if value.is_nan() {
-        return "NaN".to_owned();
-    }
-    if value.is_infinite() {
-        return if value.is_sign_positive() {
-            "Infinity".to_owned()
-        } else {
-            "-Infinity".to_owned()
-        };
-    }
-    let mut text = format!("{value}");
-    if !text.contains(['.', 'e', 'E']) {
-        text.push_str(".0");
-    }
-    text
-}
-
-/// Java's shortest round-trip text for a `double`, with the mandatory `.0`.
-fn double_text(value: f64) -> String {
-    if value.is_nan() {
-        return "NaN".to_owned();
-    }
-    if value.is_infinite() {
-        return if value.is_sign_positive() {
-            "Infinity".to_owned()
-        } else {
-            "-Infinity".to_owned()
-        };
-    }
-    let mut text = format!("{value}");
-    if !text.contains(['.', 'e', 'E']) {
-        text.push_str(".0");
-    }
-    text
 }
 
 /// A UTF-16 unit index in `0..length`, or a typed `StringIndexOutOfBounds`.

@@ -102,6 +102,48 @@ pub fn register_natives(shared: &Shared) {
         "()Ljava/lang/String;",
         string_intern,
     );
+    shared.register_native(
+        "java/lang/String",
+        "valueOf",
+        "(Ljava/lang/Object;)Ljava/lang/String;",
+        string_value_of_object,
+    );
+    shared.register_native(
+        "java/lang/String",
+        "valueOf",
+        "(I)Ljava/lang/String;",
+        string_value_of_int,
+    );
+    shared.register_native(
+        "java/lang/String",
+        "valueOf",
+        "(J)Ljava/lang/String;",
+        string_value_of_long,
+    );
+    shared.register_native(
+        "java/lang/String",
+        "valueOf",
+        "(Z)Ljava/lang/String;",
+        string_value_of_boolean,
+    );
+    shared.register_native(
+        "java/lang/String",
+        "valueOf",
+        "(C)Ljava/lang/String;",
+        string_value_of_char,
+    );
+    shared.register_native(
+        "java/lang/String",
+        "valueOf",
+        "(F)Ljava/lang/String;",
+        string_value_of_float,
+    );
+    shared.register_native(
+        "java/lang/String",
+        "valueOf",
+        "(D)Ljava/lang/String;",
+        string_value_of_double,
+    );
 }
 
 /// The UTF-16 code units of `text`.
@@ -180,6 +222,49 @@ fn int_argument(args: &[Value], position: usize, method: &'static str) -> Result
 fn char_argument(args: &[Value], position: usize, method: &'static str) -> Result<u16, VmError> {
     let value = int_argument(args, position, method)?;
     u16::try_from(value).map_err(|_| VmError::Native(format!("{method} expects a char argument")))
+}
+
+fn long_argument(args: &[Value], position: usize, method: &'static str) -> Result<i64, VmError> {
+    match args.get(position).copied() {
+        Some(Value::Long(value)) => Ok(value),
+        Some(_) => Err(VmError::Native(format!("{method} expects a long argument"))),
+        None => Err(VmError::Native(format!("{method} is missing its argument"))),
+    }
+}
+
+fn float_argument(args: &[Value], position: usize, method: &'static str) -> Result<f32, VmError> {
+    match args.get(position).copied() {
+        Some(Value::Float(value)) => Ok(value),
+        Some(_) => Err(VmError::Native(format!(
+            "{method} expects a float argument"
+        ))),
+        None => Err(VmError::Native(format!("{method} is missing its argument"))),
+    }
+}
+
+fn double_argument(args: &[Value], position: usize, method: &'static str) -> Result<f64, VmError> {
+    match args.get(position).copied() {
+        Some(Value::Double(value)) => Ok(value),
+        Some(_) => Err(VmError::Native(format!(
+            "{method} expects a double argument"
+        ))),
+        None => Err(VmError::Native(format!("{method} is missing its argument"))),
+    }
+}
+
+/// A reference argument, including null.
+fn reference_argument(
+    args: &[Value],
+    position: usize,
+    method: &'static str,
+) -> Result<ObjRef, VmError> {
+    match args.get(position).copied() {
+        Some(Value::Ref(reference)) => Ok(reference),
+        Some(_) => Err(VmError::Native(format!(
+            "{method} expects a reference argument"
+        ))),
+        None => Err(VmError::Native(format!("{method} is missing its argument"))),
+    }
 }
 
 /// A `charAt` position: `0 <= index < length`.
@@ -505,6 +590,211 @@ fn string_intern(
 ) -> Result<Option<Value>, VmError> {
     let text = receiver_text(shared, receiver)?;
     Ok(Some(Value::Ref(shared.intern_string(&text))))
+}
+
+/// The `String.valueOf(Object)`-shaped text of a reference.
+///
+/// A string and a builder contribute their content, a boxed `Integer` its decimal value,
+/// and null the text `"null"`. Any other object uses the VM's `Object.toString` shape
+/// (`ClassName@hexIdentityHash`) instead of dispatching a Java `toString` override: a VM
+/// native cannot re-enter the interpreter. The shape is the one
+/// [`crate::object::runtime_binary_name`] and `ObjRef::identity_hash` produce for
+/// `Object.toString`, so the two agree wherever the JDK would call the default `toString`.
+/// An array has no class identity in this slice, so it is a typed error.
+///
+/// [`crate::collections`] reuses this for `StringBuilder.append(Object)`.
+pub(crate) fn object_text(
+    shared: &Shared,
+    reference: ObjRef,
+    method: &str,
+) -> Result<String, VmError> {
+    if reference.is_null() {
+        return Ok("null".to_owned());
+    }
+    enum Text {
+        Known(String),
+        Other,
+    }
+    let text = {
+        let heap = shared.heap();
+        match heap
+            .get(reference)
+            .map_err(|error| VmError::Native(error.to_string()))?
+        {
+            HeapObject::Str(text) => Text::Known(text.clone()),
+            HeapObject::StringBuilder(text) => Text::Known(text.clone()),
+            HeapObject::Boxed(boxed) => match boxed.as_int() {
+                Some(value) => Text::Known(value.to_string()),
+                None => Text::Other,
+            },
+            _ => Text::Other,
+        }
+    };
+    match text {
+        Text::Known(text) => Ok(text),
+        Text::Other => {
+            let name = crate::object::runtime_binary_name(shared, reference)
+                .map_err(|error| VmError::Native(format!("{method}: {error}")))?;
+            Ok(format!("{name}@{:x}", reference.identity_hash() as u32))
+        }
+    }
+}
+
+/// Java's shortest round-trip text for a `float`, with the mandatory `.0`.
+///
+/// The JDK's `Float.toString` chooses its own shortest representation; Rust's `Display`
+/// agrees for the ordinary values this slice covers, but an exponential value is printed
+/// in plain decimal here. The slice boundary records that difference.
+pub(crate) fn float_text(value: f32) -> String {
+    if value.is_nan() {
+        return "NaN".to_owned();
+    }
+    if value.is_infinite() {
+        return if value.is_sign_positive() {
+            "Infinity".to_owned()
+        } else {
+            "-Infinity".to_owned()
+        };
+    }
+    let mut text = format!("{value}");
+    if !text.contains(['.', 'e', 'E']) {
+        text.push_str(".0");
+    }
+    text
+}
+
+/// Java's shortest round-trip text for a `double`, with the mandatory `.0`.
+pub(crate) fn double_text(value: f64) -> String {
+    if value.is_nan() {
+        return "NaN".to_owned();
+    }
+    if value.is_infinite() {
+        return if value.is_sign_positive() {
+            "Infinity".to_owned()
+        } else {
+            "-Infinity".to_owned()
+        };
+    }
+    let mut text = format!("{value}");
+    if !text.contains(['.', 'e', 'E']) {
+        text.push_str(".0");
+    }
+    text
+}
+
+/// `String.valueOf(Object)`: the argument's text, with `String` returning itself.
+///
+/// A null argument is the interned text `"null"`, as on the JDK. A `String` argument is
+/// returned unchanged, which preserves reference identity; every other object goes through
+/// [`object_text`], so a boxed `Integer` becomes its decimal value and an object without a
+/// Java `toString` override gets `ClassName@hex`.
+fn string_value_of_object(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let reference = reference_argument(args, 0, "String.valueOf")?;
+    if reference.is_null() {
+        return Ok(Some(Value::Ref(shared.intern_string("null"))));
+    }
+    let is_string = {
+        let heap = shared.heap();
+        matches!(
+            heap.get(reference)
+                .map_err(|error| VmError::Native(error.to_string()))?,
+            HeapObject::Str(_)
+        )
+    };
+    if is_string {
+        return Ok(Some(Value::Ref(reference)));
+    }
+    let text = object_text(shared, reference, "String.valueOf")?;
+    Ok(Some(new_string(shared, text)))
+}
+
+/// `String.valueOf(int)`: the same decimal text `Integer.toString(int)` produces.
+fn string_value_of_int(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let text = int_argument(args, 0, "String.valueOf")?.to_string();
+    Ok(Some(new_string(shared, text)))
+}
+
+/// `String.valueOf(long)`: decimal text.
+fn string_value_of_long(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let text = long_argument(args, 0, "String.valueOf")?.to_string();
+    Ok(Some(new_string(shared, text)))
+}
+
+/// `String.valueOf(boolean)`: `"true"` for a non-zero `int`, `"false"` for zero.
+///
+/// The registry sees `boolean` as the `int` a Java verifier would have on the operand
+/// stack, so a non-zero value is true, exactly as `StringBuilder.append(boolean)` reads it.
+fn string_value_of_boolean(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let value = int_argument(args, 0, "String.valueOf")?;
+    let text = if value == 0 { "false" } else { "true" };
+    Ok(Some(new_string(shared, text.to_owned())))
+}
+
+/// `String.valueOf(char)`: a one-unit string.
+///
+/// A lone surrogate is a legal Java `char` but cannot be stored in the heap's UTF-8 text,
+/// so it is a typed [`VmError::UnpairedSurrogate`], the same choice the builder's `append`
+/// makes.
+fn string_value_of_char(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let unit = char_argument(args, 0, "String.valueOf")?;
+    let character = char::from_u32(u32::from(unit)).ok_or(VmError::UnpairedSurrogate {
+        method: "String.valueOf",
+    })?;
+    Ok(Some(new_string(shared, character.to_string())))
+}
+
+/// `String.valueOf(float)`: the same text `StringBuilder.append(float)` produces.
+fn string_value_of_float(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let value = float_argument(args, 0, "String.valueOf")?;
+    Ok(Some(new_string(shared, float_text(value))))
+}
+
+/// `String.valueOf(double)`: the same text `StringBuilder.append(double)` produces.
+fn string_value_of_double(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let value = double_argument(args, 0, "String.valueOf")?;
+    Ok(Some(new_string(shared, double_text(value))))
 }
 
 #[cfg(test)]
