@@ -10,7 +10,7 @@ status at the top of each document is authoritative.
 | State | [`requirements.md`](requirements.md), [`open-questions.md`](open-questions.md), [`../PROJECT.md`](../PROJECT.md) | what is true now | the ledger and the requirements win disagreements |
 | Decisions | [`adr/`](adr/) | why this and not the alternative | four sections, one status, numbered from 0001 |
 | Measurement | `benchmarks.md` (not created yet) | how fast, and what makes measuring hard | the only home of a performance number |
-| Explanation | `explanation/` (not created yet) | how a mechanism runs end to end | must quote real output |
+| Explanation | [`explanation/`](explanation/) | how a mechanism runs end to end | must quote real output; start at the [explanation index](explanation/README.md) |
 | History | `notes/` (not created yet) | what happened, and what it taught | one note per completed slice |
 
 The project starts with state and decisions. Measurement, explanation and history
@@ -24,6 +24,9 @@ documents are added when there is something to record.
 | [`open-questions.md`](open-questions.md) | state | all resolved answers Q1–Q18; a decision record |
 | [`adr/`](adr/) | decisions | 0001–0012, one decision per record |
 | [`adr/README.md`](adr/README.md) | index | the ADR table and the format rules |
+| [`explanation/README.md`](explanation/README.md) | explanation index | the implementation-document contract, current documents and the planned backlog |
+| [`explanation/c1-metadata.md`](explanation/c1-metadata.md) | explanation | C1 levels, the 1,011/36 `ct.sym` split, normalization, and what “differences 0” does and does not prove |
+| [`explanation/spring-context.md`](explanation/spring-context.md) | explanation | the real Spring `AnnotationConfigApplicationContext` path from `rava run` to the `hello` bean |
 | [`../stdlib/README.md`](../stdlib/README.md) | state | the two generated class libraries, and what each one is for |
 | [`../stdlib/c1/README.md`](../stdlib/c1/README.md) | state | the M2.2 JDK 17 C1 signature tree, its normalization boundary and its gates |
 

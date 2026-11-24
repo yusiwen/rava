@@ -362,6 +362,7 @@ Reactive web (Spring WebFlux) is a later target, not part of the first acceptanc
   scope ordering.
 - [Open questions](docs/open-questions.md) — the resolved decision record.
 - [ADR index](docs/adr/README.md) — the accepted decision stack.
+- [Explanation index](docs/explanation/README.md) — how the mechanisms run, starting with the C1 metadata diff and the Spring context.
 - [Project ledger](PROJECT.md) — phase status, milestones, decision log.
 
 Start with the requirements and the ADRs; the open questions are all resolved and
