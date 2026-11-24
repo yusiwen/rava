@@ -23,9 +23,13 @@
 //! [`crate::HeapObject::ArrayClass`] object for a component, its descriptor-form
 //! `getName`, `0x0411` modifiers, `isArray`, its component and `java.lang.Object`
 //! superclass, array descriptors in the same member types, and array class objects in a
-//! named lookup's `Class[]`. `Method.invoke` and `Constructor.newInstance` need the
-//! interpreter's execution machinery, so they live in `rava-interp` instead of this
-//! crate; annotations, generic types and access checks remain later slices.
+//! named lookup's `Class[]`. M2.28 adds the class-file predicate flags Spring's startup
+//! asks for: `Method.isBridge`, `Method`/`Constructor`/`Executable.isVarArgs` and
+//! `Field`/`Method`/`Constructor`/`Executable`/`Member.isSynthetic`, each read from the
+//! declaration's `ACC_BRIDGE`/`ACC_VARARGS`/`ACC_SYNTHETIC` bits. `Method.invoke` and
+//! `Constructor.newInstance` need the interpreter's execution machinery, so they live in
+//! `rava-interp` instead of this crate; annotations, generic types and access checks
+//! remain later slices.
 //!
 //! The natives read the class table rather than caching a second copy of the metadata:
 //! a class object is a [`crate::ClassId`], a [`crate::PrimitiveKind`] or an
@@ -72,6 +76,15 @@ const ARRAY_MODIFIERS: u16 = 0x0411;
 
 /// `ACC_INTERFACE` (JVMS §4.1).
 const ACC_INTERFACE: u16 = 0x0200;
+
+/// `ACC_BRIDGE` (JVMS §4.6): a compiler-generated bridge method.
+const ACC_BRIDGE: u16 = 0x0040;
+
+/// `ACC_VARARGS` (JVMS §4.6): the executable was declared with a variable arity.
+const ACC_VARARGS: u16 = 0x0080;
+
+/// `ACC_SYNTHETIC` (JVMS §4.1, §4.5, §4.6): the member does not appear in source.
+const ACC_SYNTHETIC: u16 = 0x1000;
 
 /// Registers the M2.4 class-object and M2.8 reflected-member natives.
 ///
@@ -290,6 +303,34 @@ pub fn register_natives(shared: &Shared) {
             member_get_declaring_class,
         );
     }
+    // The class-file predicate flags. Each declaration site gets its own registration
+    // because virtual dispatch resolves to the class that declares the stub method: the
+    // JDK declares `isSynthetic` on `Member` and `Executable`, redeclares it on `Field`,
+    // `Method` and `Constructor`, and declares `isVarArgs` on `Executable`, `Method`
+    // and `Constructor`. The flags themselves come from the parsed class-file metadata,
+    // never from the descriptor or the name.
+    for owner in [
+        "java/lang/reflect/Field",
+        "java/lang/reflect/Method",
+        "java/lang/reflect/Constructor",
+        "java/lang/reflect/Executable",
+        "java/lang/reflect/Member",
+    ] {
+        shared.register_native(owner, "isSynthetic", "()Z", member_is_synthetic);
+    }
+    for owner in [
+        "java/lang/reflect/Method",
+        "java/lang/reflect/Constructor",
+        "java/lang/reflect/Executable",
+    ] {
+        shared.register_native(owner, "isVarArgs", "()Z", member_is_var_args);
+    }
+    shared.register_native(
+        "java/lang/reflect/Method",
+        "isBridge",
+        "()Z",
+        method_is_bridge,
+    );
     shared.register_native(
         "java/lang/reflect/Field",
         "getType",
@@ -913,7 +954,6 @@ fn class_flags(shared: &Shared, receiver: ObjRef) -> Result<u16, VmError> {
 
 const ACC_ANNOTATION: u16 = 0x2000;
 const ACC_ENUM: u16 = 0x4000;
-const ACC_SYNTHETIC: u16 = 0x1000;
 
 fn class_is_annotation(
     shared: &Shared,
@@ -1718,12 +1758,59 @@ fn member_get_modifiers(
 ) -> Result<Option<Value>, VmError> {
     let member = member_of(shared, receiver)?;
     let flags = member_access_flags(shared, &member)?;
+    // The mask is the JDK's `Modifier.*Modifiers()` set for the member kind. A method's
+    // mask includes `bridge`, `varargs` and `synthetic`; a field's includes `synthetic`
+    // and `enum`; a constructor's is the three access bits only. That asymmetry is the
+    // JDK's: `Constructor.getModifiers()` does not expose `ACC_VARARGS`/`ACC_SYNTHETIC`,
+    // which `Constructor.isVarArgs()`/`isSynthetic()` report separately.
     let mask = match member.kind {
         MemberKind::Field => FIELD_MODIFIERS,
         MemberKind::Method => METHOD_MODIFIERS,
         MemberKind::Constructor => CONSTRUCTOR_MODIFIERS,
     };
     Ok(Some(Value::Int(i32::from(flags & mask))))
+}
+
+/// A class-file predicate flag of a member (`ACC_BRIDGE`, `ACC_VARARGS` or
+/// `ACC_SYNTHETIC`) read from the declaration's typed C1 metadata.
+///
+/// A member object whose declaration is absent from its class file has no flags to
+/// report, so that lookup is a typed [`VmError::Native`] rather than a fabricated
+/// `false`; a lookup miss is a broken member object, not a member with the flag unset.
+fn member_flag(shared: &Shared, receiver: ObjRef, flag: u16) -> Result<Option<Value>, VmError> {
+    let member = member_of(shared, receiver)?;
+    let flags = member_access_flags(shared, &member)?;
+    Ok(Some(Value::Int(i32::from(flags & flag != 0))))
+}
+
+fn member_is_synthetic(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    _args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    member_flag(shared, receiver, ACC_SYNTHETIC)
+}
+
+fn member_is_var_args(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    _args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    member_flag(shared, receiver, ACC_VARARGS)
+}
+
+fn method_is_bridge(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    _args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    member_flag(shared, receiver, ACC_BRIDGE)
 }
 
 fn member_get_declaring_class(

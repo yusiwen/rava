@@ -237,6 +237,19 @@ pub fn register_natives(shared: &Shared) {
         "(Ljava/util/Collection;)Z",
         abstract_collection_add_all,
     );
+    for class in [
+        ARRAY_LIST_CLASS,
+        LINKED_LIST_CLASS,
+        COPY_ON_WRITE_ARRAY_LIST_CLASS,
+        ARRAY_DEQUE_CLASS,
+    ] {
+        shared.register_native(
+            class,
+            "<init>",
+            "(Ljava/util/Collection;)V",
+            list_init_collection,
+        );
+    }
     register_list_iterator(shared, ARRAY_LIST_CLASS);
     register_list_iterator(shared, LINKED_LIST_CLASS);
     register_list_iterator(shared, COPY_ON_WRITE_ARRAY_LIST_CLASS);
@@ -310,6 +323,43 @@ pub fn register_natives(shared: &Shared) {
         "()V",
         abstract_collection_clear,
     );
+    // The JDK implements `removeAll`/`retainAll`/`containsAll` in `AbstractCollection`,
+    // overrides `removeAll` in `AbstractSet`, and redeclares the bulk operations on the
+    // interfaces and on the concurrent collections whose stubs carry their own copy. Each
+    // declaration site a virtual call can resolve to needs its own registry entry.
+    for class in [
+        "java/util/AbstractCollection",
+        "java/util/AbstractSet",
+        "java/util/Collection",
+        "java/util/List",
+        "java/util/Set",
+        ARRAY_LIST_CLASS,
+        LINKED_LIST_CLASS,
+        COPY_ON_WRITE_ARRAY_LIST_CLASS,
+        ARRAY_DEQUE_CLASS,
+        HASH_SET_CLASS,
+        "java/util/concurrent/CopyOnWriteArraySet",
+        "java/util/concurrent/ConcurrentHashMap$KeySetView",
+    ] {
+        shared.register_native(
+            class,
+            "removeAll",
+            "(Ljava/util/Collection;)Z",
+            abstract_collection_remove_all,
+        );
+        shared.register_native(
+            class,
+            "retainAll",
+            "(Ljava/util/Collection;)Z",
+            abstract_collection_retain_all,
+        );
+        shared.register_native(
+            class,
+            "containsAll",
+            "(Ljava/util/Collection;)Z",
+            abstract_collection_contains_all,
+        );
+    }
     shared.register_native(
         abstract_collection,
         "toArray",
@@ -1164,6 +1214,30 @@ fn array_list_init(
     Ok(None)
 }
 
+/// `ArrayList(Collection)`/`LinkedList(Collection)`/`ArrayDeque(Collection)`/
+/// `CopyOnWriteArrayList(Collection)`: copy the source in iteration order.
+///
+/// A list keeps duplicates, so the copy is the source sequence unchanged; a null source
+/// is the JDK's `NullPointerException` and is reported as a typed native error.
+fn list_init_collection(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let collection = reference_argument(args, 0, "List.<init>")?;
+    let source = collection_elements(shared, collection, "List.<init>")?;
+    if receiver.is_null() {
+        return Err(null_receiver("List.<init>"));
+    }
+    let mut heap = shared.heap();
+    let list = heap.list_mut(receiver).map_err(heap_error)?;
+    list.clear();
+    list.extend(source);
+    Ok(None)
+}
+
 fn array_list_init_capacity(
     shared: &Shared,
     _thread: &ThreadState,
@@ -1452,10 +1526,23 @@ fn set_init(
     if let Some(Value::Ref(collection)) = args.first().copied() {
         if !collection.is_null() {
             let source = collection_elements(shared, collection, "Set.<init>")?;
+            // A `Set` constructor copies the source as a set, so a repeated element
+            // (including `null`) contributes once, in first-occurrence order. The JDK's
+            // `LinkedHashSet(Collection)` does not sort; insertion order is observable
+            // through iteration here just as it is there.
+            let mut unique = Vec::with_capacity(source.len());
+            {
+                let heap = shared.heap();
+                for value in source {
+                    if !contains_value(&heap, &unique, value)? {
+                        unique.push(value);
+                    }
+                }
+            }
             let mut heap = shared.heap();
             let set = heap.set_mut(receiver).map_err(heap_error)?;
             set.clear();
-            set.extend(source);
+            set.extend(unique);
         }
     }
     let _ = elements;
@@ -2056,6 +2143,157 @@ fn abstract_collection_remove(
         None => false,
     };
     Ok(Some(Value::Int(i32::from(removed))))
+}
+
+/// A snapshot of a list's or set's elements, rejecting anything else.
+fn collection_values(
+    shared: &Shared,
+    reference: ObjRef,
+    method: &'static str,
+) -> Result<Vec<Value>, VmError> {
+    if reference.is_null() {
+        return Err(null_receiver(method));
+    }
+    let heap = shared.heap();
+    match heap.get(reference).map_err(heap_error)? {
+        HeapObject::List(list) => Ok(list.elements.clone()),
+        HeapObject::Set(set) => Ok(set.elements.clone()),
+        _ => Err(VmError::Native(format!(
+            "{method} receiver is not a java.util.Collection"
+        ))),
+    }
+}
+
+/// Replace a list's or set's elements with `values`, keeping the receiver's identity.
+fn replace_collection(
+    shared: &Shared,
+    receiver: ObjRef,
+    values: Vec<Value>,
+    method: &'static str,
+) -> Result<(), VmError> {
+    let mut heap = shared.heap();
+    match heap.get(receiver).map_err(heap_error)? {
+        HeapObject::List(_) => {
+            let list = heap.list_mut(receiver).map_err(heap_error)?;
+            list.clear();
+            list.extend(values);
+        }
+        HeapObject::Set(_) => {
+            let set = heap.set_mut(receiver).map_err(heap_error)?;
+            set.clear();
+            set.extend(values);
+        }
+        _ => {
+            return Err(VmError::Native(format!(
+                "{method} receiver is not a java.util.Collection"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Is `probe` equal to any element of `values` by the collection equality rule?
+fn contains_any(heap: &Heap, values: &[Value], probe: Value) -> Result<bool, VmError> {
+    for value in values {
+        if values_equal(heap, *value, probe).map_err(heap_error)? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// `Collection.removeAll(Collection)`: drop every element the argument contains,
+/// reporting whether the collection changed.
+///
+/// The argument is read first, so the receiver's heap lock is never held while the
+/// argument is inspected. A receiver that is the argument itself loses every element,
+/// which is what the JDK's `AbstractSet.removeAll` does.
+fn abstract_collection_remove_all(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let argument = reference_argument(args, 0, "Collection.removeAll")?;
+    if argument == receiver {
+        let elements = collection_values(shared, receiver, "Collection.removeAll")?;
+        let removed = !elements.is_empty();
+        replace_collection(shared, receiver, Vec::new(), "Collection.removeAll")?;
+        return Ok(Some(Value::Int(i32::from(removed))));
+    }
+    let source = collection_values(shared, argument, "Collection.removeAll")?;
+    let elements = collection_values(shared, receiver, "Collection.removeAll")?;
+    let original_len = elements.len();
+    let kept = {
+        let heap = shared.heap();
+        let mut kept = Vec::with_capacity(original_len);
+        for value in elements {
+            if !contains_any(&heap, &source, value)? {
+                kept.push(value);
+            }
+        }
+        kept
+    };
+    let changed = kept.len() != original_len;
+    if changed {
+        replace_collection(shared, receiver, kept, "Collection.removeAll")?;
+    }
+    Ok(Some(Value::Int(i32::from(changed))))
+}
+
+/// `Collection.retainAll(Collection)`: keep only the elements the argument contains,
+/// reporting whether the collection changed.
+fn abstract_collection_retain_all(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let argument = reference_argument(args, 0, "Collection.retainAll")?;
+    let source = collection_values(shared, argument, "Collection.retainAll")?;
+    let elements = collection_values(shared, receiver, "Collection.retainAll")?;
+    let original_len = elements.len();
+    let kept = {
+        let heap = shared.heap();
+        let mut kept = Vec::with_capacity(original_len);
+        for value in elements {
+            if contains_any(&heap, &source, value)? {
+                kept.push(value);
+            }
+        }
+        kept
+    };
+    let changed = kept.len() != original_len;
+    if changed {
+        replace_collection(shared, receiver, kept, "Collection.retainAll")?;
+    }
+    Ok(Some(Value::Int(i32::from(changed))))
+}
+
+/// `Collection.containsAll(Collection)`: whether every argument element is present.
+fn abstract_collection_contains_all(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let argument = reference_argument(args, 0, "Collection.containsAll")?;
+    let source = collection_values(shared, argument, "Collection.containsAll")?;
+    let elements = collection_values(shared, receiver, "Collection.containsAll")?;
+    let mut all = true;
+    {
+        let heap = shared.heap();
+        for value in source {
+            if !contains_any(&heap, &elements, value)? {
+                all = false;
+                break;
+            }
+        }
+    }
+    Ok(Some(Value::Int(i32::from(all))))
 }
 
 fn abstract_collection_clear(

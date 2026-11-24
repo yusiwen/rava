@@ -276,9 +276,25 @@ platform type named only by `[Ljava/lang/annotation/ElementType;` or
 `@Target(ElementType.TYPE)` becomes a manifest owner. The re-baselined manifest has 1047
 classes, both committed stub trees have 1047 class files, and
 `compat/surface/c1-unreferenced.txt` lists 36 owners; `compat check` and
-`compat metadata --check` exit 0. The re-baseline cleared `ElementType`; the startup now
-stops at `Method.isBridge()Z`, a runtime gap with no native implementation and no `Code`
-in the C1 tree, so M2.23 stays blocked. The M2 gate is not claimed.
+`compat metadata --check` exit 0. The re-baseline cleared `ElementType` and exposed
+`Method.isBridge()Z`, a runtime gap with no native implementation and no `Code` in the
+C1 tree. **M2.28 is done (2026-11-24):** the reflected-member predicate flags read the
+parsed class-file bits, never an inference: `Method.isBridge()`, `Method`/`Constructor`/
+`Executable.isVarArgs()` and `Field`/`Method`/`Constructor`/`Executable`/`Member.isSynthetic()`
+answer from `ACC_BRIDGE`/`ACC_VARARGS`/`ACC_SYNTHETIC`, and `getModifiers()` keeps the
+JDK's `Modifier` masks (a method's includes bridge/varargs/synthetic, a constructor's is
+the three access bits). A member absent from its class file is a typed native error, not
+a fabricated `false`. The Spring rerun then exposed and this slice fixed set-constructor
+deduplication, the `(Collection)` copy constructors on `ArrayList`/`LinkedList`/
+`ArrayDeque`/`CopyOnWriteArrayList`, `removeAll`/`retainAll`/`containsAll` over the heap
+collections, and callback dispatch that resolves `compare`/`accept`/`apply` up the
+receiver's superclass chain (Spring's `AnnotationAwareOrderComparator` inherits `compare`
+from `OrderComparator`). A committed `demo.FlagsProbe` fixture pins the exact flags plus
+those fixes (`cargo test -p rava-interp --test method_flags`). The Spring acceptance now
+gets past the bridge check and stops at
+`java/text/MessageFormat.<init>(Ljava/lang/String;)V`, which Spring's
+`AbstractMessageSource` static initializer builds; M2.23 stays blocked. The M2 gate is
+not claimed.
 
 ## What this project is
 

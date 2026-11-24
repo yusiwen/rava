@@ -195,7 +195,12 @@ fn runtime_class(shared: &Shared, reference: ObjRef) -> Result<ClassId, VmError>
 
 /// Resolve an instance method on `start` or a superclass. Mirrors the interpreter's
 /// virtual-resolution walk, so a callback object that inherits its SAM still runs.
-fn resolve_instance_class(
+///
+/// The callback natives in [`crate::callbacks`] use the same walk: Spring sorts with an
+/// `AnnotationAwareOrderComparator` whose `compare` is declared on its `OrderComparator`
+/// superclass, and the callback dispatch must find that declaration rather than stop at
+/// the runtime class.
+pub(crate) fn resolve_instance_class(
     shared: &Shared,
     start: ClassId,
     name: &str,

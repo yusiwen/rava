@@ -19,10 +19,11 @@
 //! the same thread would deadlock.
 
 use rava_vm::{
-    ClassId, HeapObject, LambdaObject, LambdaTarget, LambdaTargetKind, LoaderId, ObjRef, Shared,
+    HeapObject, LambdaObject, LambdaTarget, LambdaTargetKind, LoaderId, ObjRef, Shared,
     ThreadState, Value, VmError,
 };
 
+use crate::streams::resolve_instance_class;
 use crate::{InterpError, lambda, run_instance_method};
 
 /// The `Function.apply(Object)Object` descriptor.
@@ -268,10 +269,11 @@ fn invoke_accept(
         lambda::invoke_sam(shared, thread, &lambda, vec![argument]).map_err(interp_to_vm)?;
         return Ok(());
     }
-    let class: ClassId = {
+    let class = {
         let heap = shared.heap();
         heap.object_class(consumer).map_err(heap_error)?
     };
+    let class = resolve_instance_class(shared, class, "accept", "(Ljava/lang/Object;)V")?;
     run_instance_method(
         shared,
         thread,
@@ -367,10 +369,11 @@ fn invoke_compare(
     let result = if let Some(lambda) = lambda {
         lambda::invoke_sam(shared, thread, &lambda, vec![left, right]).map_err(interp_to_vm)?
     } else {
-        let class: ClassId = {
+        let class = {
             let heap = shared.heap();
             heap.object_class(comparator).map_err(heap_error)?
         };
+        let class = resolve_instance_class(shared, class, "compare", COMPARATOR_COMPARE)?;
         run_instance_method(
             shared,
             thread,
@@ -413,10 +416,11 @@ fn invoke_apply(
             .map_err(interp_to_vm)
             .map(|value| value.unwrap_or(Value::Ref(ObjRef::NULL)));
     }
-    let class: ClassId = {
+    let class = {
         let heap = shared.heap();
         heap.object_class(function).map_err(heap_error)?
     };
+    let class = resolve_instance_class(shared, class, "apply", FUNCTION_APPLY)?;
     run_instance_method(
         shared,
         thread,
@@ -516,10 +520,11 @@ fn invoke_to_int(
     let result = if let Some(lambda) = lambda {
         lambda::invoke_sam(shared, thread, &lambda, vec![argument]).map_err(interp_to_vm)?
     } else {
-        let class: ClassId = {
+        let class = {
             let heap = shared.heap();
             heap.object_class(function).map_err(heap_error)?
         };
+        let class = resolve_instance_class(shared, class, "applyAsInt", TO_INT_APPLY_AS_INT)?;
         run_instance_method(
             shared,
             thread,
