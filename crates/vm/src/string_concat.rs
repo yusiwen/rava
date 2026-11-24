@@ -17,8 +17,9 @@
 //! constant must be consumed exactly once; a recipe that names more or fewer than the call
 //! site supplies is a typed error instead of a partial string.
 //!
-//! Only `StringConcatFactory` is implemented. Any other bootstrap, including
-//! `LambdaMetafactory`, is [`crate::VmError::UnsupportedBootstrapMethod`].
+//! This module implements only `StringConcatFactory`. The interpreter routes a
+//! `LambdaMetafactory` call site to its own lambda path; any other bootstrap that reaches
+//! here is [`crate::VmError::UnsupportedBootstrapMethod`].
 
 use rava_classfile::{BootstrapArgument, BootstrapMethodEntry};
 
@@ -151,7 +152,7 @@ fn concat_with_recipe(
                         constants.len()
                     )));
                 };
-                text.push_str(&constant_text(value));
+                text.push_str(&constant_text(value)?);
                 constant += 1;
             }
             other => text.push(other),
@@ -178,16 +179,28 @@ fn concat_with_recipe(
 /// A `String` is itself, a primitive is its Java text, and a `Class` contributes the
 /// dotted binary name (this VM's `Class` objects have no JDK `Class.toString` shape; the
 /// name is the useful static form). A class constant does not load or initialize the
-/// class.
-fn constant_text(argument: &BootstrapArgument) -> String {
-    match argument {
+/// class. A `MethodType` or `MethodHandle` argument cannot appear in a
+/// `StringConcatFactory` recipe, so it is a typed error instead of a rendered value.
+fn constant_text(argument: &BootstrapArgument) -> Result<String, VmError> {
+    Ok(match argument {
         BootstrapArgument::String(text) => text.clone(),
         BootstrapArgument::Class(name) => name.replace('/', "."),
         BootstrapArgument::Integer(value) => value.to_string(),
         BootstrapArgument::Long(value) => value.to_string(),
         BootstrapArgument::Float(value) => float_text(*value),
         BootstrapArgument::Double(value) => double_text(*value),
-    }
+        BootstrapArgument::MethodType(descriptor) => {
+            return Err(VmError::Native(format!(
+                "a StringConcatFactory recipe cannot use the MethodType constant {descriptor}"
+            )));
+        }
+        BootstrapArgument::MethodHandle(handle) => {
+            return Err(VmError::Native(format!(
+                "a StringConcatFactory recipe cannot use the method handle {}.{}{}",
+                handle.owner, handle.name, handle.descriptor
+            )));
+        }
+    })
 }
 
 /// The text one dynamic argument contributes, according to its parameter descriptor.

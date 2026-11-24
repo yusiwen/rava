@@ -7,7 +7,8 @@
 
 > Ledger. P0 and P1 were accepted on 2026-11-23. M1 is complete; M2 is in progress
 > (M2.1, M2.2, M2.3, M2.4, M2.5, M2.6, M2.7, M2.8, M2.9, M2.10, M2.11, M2.12,
-> M2.13, M2.14, M2.15, M2.16, M2.17 and M2.18 done). Keep this file honest and terse.
+> M2.13, M2.14, M2.15, M2.16, M2.17, M2.18 and M2.19 done). Keep this file honest and
+> terse.
 
 ## Phase status
 
@@ -28,7 +29,7 @@ release process, if wanted, becomes its own phase.
 > Gates are defined in `docs/requirements.md` § Milestones. P0 and P1 are accepted;
 > M0 and M1 are complete, and both gate reviews have passed. M2 is in progress, with
 > M2.1, M2.2, M2.3, M2.4, M2.5, M2.6, M2.7, M2.8, M2.9, M2.10, M2.11, M2.12, M2.13,
-> M2.14, M2.15, M2.16, M2.17 and M2.18 done.
+> M2.14, M2.15, M2.16, M2.17, M2.18 and M2.19 done.
 
 | Milestone | Delivers | Gate | Status |
 | :--- | :--- | :--- | :--- |
@@ -77,12 +78,12 @@ release process, if wanted, becomes its own phase.
 | M2.16 | Array `Class` identity and array member types | R3 | `cargo test -p rava-interp --test array_classes` exits 0 | done |
 | M2.17 | `ldc`/`ldc_w` class constants and class literals | R3 | `cargo test -p rava-interp --test class_literals` exits 0 | done |
 | M2.18 | `invokedynamic` string concatenation | R3 | `cargo test -p rava-interp --test invokedynamic_concat` exits 0 | done |
-| M2.19 | Lambda metafactory and `invokeinterface` | R3 | `cargo test -p rava-interp --test lambdas` exits 0 | todo |
+| M2.19 | Lambda metafactory and `invokeinterface` | R3 | `cargo test -p rava-interp --test lambdas` exits 0 | done |
 
 P0 and P1 are accepted; P2 is done because the M2 increments are sliced. All M0 and
 M1 slices are done, and both gate reviews passed. M2.1, M2.2, M2.3, M2.4, M2.5,
-M2.6, M2.7, M2.8, M2.9, M2.10, M2.11, M2.12, M2.13, M2.14, M2.15, M2.16, M2.17 and
-M2.18 are done; M2.19 is next.
+M2.6, M2.7, M2.8, M2.9, M2.10, M2.11, M2.12, M2.13, M2.14, M2.15, M2.16, M2.17,
+M2.18 and M2.19 are done; M2.20 is next.
 
 ## Slice log
 
@@ -118,6 +119,7 @@ M2.18 are done; M2.19 is next.
 | M2.16 | `cargo test -p rava-interp --test array_classes` | 0 | 2026-11-24 | `ClassRef` (a named class, a primitive or a nested array) and `ArrayClass` (a component) describe a class identity beyond `ClassId`; `HeapObject::ArrayClass(ArrayClass)` is a heap kind distinct from `HeapObject::Class(ClassId)` and `HeapObject::PrimitiveClass(PrimitiveKind)`, and `Array` gains the `component` its allocation named, so `newarray`/`anewarray`/`multianewarray` and `String.toCharArray` carry an exact component; `Shared::array_class` is the one-object-per-component cache, with its own lock, a no-lock probe entry and `Shared::roots` entries, and `Shared::get_class` reports an array's array class; `Class.forName` accepts `[I`, `[[I` and `[Ljava.lang.String;` (dotted or internal component names) and returns that cached object, whose `getName` is the JDK descriptor form, `getModifiers` is `0x0411` (`public abstract final`), `isArray` is true, `isPrimitive`/`isInterface` are false, `getComponentType` is the primitive, named or nested-array component class object, and `getSuperclass` is `java.lang.Object` for primitive and reference arrays; `Field.getType`, `Method.getReturnType`/`getParameterTypes` and `Constructor.getParameterTypes` resolve array descriptors through the declaring class's loader, and the named lookups build the exact array descriptor from array `Class[]` entries (`([I)[I`, `([I[Ljava/lang/String;)V`), while a mismatch is the documented null miss; an array class declares no members, so its declared-member arrays are empty and its named lookups are null misses; a malformed array descriptor (`[Q`, `[V`, `[L;`) and a missing named component are typed errors, and a `Class.forName` array resolves only through the bootstrap loader; the assembled `Bean`/`ArrayClassProbe` fixture (an `int[]`, `String[]` and `int[][]` field, `()V`/`([I)V`/`([I[Ljava/lang/String;)V` constructors and `([I)[I`/`([Ljava/lang/String;)[Ljava/lang/String;` methods) asserts names, flags, component identities, `getClass` on `new int[...]`/`new String[...]`/`new int[...][...]`, member types, named lookup hits and misses, and root/cache stability; 6 new tests; `cargo test -p rava-interp` 125, `rava-vm` 47, `rava-classfile` 50 and `rava-cli` 67 pass, workspace 289; `cargo xtask ci` exits 0 |
 | M2.17 | `cargo test -p rava-interp --test class_literals` | 0 | 2026-11-24 | `ldc`/`ldc_w` decode a `CONSTANT_Class` into `Instr::LdcClass(name)` and execute by resolving through the executing frame's loader: a named class through `load_class`, a primitive name through `Shared::primitive_class` and an array descriptor through `Shared::class_ref_for_descriptor`, so a child loader's own class keeps its identity while a library class still delegates to the bootstrap loader; the class is loaded but not initialized (JVMS §5.4.3); `ldc` of a `String` still interns, `ldc_w`'s u2 index is decoded, and `Integer`/`Float`/`Long`/`Double` and every other constant kind are typed decode errors (there is no `ldc2_w`); repeated execution pushes the same cached `ObjRef` from the class, primitive and array caches, which `Shared::roots` enumerates; `if_acmpeq`/`if_acmpne` were added so the fixture can compare two literals with `==`; the assembled `ClassLiteralProbe` covers `String.class`, `int.class`, `int[].class`, `String[].class`, `int[].class.getName()` and `int.class == int.class`, and one class constant above index 255 exercises `ldc_w`; a `ChildLiteralProbe` defined in a child `MapSource` loader proves the loader-relative resolution; a missing class (`VmError::ClassNotFound`), a malformed `[Q`/`[V`/`[L;` descriptor (`VmError::Native`) and a `Long` constant (`InterpError::Decode`) are typed errors; 5 new tests; `cargo test -p rava-interp` 130, `rava-vm` 47, `rava-classfile` 50 and `rava-cli` 67 pass, workspace 294; |
 | M2.18 | `cargo test -p rava-interp --test invokedynamic_concat` | 0 | 2026-11-24 | `CONSTANT_InvokeDynamic` at opcode `0xba` decodes its u2 index, its reserved zero bytes, its call-site name and descriptor and its bootstrap method index; `ClassFile::bootstrap_method` materializes a `BootstrapMethods` entry on demand as a `REF_invokeStatic` handle plus `String`/`Class`/`int`/`long`/`float`/`double` static arguments, and an out-of-range index, a non-`MethodHandle` reference, a non-static handle or an unsupported argument is `Error::BadBootstrapMethod`; `rava-vm`'s `string_concat` module implements `StringConcatFactory.makeConcat` (every argument, no recipe) and `makeConcatWithConstants` (`\u0001` consumes the next dynamic argument, `\u0002` the next recipe constant, and both sides must be consumed exactly), converts dynamic arguments through the M2.9/M2.13 `String.valueOf` rules (String, boxed Integer, null, int/long/boolean/char/float/double, Object `ClassName@hex`) and pushes an interned String result; any other bootstrap owner or method is `VmError::UnsupportedBootstrapMethod`; the committed release-17 `demo/ConcatProbe` carries four javac-emitted `makeConcatWithConstants` call sites, one using a `\u0002` recipe constant, and assembled probes cover `makeConcat`, every supported primitive descriptor, static recipe constants, a recipe/descriptor mismatch and the malformed and out-of-range bootstrap references; 13 tests; `cargo test -p rava-interp` 143, `rava-vm` 47, `rava-classfile` 50 and `rava-cli` 67 pass, workspace 307; `cargo xtask ci` exits 0; |
+| M2.19 | `cargo test -p rava-interp --test lambdas` | 0 | 2026-11-24 | `invokeinterface` (`0xb9`) decodes its u2 interface-method reference, u1 argument count and u1 reserved zero byte (a non-zero byte is a decode error) and executes: the interface method is resolved on the receiver's runtime class first, then as a default method in the instruction's interface hierarchy, and the ordinary native-registry-before-`Code` path runs it; a class chain without the method falls back to a declaration in the interface hierarchy, an interface-assignability check rejects a wrong receiver with a typed `NotAssignable`, and a missing transitive interface in the C1 tree is skipped instead of masking the result. `HeapObject::Lambda` carries the functional-interface `ClassId`, the SAM name and `samMethodType` descriptor, the `instantiatedMethodType`, a target (owner `ClassId`, name, descriptor and static/instance/constructor kind) and the captured `Value`s; the lambda's class identity is the interface (there is no synthetic class file), `Shared::get_class`/`Object.toString` report that interface and `Shared::roots` enumerates the captured references. `LambdaMetafactory.metafactory` and `altMetafactory` parse their `MethodType`/`MethodHandle` static arguments (the class-file `BootstrapMethods` view now types both), capture the call-site arguments and create the lambda; the SAM call concatenates captured and call arguments, uses the first value as the receiver for an instance target, allocates for a constructor target, and runs through the existing `run_static_method`/`run_instance_method`; `altMetafactory` rejects `FLAG_SERIALIZABLE` and skips marker/bridge tables. The committed release-17 fixture (`demo/IntFn`, `demo/Sink`, `demo/IntFnImpl`, `demo/SinkFactory`, `demo/LambdaProbe`) covers a capturing static lambda, a no-argument void `Runnable`, static/unbound/bound/constructor method references and ordinary/String/ArrayList receivers through `invokeinterface`; assembled probes cover `altMetafactory`, a wrong receiver, a wrong SAM name, an unsupported bootstrap owner, a serializable flag and missing metafactory arguments; 13 tests; `cargo test -p rava-interp` 156, `rava-vm` 47, `rava-classfile` 50 and `rava-cli` 67 pass, workspace 320; `cargo xtask ci` exits 0; |
 
 M0.6 boundary: the reference and class-unloading hooks are registration points only.
 M0 has no collector, so no weak/soft/phantom reference is cleared and no class is
@@ -650,6 +652,46 @@ remain later slices. The `lload`/`fload`/`dload` forms were added only so the as
 probe can hand a long/float/double argument to a call site; the interpreter still keeps
 one local per argument rather than widening long/double to two slots.
 
+
+M2.19 boundary: a lambda is `HeapObject::Lambda`, carrying the functional interface's
+`ClassId`, the SAM name and `samMethodType` descriptor, the `instantiatedMethodType`, the
+implementation target (owner `ClassId`, name, descriptor and a static/instance/constructor
+kind) and the captured `Value`s. Its class identity is the interface, not a generated
+class: the VM writes no class file for a lambda, so `getClass()` reports the interface's
+class object (where the JDK reports a hidden synthetic class), `Object.toString` keeps the
+M2.9 `InterfaceName@hex` shape, and `equals`/`hashCode` stay reference identity. The
+captured values are ordinary heap references and `Shared::roots` enumerates them; a
+lambda is not a permanent root. The target kinds are `REF_invokeStatic`,
+`REF_invokeVirtual`/`REF_invokeSpecial`/`REF_invokeInterface` and
+`REF_newInvokeSpecial`; the call passes captured values followed by the SAM arguments, an
+instance target takes the first value as its receiver, and a constructor target allocates
+the owner and runs `<init>`. There is no argument adaptation: boxing, unboxing, widening,
+a cast to the instantiated type, generic bridge dispatch and captured primitive edge cases
+(other than storing the primitive `Value` unchanged and requiring the target parameter's
+exact representation) are typed `InterpError::Lambda` errors. A method handle that
+names a field is a class-file error, because only method handles are typed.
+
+`altMetafactory` parses its flag word: `FLAG_SERIALIZABLE` is a typed error, while
+`FLAG_MARKERS` and `FLAG_BRIDGES` are consumed and ignored because this representation has
+no marker-interface or bridge table. There is no `SerializedLambda`, `$deserializeLambda$`,
+`MethodHandle`/`VarHandle` execution, call-site caching, access check or exception-object
+synthesis for a malformed lambda.
+
+`invokeinterface` resolves the instruction's interface through the executing frame's
+loader, then selects the method on the receiver's runtime class first and on a default
+method in the interface hierarchy second; the native registry wins over `Code` at each
+step. A lambda receiver must match the instruction's interface and its recorded SAM
+name/descriptor. Any other receiver must be interface-assignable to the instruction's
+interface, which is checked by walking superclasses and interface lists; a wrong receiver is
+a typed `NotAssignable`. The C1 class tree omits a few transitive interfaces (for example
+`java.lang.constant.Constable` on `String`), so a missing interface during that walk is
+skipped while a missing class elsewhere is still a loader error. Arrays keep M2.16's
+`java/lang/Object` dispatch; there is no interface `default`-method selection beyond the
+first declaration in the interface walk. `pop` (`0x57`) was added only so the fixture can
+discard `ArrayList.add`'s boolean result; `pop2` and the rest of the opcode space remain
+absent. Serialization, method handles and Spring stay out of this boundary; M2.20 is
+next.
+
 ## Decision log
 
 | ADR | Decision | Status |
@@ -739,7 +781,11 @@ A fresh session should:
     opcode `0xba` decoding, and `StringConcatFactory.makeConcat`/
     `makeConcatWithConstants` over the M2.9/M2.13 value conversion, with a committed
     release-17 fixture and assembled call sites
-    (`cargo test -p rava-interp --test invokedynamic_concat`). M2.19 is next.
+    (`cargo test -p rava-interp --test invokedynamic_concat`). M2.19 landed simple lambdas
+    and `invokeinterface`: the `HeapObject::Lambda` representation, `LambdaMetafactory`'s
+    `metafactory`/`altMetafactory` bootstraps, SAM dispatch through the existing
+    static/instance machinery, and the committed release-17 lambda fixture
+    (`cargo test -p rava-interp --test lambdas`). M2.20 is next.
 4. Do not write runtime code outside a defined slice.
 
 ## Open decisions

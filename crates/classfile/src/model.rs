@@ -74,9 +74,12 @@ pub struct BootstrapMethod {
 
 /// A bootstrap method's `CONSTANT_MethodHandle`, resolved to the member it names.
 ///
-/// M2.18 only executes `invokedynamic` call sites whose bootstrap is a static method, so
-/// the resolution accepts `REF_invokeStatic` only. The owner, name and descriptor are
-/// copied out of the constant pool; nothing is loaded.
+/// The owner, name and descriptor are copied out of the constant pool; nothing is loaded.
+/// The bootstrap method itself must be a `REF_invokeStatic` method handle (JVMS §5.4.3.5),
+/// which [`ClassFile::bootstrap_method`] enforces. A handle used as a *static argument*
+/// may have any method reference kind, which is what `LambdaMetafactory` needs for an
+/// implementation method (`REF_invokeVirtual`, `REF_invokeSpecial`, `REF_invokeInterface`
+/// or `REF_newInvokeSpecial` included).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BootstrapMethodHandle {
     pub reference_kind: ReferenceKind,
@@ -88,7 +91,8 @@ pub struct BootstrapMethodHandle {
 /// One static argument of a bootstrap method.
 ///
 /// JVMS §4.7.23 allows the loadable constants; this VM implements the scalar and text
-/// kinds it can convert, and rejects the rest when the entry is materialized.
+/// kinds plus the `MethodType` and method `MethodHandle` kinds `LambdaMetafactory` uses,
+/// and rejects the rest when the entry is materialized.
 #[derive(Debug, Clone, PartialEq)]
 pub enum BootstrapArgument {
     /// A `CONSTANT_String`.
@@ -99,6 +103,14 @@ pub enum BootstrapArgument {
     Long(i64),
     Float(f32),
     Double(f64),
+    /// A `CONSTANT_MethodType`, as its method descriptor (`(Ljava/lang/String;)I`).
+    MethodType(String),
+    /// A `CONSTANT_MethodHandle` to a method, with its reference kind.
+    ///
+    /// Field handles (`REF_getField`, `REF_putStatic`, ...) are rejected when the entry is
+    /// materialized: this VM has no `MethodHandle`/`VarHandle` execution, and only the
+    /// lambda implementation handle needs a method target.
+    MethodHandle(BootstrapMethodHandle),
 }
 
 /// One `BootstrapMethods` entry with its handle and static arguments resolved.
@@ -261,8 +273,8 @@ impl ClassFile {
     ///
     /// An out-of-range index, a `bootstrap_method_ref` that is not a
     /// `CONSTANT_MethodHandle`, a handle that is not `REF_invokeStatic` to a method, or a
-    /// static argument that is not a `String`/`Class`/`int`/`long`/`float`/`double` is
-    /// [`Error::BadBootstrapMethod`].
+    /// static argument that is not a `String`/`Class`/`int`/`long`/`float`/`double`/
+    /// `MethodType`/method `MethodHandle` is [`Error::BadBootstrapMethod`].
     pub fn bootstrap_method(&self, index: u16) -> Result<BootstrapMethodEntry, Error> {
         let raw = self
             .bootstrap_methods
@@ -274,21 +286,7 @@ impl ClassFile {
                 ),
             })?;
 
-        let (reference_kind, reference_index) = match self.constant_pool.get(raw.method_ref)? {
-            Constant::MethodHandle {
-                reference_kind,
-                reference_index,
-            } => (*reference_kind, *reference_index),
-            other => {
-                return Err(Error::BadBootstrapMethod {
-                    detail: format!(
-                        "bootstrap_method_ref {} is a {}, not a MethodHandle",
-                        raw.method_ref,
-                        constant_kind(other)
-                    ),
-                });
-            }
-        };
+        let (reference_kind, handle) = resolve_method_handle(&self.constant_pool, raw.method_ref)?;
         if reference_kind != ReferenceKind::InvokeStatic {
             return Err(Error::BadBootstrapMethod {
                 detail: format!(
@@ -297,46 +295,13 @@ impl ClassFile {
                 ),
             });
         }
-        let (owner, name, descriptor) = match self.constant_pool.get(reference_index)? {
-            Constant::MethodRef {
-                class_index,
-                name_and_type_index,
-            }
-            | Constant::InterfaceMethodRef {
-                class_index,
-                name_and_type_index,
-            } => {
-                let (name, descriptor) = self.constant_pool.name_and_type(*name_and_type_index)?;
-                (
-                    self.constant_pool.class_name(*class_index)?.to_owned(),
-                    name.to_owned(),
-                    descriptor.to_owned(),
-                )
-            }
-            other => {
-                return Err(Error::BadBootstrapMethod {
-                    detail: format!(
-                        "REF_invokeStatic references constant {reference_index}, a {}, not a method",
-                        constant_kind(other)
-                    ),
-                });
-            }
-        };
 
         let mut arguments = Vec::with_capacity(raw.arguments.len());
         for argument_index in &raw.arguments {
             arguments.push(bootstrap_argument(&self.constant_pool, *argument_index)?);
         }
 
-        Ok(BootstrapMethodEntry {
-            handle: BootstrapMethodHandle {
-                reference_kind,
-                owner,
-                name,
-                descriptor,
-            },
-            arguments,
-        })
+        Ok(BootstrapMethodEntry { handle, arguments })
     }
 
     /// Every `BootstrapMethods` entry, materialized in table order.
@@ -438,6 +403,81 @@ impl ClassFile {
     }
 }
 
+/// Resolves a `CONSTANT_MethodHandle` to its kind and the method it names.
+///
+/// Only method reference kinds are accepted: the VM has no `MethodHandle`/`VarHandle`
+/// execution, and a lambda implementation handle always names a method. A field handle,
+/// an out-of-range reference, or a reference that is not a method is
+/// [`Error::BadBootstrapMethod`].
+fn resolve_method_handle(
+    pool: &ConstantPool,
+    index: u16,
+) -> Result<(ReferenceKind, BootstrapMethodHandle), Error> {
+    let (reference_kind, reference_index) = match pool.get(index)? {
+        Constant::MethodHandle {
+            reference_kind,
+            reference_index,
+        } => (*reference_kind, *reference_index),
+        other => {
+            return Err(Error::BadBootstrapMethod {
+                detail: format!(
+                    "method handle constant {index} is a {}, not a MethodHandle",
+                    constant_kind(other)
+                ),
+            });
+        }
+    };
+    if !matches!(
+        reference_kind,
+        ReferenceKind::InvokeVirtual
+            | ReferenceKind::InvokeStatic
+            | ReferenceKind::InvokeSpecial
+            | ReferenceKind::NewInvokeSpecial
+            | ReferenceKind::InvokeInterface
+    ) {
+        return Err(Error::BadBootstrapMethod {
+            detail: format!(
+                "method handle constant {index} has unsupported reference kind {:?}",
+                reference_kind
+            ),
+        });
+    }
+    let (owner, name, descriptor) = match pool.get(reference_index)? {
+        Constant::MethodRef {
+            class_index,
+            name_and_type_index,
+        }
+        | Constant::InterfaceMethodRef {
+            class_index,
+            name_and_type_index,
+        } => {
+            let (name, descriptor) = pool.name_and_type(*name_and_type_index)?;
+            (
+                pool.class_name(*class_index)?.to_owned(),
+                name.to_owned(),
+                descriptor.to_owned(),
+            )
+        }
+        other => {
+            return Err(Error::BadBootstrapMethod {
+                detail: format!(
+                    "method handle constant {index} references constant {reference_index}, a {}, not a method",
+                    constant_kind(other)
+                ),
+            });
+        }
+    };
+    Ok((
+        reference_kind,
+        BootstrapMethodHandle {
+            reference_kind,
+            owner,
+            name,
+            descriptor,
+        },
+    ))
+}
+
 /// One bootstrap static argument, typed from its constant-pool entry.
 fn bootstrap_argument(pool: &ConstantPool, index: u16) -> Result<BootstrapArgument, Error> {
     let argument = match pool.get(index)? {
@@ -451,6 +491,13 @@ fn bootstrap_argument(pool: &ConstantPool, index: u16) -> Result<BootstrapArgume
         Constant::Long(value) => BootstrapArgument::Long(*value),
         Constant::Float(value) => BootstrapArgument::Float(*value),
         Constant::Double(value) => BootstrapArgument::Double(*value),
+        Constant::MethodType { descriptor_index } => {
+            BootstrapArgument::MethodType(pool.utf8(*descriptor_index)?.to_owned())
+        }
+        Constant::MethodHandle { .. } => {
+            let (_, handle) = resolve_method_handle(pool, index)?;
+            BootstrapArgument::MethodHandle(handle)
+        }
         other => {
             return Err(Error::BadBootstrapMethod {
                 detail: format!(

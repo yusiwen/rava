@@ -505,6 +505,56 @@ pub struct EnumConstant {
     pub name: String,
 }
 
+/// How a lambda invokes its implementation method.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LambdaTargetKind {
+    /// A `REF_invokeStatic` implementation: the captured values and the SAM arguments are
+    /// the method's arguments.
+    Static,
+    /// A `REF_invokeVirtual`, `REF_invokeSpecial` or `REF_invokeInterface` implementation:
+    /// the first captured-or-call value is the receiver, the rest are the arguments.
+    Instance,
+    /// A `REF_newInvokeSpecial` implementation: the captured values and the SAM arguments
+    /// are the constructor's arguments, and the SAM result is the new instance.
+    Constructor,
+}
+
+/// The implementation method a lambda calls when its SAM method is invoked.
+///
+/// The class identity is resolved through the defining loader of the class that executes
+/// the `invokedynamic` instruction, so a child loader's target keeps its own identity.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LambdaTarget {
+    pub class: ClassId,
+    pub name: String,
+    pub descriptor: String,
+    pub kind: LambdaTargetKind,
+}
+
+/// One lambda object produced by a `LambdaMetafactory` bootstrap.
+///
+/// The class identity is the interface the lambda implements, not a synthetic class. The
+/// VM does not generate a class file for a lambda, so `getClass()` on a lambda reports the
+/// functional interface's class object (documented deviation from the JDK, which reports
+/// a hidden synthetic class such as `demo.LambdaProbe$$Lambda$1/0x...`). The `sam`
+/// fields are the call-site name and the `samMethodType` descriptor the bootstrap was
+/// given; they are checked when an `invokeinterface` calls the SAM. `captured` holds the
+/// `invokedynamic` call-site arguments in order, exactly as the factory received them.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LambdaObject {
+    /// The functional interface the lambda implements.
+    pub interface: ClassId,
+    /// The SAM method name, which is the `invokedynamic` call-site name.
+    pub sam_name: String,
+    /// The SAM method descriptor, from the bootstrap's `samMethodType`.
+    pub sam_descriptor: String,
+    /// The bootstrap's `instantiatedMethodType`, retained for diagnostics.
+    pub instantiated_descriptor: String,
+    pub target: LambdaTarget,
+    /// The captured `invokedynamic` arguments, in call-site order.
+    pub captured: Vec<Value>,
+}
+
 #[derive(Debug)]
 pub enum HeapObject {
     Instance(Instance),
@@ -571,6 +621,15 @@ pub enum HeapObject {
     /// both can be references (null included) and [`crate::Shared::roots`] enumerates the
     /// non-null ones. Maps are ordinary heap objects, not permanent roots.
     Map(Vec<(Value, Value)>),
+    /// A lambda object created by a `LambdaMetafactory` bootstrap.
+    ///
+    /// The object stores the functional interface, the implementation method and the
+    /// captured call-site arguments. Its class identity is the interface (see
+    /// [`LambdaObject`]); its SAM dispatch is handled by the interpreter's
+    /// `invokeinterface`, not by a generated class file. Lambdas are ordinary heap
+    /// objects, not permanent roots, and [`crate::Shared::roots`] enumerates their
+    /// captured references.
+    Lambda(LambdaObject),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -733,6 +792,12 @@ impl Heap {
         self.allocate(HeapObject::Map(Vec::new()))
     }
 
+    /// Allocate a lambda object. Callers go through [`crate::Shared::allocate_lambda`],
+    /// which is the one creation entry point the metafactory path uses.
+    pub fn allocate_lambda(&mut self, lambda: LambdaObject) -> ObjRef {
+        self.allocate(HeapObject::Lambda(lambda))
+    }
+
     /// Every live object, in slot order.
     ///
     /// Root enumeration uses this to reach the references a container such as a list
@@ -836,6 +901,17 @@ impl Heap {
             _ => Err(HeapError::WrongObjectKind {
                 reference,
                 expected: "a boxed primitive",
+            }),
+        }
+    }
+
+    /// The lambda object behind a reference.
+    pub fn lambda(&self, reference: ObjRef) -> Result<&LambdaObject, HeapError> {
+        match self.get(reference)? {
+            HeapObject::Lambda(lambda) => Ok(lambda),
+            _ => Err(HeapError::WrongObjectKind {
+                reference,
+                expected: "a lambda",
             }),
         }
     }

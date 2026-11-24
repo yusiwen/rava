@@ -20,26 +20,31 @@
 //! the executing frame's loader. M2.18 adds `invokedynamic` execution for the
 //! `StringConcatFactory` call sites javac emits for `+`, dispatching to
 //! [`rava_vm::string_concat`] with the decoded bootstrap entry and the call site's
-//! arguments. The decoded form and the frame are the contracts a later JIT consumes;
-//! there is no second frame model.
+//! arguments. M2.19 adds `invokeinterface` and the lambda path: a `LambdaMetafactory`
+//! bootstrap creates a [`rava_vm::LambdaObject`] (the interface, target and captured
+//! values), and an interface call on that object runs the target through this crate's
+//! existing static/instance machinery. The decoded form and the frame are the contracts a
+//! later JIT consumes; there is no second frame model.
 
 #![forbid(unsafe_code)]
 
 mod error;
 mod frame;
 mod instr;
+mod lambda;
 pub mod reflect_invoke;
 
 pub use error::InterpError;
 pub use frame::Frame;
 pub use instr::{DecodedMethod, ExceptionHandler, Instr, IntCondition, decode};
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use rava_classfile::model::ACC_STATIC;
 use rava_vm::{
     ArrayKind, BoxedPrimitive, ClassEntry, ClassId, ClassRef, ClassState, FrameRootsGuard,
-    HeapObject, MemberKind, ObjRef, PrimitiveKind, Shared, ThreadState, Value,
+    HeapObject, MemberKind, ObjRef, PrimitiveKind, Shared, ThreadState, Value, VmError,
 };
 
 /// Run a static method with `args` and return its result (`None` for `void`).
@@ -225,6 +230,9 @@ fn execute(
         match instruction {
             Instr::Iconst(value) => frame.push(Value::Int(value))?,
             Instr::AconstNull => frame.push(Value::Ref(ObjRef::NULL))?,
+            Instr::Pop => {
+                frame.pop()?;
+            }
             Instr::Dup => {
                 let value = *frame.stack.last().ok_or(InterpError::StackUnderflow)?;
                 frame.push(value)?;
@@ -491,6 +499,28 @@ fn execute(
                 );
                 deliver_call(shared, frame, caller_pc, &descriptor, result)?;
             }
+            Instr::InvokeInterface {
+                class,
+                name,
+                descriptor,
+            } => {
+                let caller_pc = frame.pc - 1;
+                let args = pop_arguments(frame, &descriptor)?;
+                let receiver = pop_receiver(frame)?;
+                let interface = resolve_from(shared, frame.class, &class)?;
+                let result = invoke_interface(
+                    shared,
+                    thread,
+                    frame,
+                    guard,
+                    receiver,
+                    args,
+                    interface,
+                    &name,
+                    &descriptor,
+                );
+                deliver_call(shared, frame, caller_pc, &descriptor, result)?;
+            }
             Instr::IAdd | Instr::ISub | Instr::IMul | Instr::IDiv => {
                 let right = int(frame.pop()?)?;
                 let left = int(frame.pop()?)?;
@@ -530,18 +560,30 @@ fn execute(
                 descriptor,
                 bootstrap,
             } => {
-                // M2.18 dispatches only the `StringConcatFactory` bootstrap. The call
-                // site's arguments are popped exactly as for any other call; the
-                // factory's text conversion does not re-enter the interpreter, so no
-                // callee roots are needed.
+                // M2.18 dispatches the `StringConcatFactory` bootstrap and M2.19 adds the
+                // two `LambdaMetafactory` factory methods. The call site's arguments are
+                // popped exactly as for any other call; neither factory re-enters the
+                // interpreter, so no callee roots are needed. A lambda's captured values
+                // are stored in the new heap object (and enumerated by `Shared::roots`).
                 let args = pop_arguments(frame, &descriptor)?;
-                let reference = rava_vm::string_concat::invoke_call_site(
-                    shared,
-                    &bootstrap,
-                    &name,
-                    &descriptor,
-                    &args,
-                )?;
+                let reference = if bootstrap.handle.owner == lambda::LAMBDA_METAFACTORY {
+                    lambda::invoke_call_site(
+                        shared,
+                        frame.class,
+                        &bootstrap,
+                        &name,
+                        &descriptor,
+                        &args,
+                    )?
+                } else {
+                    rava_vm::string_concat::invoke_call_site(
+                        shared,
+                        &bootstrap,
+                        &name,
+                        &descriptor,
+                        &args,
+                    )?
+                };
                 frame.push(Value::Ref(reference))?;
             }
             Instr::Athrow => {
@@ -683,6 +725,116 @@ fn push_result(
     frame.push(value)
 }
 
+/// Execute one decoded `invokeinterface`.
+///
+/// A lambda receiver is answered by its metafactory target after the instruction's
+/// interface and the recorded SAM name/descriptor are checked. Any other receiver is
+/// resolved on its runtime class first, then on a default method in the instruction's
+/// interface hierarchy, and the ordinary native-registry-before-`Code` path runs it.
+#[allow(clippy::too_many_arguments)]
+fn invoke_interface(
+    shared: &Shared,
+    thread: &ThreadState,
+    frame: &Frame,
+    guard: &FrameRootsGuard<'_>,
+    receiver: ObjRef,
+    args: Vec<Value>,
+    interface: ClassId,
+    name: &str,
+    descriptor: &str,
+) -> Result<Option<Value>, InterpError> {
+    // A lambda is not an `Instance` and has no class file of its own: its heap
+    // representation records the interface and the target, so it is handled before any
+    // class resolution.
+    let lambda = match shared.heap().get(receiver) {
+        Ok(HeapObject::Lambda(lambda)) => Some(lambda.clone()),
+        Ok(_) => None,
+        Err(error) => return Err(error.into()),
+    };
+    if let Some(lambda) = lambda {
+        if lambda.interface != interface {
+            return Err(InterpError::NotAssignable {
+                expected: class_name(shared, interface),
+                found: class_name(shared, lambda.interface),
+            });
+        }
+        if lambda.sam_name != name || lambda.sam_descriptor != descriptor {
+            return Err(InterpError::Lambda(format!(
+                "invokeinterface {name}{descriptor} does not match the lambda's SAM {}:{}",
+                lambda.sam_name, lambda.sam_descriptor
+            )));
+        }
+        // The receiver and the call arguments have been popped from the frame; publish
+        // them as call roots while the target runs.
+        let mut call_roots = args.clone();
+        call_roots.push(Value::Ref(receiver));
+        publish_roots(guard, frame, &call_roots);
+        return lambda::invoke_sam(shared, thread, &lambda, args);
+    }
+
+    let start = dispatch_class(shared, frame.class, receiver)?;
+    if !is_assignable(shared, start, interface)? {
+        return Err(InterpError::NotAssignable {
+            expected: class_name(shared, interface),
+            found: class_name(shared, start),
+        });
+    }
+
+    let declaring = match resolve_virtual(shared, start, name, descriptor) {
+        Ok((entry, _)) => entry.id,
+        Err(InterpError::MethodNotFound { .. }) => {
+            // A class that inherits a default method has no declaration on its superclass
+            // chain; the interface hierarchy supplies it.
+            find_interface_method(shared, interface, name, descriptor)?.ok_or_else(|| {
+                InterpError::MethodNotFound {
+                    class: class_name(shared, start),
+                    name: name.to_owned(),
+                    descriptor: descriptor.to_owned(),
+                }
+            })?
+        }
+        Err(error) => return Err(error),
+    };
+    invoke_instance(
+        shared, thread, frame, guard, declaring, receiver, args, name, descriptor,
+    )
+}
+
+/// The interface (at or below `interface`) that declares `name:descriptor`, if any.
+///
+/// The search is a depth-first walk of the interface hierarchy; the first declaration in
+/// that order wins. Only the interface's own method list is inspected, because an
+/// interface's class file names `Object` as its superclass but `Object` members are not
+/// inherited interface members.
+fn find_interface_method(
+    shared: &Shared,
+    interface: ClassId,
+    name: &str,
+    descriptor: &str,
+) -> Result<Option<ClassId>, InterpError> {
+    let mut stack = vec![interface];
+    let mut seen = HashSet::new();
+    while let Some(current) = stack.pop() {
+        if !seen.insert(current) {
+            continue;
+        }
+        let entry = shared
+            .entry(current)
+            .ok_or_else(|| InterpError::Decode("interface vanished".to_owned()))?;
+        if entry.file.find_method(name, descriptor)?.is_some() {
+            return Ok(Some(current));
+        }
+        for interface_name in entry.file.interface_names()? {
+            match shared.load_class(entry.loader, interface_name) {
+                Ok(id) => stack.push(id),
+                Err(VmError::ClassNotFound { .. }) => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+    }
+    Ok(None)
+}
+
 /// Resolve an instance call from `start`, then prefer the native registry and fall back
 /// to the method's `Code`.
 ///
@@ -808,18 +960,40 @@ fn instance_field_slot(
     })
 }
 
-/// Is `from` the same class as `to`, or a subclass of it?
+/// Is `from` the same class as `to`, a subclass of it, or a class that implements it?
+///
+/// The walk covers the superclass chain and every interface list on it, which is the
+/// assignability M2.19's `invokeinterface` needs for a receiver whose method lives on an
+/// interface. It is still a name-level walk of loaded classes: no verifier type is
+/// consulted, and an array's component is not considered.
 fn is_assignable(shared: &Shared, from: ClassId, to: ClassId) -> Result<bool, InterpError> {
-    let mut current = from;
-    loop {
+    let mut stack = vec![from];
+    let mut seen = HashSet::new();
+    while let Some(current) = stack.pop() {
+        if !seen.insert(current) {
+            continue;
+        }
         if current == to {
             return Ok(true);
         }
-        let Some(super_class) = shared.resolution_superclass(current)? else {
-            return Ok(false);
-        };
-        current = super_class;
+        let entry = shared
+            .entry(current)
+            .ok_or_else(|| InterpError::Decode("class vanished during assignability".to_owned()))?;
+        for interface_name in entry.file.interface_names()? {
+            // The C1 tree is the class library this VM ships; a transitive interface it
+            // omits (for example `java.lang.constant.Constable` on `String`) cannot be
+            // part of the walk. A missing *class* elsewhere is still a loader error.
+            match shared.load_class(entry.loader, interface_name) {
+                Ok(id) => stack.push(id),
+                Err(VmError::ClassNotFound { .. }) => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        if let Some(super_class) = shared.resolution_superclass(current)? {
+            stack.push(super_class);
+        }
     }
+    Ok(false)
 }
 
 fn class_name(shared: &Shared, class: ClassId) -> String {
@@ -1042,6 +1216,7 @@ fn dispatch_class(
         List,
         Map,
         Array,
+        Lambda(ClassId),
     }
 
     let kind = {
@@ -1060,11 +1235,13 @@ fn dispatch_class(
             HeapObject::List(_) => ReceiverKind::List,
             HeapObject::Map(_) => ReceiverKind::Map,
             HeapObject::Array(_) => ReceiverKind::Array,
+            HeapObject::Lambda(lambda) => ReceiverKind::Lambda(lambda.interface),
         }
     };
 
     match kind {
         ReceiverKind::Instance(class) => Ok(class),
+        ReceiverKind::Lambda(interface) => Ok(interface),
         ReceiverKind::Str => resolve_from(shared, current, "java/lang/String"),
         ReceiverKind::Class => resolve_from(shared, current, "java/lang/Class"),
         ReceiverKind::Reflect(kind) => resolve_from(shared, current, kind.class_name()),
@@ -1147,7 +1324,7 @@ fn ensure_initialized(
     result
 }
 
-fn argument_count(descriptor: &str) -> Result<usize, InterpError> {
+pub(crate) fn argument_count(descriptor: &str) -> Result<usize, InterpError> {
     let Some((args, _)) = descriptor
         .strip_prefix('(')
         .and_then(|rest| rest.split_once(')'))

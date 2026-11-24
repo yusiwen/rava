@@ -9,7 +9,8 @@
 //! opcodes are still the caller's problem — labels, branches and the operand encodings are the next
 //! increment. The names it knows are the ones the fixtures needed: `Utf8`, `Class`, `String`,
 //! `Integer`, `Float`, `Long`, `Double`, `NameAndType`, `Fieldref`, `Methodref`,
-//! `MethodHandle`, `InvokeDynamic`, and one `Code` attribute per method. A class-level
+//! `InterfaceMethodref`, `MethodType`, `MethodHandle`, `InvokeDynamic`, and one `Code`
+//! attribute per method. A class-level
 //! `BootstrapMethods` attribute is written when [`ClassBuilder::bootstrap_method`] (or
 //! [`ClassBuilder::bootstrap_method_handle`]) has added an entry.
 
@@ -222,6 +223,37 @@ impl ClassBuilder {
         let mut entry = vec![10u8];
         entry.extend_from_slice(&class_index.to_be_bytes());
         entry.extend_from_slice(&nat_index.to_be_bytes());
+        self.push(key, entry, 1)
+    }
+
+    /// A `CONSTANT_InterfaceMethodref`, deduplicated.
+    ///
+    /// `invokeinterface` names its target through this entry, not a `Methodref` (JVMS
+    /// §4.4.2). The owner must be an interface.
+    pub fn interface_method_ref(&mut self, owner: &str, name: &str, descriptor: &str) -> u16 {
+        let class_index = self.class(owner);
+        let nat_index = self.name_and_type(name, descriptor);
+        let key = format!("X{owner}.{name}{descriptor}");
+        if let Some(index) = self.index.get(&key) {
+            return *index;
+        }
+        let mut entry = vec![11u8];
+        entry.extend_from_slice(&class_index.to_be_bytes());
+        entry.extend_from_slice(&nat_index.to_be_bytes());
+        self.push(key, entry, 1)
+    }
+
+    /// A `CONSTANT_MethodType` (JVMS §4.4.9), the method descriptor as a constant.
+    ///
+    /// `LambdaMetafactory` passes its SAM type and instantiated type as these entries.
+    pub fn method_type(&mut self, descriptor: &str) -> u16 {
+        let descriptor_index = self.utf8(descriptor);
+        let key = format!("T{descriptor}");
+        if let Some(index) = self.index.get(&key) {
+            return *index;
+        }
+        let mut entry = vec![16u8];
+        entry.extend_from_slice(&descriptor_index.to_be_bytes());
         self.push(key, entry, 1)
     }
 

@@ -10,7 +10,8 @@
 //! `if_acmpeq`/`if_acmpne`, `goto`, `getstatic`, `getfield`, `putfield`, `new`, array
 //! creation and access (`newarray`, `anewarray`, `multianewarray`, `arraylength`,
 //! `iaload`/`iastore` and `aaload`/`aastore`), `ldc`/`ldc_w`, `invokevirtual`,
-//! `invokespecial`, `invokestatic` through [`op`](Assembler::op), `athrow`, and the
+//! `invokeinterface`, `invokespecial`, `invokestatic` through [`op`](Assembler::op),
+//! `athrow`, and the
 //! `ireturn`/`areturn`/`return` forms. Everything else is still raw bytes through
 //! [`Assembler::op`].
 //!
@@ -256,6 +257,14 @@ impl Assembler {
 
     pub fn invokevirtual(&mut self, index: u16) {
         self.op(0xb6, &index.to_be_bytes());
+    }
+
+    /// `invokeinterface`: call an interface method through a
+    /// `CONSTANT_InterfaceMethodref`. `count` is the argument-slot count including the
+    /// receiver and the reserved fourth byte is zero (JVMS §6.5.invokeinterface).
+    pub fn invokeinterface(&mut self, index: u16, count: u8) {
+        let [high, low] = index.to_be_bytes();
+        self.op(0xb9, &[high, low, count, 0]);
     }
 
     /// `invokespecial`: constructors, private methods and superclass calls.

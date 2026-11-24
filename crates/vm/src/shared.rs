@@ -557,6 +557,15 @@ impl Shared {
         reference
     }
 
+    /// Allocate a lambda object over its interface, target and captured arguments.
+    ///
+    /// Lambdas are ordinary heap objects, not cached: each `invokedynamic` execution
+    /// creates one, as the JDK creates one instance per call site activation. The
+    /// interpreter's metafactory path is the only caller.
+    pub fn allocate_lambda(&self, lambda: crate::heap::LambdaObject) -> ObjRef {
+        self.heap().allocate_lambda(lambda)
+    }
+
     /// Box an `int` as a fresh `java.lang.Integer` heap object.
     ///
     /// There is no small-value cache in M2.10: two calls with the same value return two
@@ -603,9 +612,9 @@ impl Shared {
     /// `java.lang.annotation.Annotation` (its `annotationType()` names the annotation
     /// type), an enum constant reports its enum class, a `StringBuilder` reports
     /// `java.lang.StringBuilder`, an `ArrayList` reports `java.util.ArrayList`, a
-    /// `HashMap` reports `java.util.HashMap` and an array reports its cached array class
-    /// (`int[]`, `String[][]`); those VM-level objects use the bootstrap class library as
-    /// their identity.
+    /// `HashMap` reports `java.util.HashMap`, a lambda reports its functional interface
+    /// and an array reports its cached array class (`int[]`, `String[][]`); those
+    /// VM-level objects use the bootstrap class library as their identity.
     pub fn get_class(&self, reference: ObjRef) -> Result<ObjRef, VmError> {
         enum Kind {
             Instance(ClassId),
@@ -619,6 +628,7 @@ impl Shared {
             List,
             Map,
             Array(ClassRef),
+            Lambda(ClassId),
         }
 
         let kind = {
@@ -640,11 +650,13 @@ impl Shared {
                 HeapObject::List(_) => Kind::List,
                 HeapObject::Map(_) => Kind::Map,
                 HeapObject::Array(array) => Kind::Array(array.component.clone()),
+                HeapObject::Lambda(lambda) => Kind::Lambda(lambda.interface),
             }
         };
 
         match kind {
             Kind::Instance(class) => self.class_object(class),
+            Kind::Lambda(interface) => self.class_object(interface),
             Kind::Str => {
                 let class = self.load_library_class("java/lang/String")?;
                 self.class_object(class)
@@ -944,6 +956,11 @@ impl Shared {
                     HeapObject::Map(entries) => {
                         for (key, value) in entries {
                             push_container_root(&mut roots, &mut seen, *key);
+                            push_container_root(&mut roots, &mut seen, *value);
+                        }
+                    }
+                    HeapObject::Lambda(lambda) => {
+                        for value in &lambda.captured {
                             push_container_root(&mut roots, &mut seen, *value);
                         }
                     }

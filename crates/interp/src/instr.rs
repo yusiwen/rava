@@ -28,6 +28,11 @@
 //! a typed class-file error, before any execution. `lload`/`fload`/`dload` were added so
 //! an assembled call site can pass a long/float/double argument to the concatenation
 //! conversion.
+//!
+//! M2.19 adds `invokeinterface` (`0xb9`): its u2 interface-method reference, u1 argument
+//! count and u1 reserved zero byte are decoded, and the interface method runs through the
+//! receiver's runtime class or the lambda representation. `pop` (`0x57`) is decoded only
+//! because a fixture that discards `List.add`'s boolean return needs it.
 
 use std::collections::HashMap;
 
@@ -90,6 +95,8 @@ const CONDITIONS: [IntCondition; 6] = [
 #[derive(Debug, Clone, PartialEq)]
 pub enum Instr {
     Iconst(i32),
+    /// `pop`: discard the top operand-stack value.
+    Pop,
     ILoad(u8),
     /// `lload`/`lload_<n>`.
     LLoad(u8),
@@ -140,6 +147,16 @@ pub enum Instr {
         descriptor: String,
     },
     InvokeSpecial {
+        class: String,
+        name: String,
+        descriptor: String,
+    },
+    /// `invokeinterface`: an interface call through the receiver's runtime class.
+    ///
+    /// The interface method is resolved on the interface, then selected on the receiver's
+    /// runtime class or a default method in the interface hierarchy. A lambda receiver
+    /// answers through its metafactory target instead.
+    InvokeInterface {
         class: String,
         name: String,
         descriptor: String,
@@ -285,6 +302,7 @@ pub fn decode(file: &ClassFile, attribute_data: &[u8]) -> Result<DecodedMethod, 
             }
             0x3b..=0x3e => Instr::IStore(opcode - 0x3b),
             0x4b..=0x4e => Instr::AStore(opcode - 0x4b),
+            0x57 => Instr::Pop,
             0x59 => Instr::Dup,
             0x60 => Instr::IAdd,
             0x64 => Instr::ISub,
@@ -443,6 +461,28 @@ pub fn decode(file: &ClassFile, attribute_data: &[u8]) -> Result<DecodedMethod, 
                 pc += 2;
                 let (class, name, descriptor) = resolve_method(file, index, false)?;
                 Instr::InvokeStatic {
+                    class,
+                    name,
+                    descriptor,
+                }
+            }
+            0xb9 => {
+                let index = u16::from_be_bytes([byte(code, pc)?, byte(code, pc + 1)?]);
+                pc += 2;
+                // The interface call's count operand is the argument-slot count including
+                // the receiver (JVMS §6.5.invokeinterface). This interpreter keeps one
+                // local per argument rather than widening long/double to two slots, so the
+                // count is not used for dispatch; the fourth byte must still be zero.
+                let _count = byte(code, pc)?;
+                let zero = byte(code, pc + 1)?;
+                pc += 2;
+                if zero != 0 {
+                    return Err(InterpError::Decode(format!(
+                        "invokeinterface constant {index} has non-zero reserved byte 0x{zero:02x}"
+                    )));
+                }
+                let (class, name, descriptor) = resolve_method(file, index, true)?;
+                Instr::InvokeInterface {
                     class,
                     name,
                     descriptor,

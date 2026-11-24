@@ -38,6 +38,12 @@ pub enum InterpError {
         name: String,
         descriptor: String,
     },
+    /// A lambda invocation or metafactory bootstrap did not match the shape the lambda
+    /// object recorded (wrong SAM name/descriptor, target arity or value types).
+    ///
+    /// These are VM-shape errors, not Java exceptions: the slice has no exception-object
+    /// synthesis, so a malformed lambda is reported as a typed error.
+    Lambda(String),
     /// An array instruction read or wrote past the end, or used a negative index.
     ArrayIndexOutOfBounds {
         index: i32,
@@ -107,6 +113,7 @@ impl fmt::Display for InterpError {
             Self::NativeOrAbstract { name, descriptor } => {
                 write!(f, "method {name}{descriptor} has no bytecode")
             }
+            Self::Lambda(detail) => write!(f, "lambda error: {detail}"),
             Self::ArrayIndexOutOfBounds { index, length } => {
                 write!(
                     f,

@@ -168,8 +168,18 @@ convert every value through the M2.9/M2.13 `String.valueOf` rules, and push an i
 String; any other bootstrap is a typed error. A committed `javac --release 17` fixture
 covers the compiler-emitted call sites, and assembled probes cover `makeConcat`, every
 supported primitive descriptor, static recipe constants and the documented failures.
-`LambdaMetafactory`, method handles, arbitrary bootstrap methods, call-site caching and
-Spring remain later slices. **M2.19 is next.**
+**M2.19 is done (2026-11-24):** `invokeinterface` decodes opcode `0xb9` and runs the
+interface method on the receiver's runtime class or on an interface default, with the
+native registry before `Code`; a wrong receiver is a typed error. `LambdaMetafactory`'s
+`metafactory` and `altMetafactory` bootstraps now create a lambda heap object carrying the
+functional interface, the SAM name/type, the implementation target and the captured
+call-site values, and invoking the SAM through `invokeinterface` runs that target through
+the existing static/instance machinery. Static, unbound, bound and constructor method
+references, a capturing lambda and a no-argument void `Runnable` are covered by a committed
+`javac --release 17` fixture plus assembled probes; a lambda's class identity is its
+interface, `altMetafactory` rejects serializable lambdas, and argument adaptation,
+`MethodHandle`/`VarHandle` execution, call-site caching and Spring remain later slices.
+**M2.20 is next.**
 
 ## What this project is
 

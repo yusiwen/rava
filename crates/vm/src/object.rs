@@ -103,7 +103,8 @@ fn object_to_string(
 /// An instance reports its defining class, a string `java.lang.String`, a class object
 /// `java.lang.Class`, a reflected member its `java.lang.reflect` class, a box its boxed
 /// class (`java.lang.Integer`), a builder `java.lang.StringBuilder`, a list
-/// `java.util.ArrayList` and a map `java.util.HashMap`. An array reports its array class's
+/// `java.util.ArrayList`, a map `java.util.HashMap` and a lambda its functional interface.
+/// An array reports its array class's
 /// name (`[I`, `[Ljava.lang.String;`), which is the JDK's default `Object.toString` shape.
 /// The three VM-level containers use the bootstrap class library as their identity.
 ///
@@ -122,6 +123,7 @@ pub(crate) fn runtime_binary_name(shared: &Shared, receiver: ObjRef) -> Result<S
         List,
         Map,
         Array(ClassRef),
+        Lambda(ClassId),
     }
 
     let kind = {
@@ -143,6 +145,7 @@ pub(crate) fn runtime_binary_name(shared: &Shared, receiver: ObjRef) -> Result<S
             HeapObject::List(_) => Kind::List,
             HeapObject::Map(_) => Kind::Map,
             HeapObject::Array(array) => Kind::Array(array.component.clone()),
+            HeapObject::Lambda(lambda) => Kind::Lambda(lambda.interface),
         }
     };
 
@@ -151,6 +154,12 @@ pub(crate) fn runtime_binary_name(shared: &Shared, receiver: ObjRef) -> Result<S
             let entry = shared
                 .entry(class)
                 .ok_or_else(|| VmError::Loader(format!("class id {} is not loaded", class.0)))?;
+            Ok(entry.name.replace('/', "."))
+        }
+        Kind::Lambda(interface) => {
+            let entry = shared.entry(interface).ok_or_else(|| {
+                VmError::Loader(format!("class id {} is not loaded", interface.0))
+            })?;
             Ok(entry.name.replace('/', "."))
         }
         Kind::Str => Ok("java.lang.String".to_owned()),

@@ -29,8 +29,8 @@ pub mod verify;
 pub use error::VmError;
 pub use heap::{
     AnnotationObject, Array, ArrayClass, ArrayKind, BoxedPrimitive, ClassRef, EnumConstant,
-    FieldLayout, FieldSlot, Heap, HeapError, HeapObject, Instance, MemberKind, ObjRef,
-    PrimitiveKind, ReflectMember,
+    FieldLayout, FieldSlot, Heap, HeapError, HeapObject, Instance, LambdaObject, LambdaTarget,
+    LambdaTargetKind, MemberKind, ObjRef, PrimitiveKind, ReflectMember,
 };
 pub use hooks::{ClassUnloadHook, Hooks, ReferenceHook};
 pub use loader::{ClassEntry, ClassId, ClassState, LoaderId};
