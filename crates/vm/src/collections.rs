@@ -293,6 +293,22 @@ pub fn register_natives(shared: &Shared) {
         "(Ljava/util/Collection;)Z",
         abstract_collection_add_all,
     );
+    // `addAll(int, Collection)` is declared on `ArrayList`, `LinkedList`,
+    // `AbstractList` and the `List` interface, so every declaration site a virtual call
+    // can reach gets the entry.
+    for class in [
+        ARRAY_LIST_CLASS,
+        LINKED_LIST_CLASS,
+        "java/util/AbstractList",
+        "java/util/List",
+    ] {
+        shared.register_native(
+            class,
+            "addAll",
+            "(ILjava/util/Collection;)Z",
+            list_add_all_at,
+        );
+    }
     shared.register_native(
         abstract_collection,
         "add",
@@ -1356,6 +1372,30 @@ fn array_list_add_at(
     let position = list_insertion_index("ArrayList.add", index, list.len())?;
     list.insert(position, Value::Ref(value));
     Ok(None)
+}
+
+/// `List.addAll(int, Collection)`: insert every source element at `index`, in order.
+///
+/// The JDK returns `true` when the collection was non-empty; an empty source inserts
+/// nothing and reports `false`.
+fn list_add_all_at(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let index = int_argument(args, 0, "List.addAll")?;
+    let collection = reference_argument(args, 1, "List.addAll")?;
+    let values = collection_elements(shared, collection, "List.addAll")?;
+    let changed = !values.is_empty();
+    let mut heap = shared.heap();
+    let list = heap.list_mut(receiver).map_err(heap_error)?;
+    let start = list_insertion_index("List.addAll", index, list.len())?;
+    for (offset, value) in values.into_iter().enumerate() {
+        list.insert(start + offset, value);
+    }
+    Ok(Some(Value::Int(i32::from(changed))))
 }
 
 fn array_list_get(

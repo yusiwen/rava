@@ -294,7 +294,20 @@ those fixes (`cargo test -p rava-interp --test method_flags`). The Spring accept
 gets past the bridge check and stops at
 `java/text/MessageFormat.<init>(Ljava/lang/String;)V`, which Spring's
 `AbstractMessageSource` static initializer builds; M2.23 stays blocked. The M2 gate is
-not claimed.
+not claimed. **M2.29 is done (2026-11-24):** `java.text.MessageFormat` is a dedicated heap
+shape holding the pattern and answering `<init>(String)`, `<init>(String, Locale)`,
+`applyPattern`, `toPattern`, the inherited `Format.format(Object)` Spring calls, both
+`format(..., StringBuffer, FieldPosition)` forms and the static `format(String, ...)`.
+The parser covers literal text, `{index}` substitution, repeated and absent arguments, a
+null argument (`"null"`) and the JDK's `''`/quote-toggling rules; `number`/`date`/`choice`
+subformats are typed errors, and a null or malformed pattern is a typed error rather than a
+synthesized exception. A minimal `StringBuffer` shape serves the buffer form. The same
+rerun fixed the `AccessibleObject` annotation and accessibility queries,
+`List.addAll(int, Collection)`, and the C1 tree's omitted transitive interfaces in
+`Class.getInterfaces` and the inherited-lookup walk. `cargo test -p rava-interp --test
+message_format` has 11 tests through the interpreter. The Spring acceptance now gets past
+`MessageFormat` and stops at `Class.getMethod` returning `null` where the JDK throws
+`NoSuchMethodException`; M2.23 stays blocked and the M2 gate is not claimed.
 
 ## What this project is
 

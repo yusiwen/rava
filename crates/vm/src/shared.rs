@@ -140,6 +140,12 @@ pub struct Shared {
     thread_locals: Mutex<HashMap<ObjRef, Value>>,
     /// The one `ClassLoader` object reported for application classes.
     class_loader: Mutex<Option<ObjRef>>,
+    /// Members whose `AccessibleObject.setAccessible(true)` was called.
+    ///
+    /// The VM performs no access-control check, so this flag only answers
+    /// `isAccessible`; `setAccessible(false)` removes the member again. The members
+    /// themselves are already permanent roots through `reflect_members`.
+    accessible: Mutex<HashSet<ObjRef>>,
     /// The detail message of each throwable a constructor created.
     throwable_messages: Mutex<HashMap<ObjRef, String>>,
     hooks: Hooks,
@@ -205,6 +211,7 @@ impl Shared {
             main_thread: Mutex::new(None),
             thread_locals: Mutex::new(HashMap::new()),
             class_loader: Mutex::new(None),
+            accessible: Mutex::new(HashSet::new()),
             throwable_messages: Mutex::new(HashMap::new()),
             hooks: Hooks::default(),
         }
@@ -585,6 +592,30 @@ impl Shared {
         Ok(reference)
     }
 
+    /// Record `AccessibleObject.setAccessible`'s flag for one member.
+    ///
+    /// There is no access-control check in this VM, so this is the whole meaning of the
+    /// flag: `isAccessible` reports it and `setAccessible(false)` clears it.
+    pub fn set_accessible(&self, member: ObjRef, accessible: bool) {
+        let mut members = self
+            .accessible
+            .lock()
+            .expect("accessible-set lock poisoned");
+        if accessible {
+            members.insert(member);
+        } else {
+            members.remove(&member);
+        }
+    }
+
+    /// `AccessibleObject.isAccessible`: whether `setAccessible(true)` was called.
+    pub fn is_accessible(&self, member: ObjRef) -> bool {
+        self.accessible
+            .lock()
+            .expect("accessible-set lock poisoned")
+            .contains(&member)
+    }
+
     /// Allocate an annotation instance over its annotation type and encoded values.
     ///
     /// Annotation instances are ordinary heap objects: no cache owns them, so a second
@@ -766,6 +797,8 @@ impl Shared {
             Annotation,
             Enum(ClassId),
             StringBuilder,
+            StringBuffer,
+            MessageFormat,
             Named(ClassId),
             Array(ClassRef),
             Lambda(ClassId),
@@ -800,6 +833,8 @@ impl Shared {
                 HeapObject::Annotation(_) => Kind::Annotation,
                 HeapObject::Enum(constant) => Kind::Enum(constant.class),
                 HeapObject::StringBuilder(_) => Kind::StringBuilder,
+                HeapObject::StringBuffer(_) => Kind::StringBuffer,
+                HeapObject::MessageFormat(_) => Kind::MessageFormat,
                 HeapObject::List(list) => Kind::Named(list.class),
                 HeapObject::Set(set) => Kind::Named(set.class),
                 HeapObject::Map(map) => Kind::Named(map.class),
@@ -851,6 +886,14 @@ impl Shared {
             Kind::Enum(class) => self.class_object(class),
             Kind::StringBuilder => {
                 let class = self.load_library_class(crate::collections::STRING_BUILDER_CLASS)?;
+                self.class_object(class)
+            }
+            Kind::StringBuffer => {
+                let class = self.load_library_class(crate::format::STRING_BUFFER_CLASS)?;
+                self.class_object(class)
+            }
+            Kind::MessageFormat => {
+                let class = self.load_library_class(crate::format::MESSAGE_FORMAT_CLASS)?;
                 self.class_object(class)
             }
             Kind::Named(class) => self.class_object(class),
@@ -940,7 +983,8 @@ impl Shared {
             return Ok(None);
         };
         let super_name = super_name.to_owned();
-        let super_name = if entry.name == crate::collections::STRING_BUILDER_CLASS
+        let super_name = if (entry.name == crate::collections::STRING_BUILDER_CLASS
+            || entry.name == crate::format::STRING_BUFFER_CLASS)
             && super_name == "java/lang/AbstractStringBuilder"
         {
             "java/lang/Object".to_owned()
@@ -995,6 +1039,12 @@ impl Shared {
         match name.as_str() {
             crate::collections::STRING_BUILDER_CLASS => {
                 return Ok(self.heap().allocate_string_builder());
+            }
+            crate::format::STRING_BUFFER_CLASS => {
+                return Ok(self.heap().allocate_string_buffer());
+            }
+            crate::format::MESSAGE_FORMAT_CLASS => {
+                return Ok(self.heap().allocate_message_format(String::new()));
             }
             "java/lang/String" => {
                 return Ok(self.heap().allocate_string(String::new()));

@@ -8,9 +8,9 @@
 > Ledger. P0 and P1 were accepted on 2026-11-23. M1 is complete; M2 is in progress
 > (M2.1, M2.2, M2.3, M2.4, M2.5, M2.6, M2.7, M2.8, M2.9, M2.10, M2.11, M2.12,
 > M2.13, M2.14, M2.15, M2.16, M2.17, M2.18, M2.19, M2.20, M2.21, M2.22, M2.24,
-> M2.25, M2.26, M2.27 and M2.28 done; M2.23 is blocked on a runtime gap,
-> `java.text.MessageFormat.<init>(Ljava/lang/String;)V`, reached after M2.28 supplied
-> the reflected-member predicate flags.
+> M2.25, M2.26, M2.27, M2.28 and M2.29 done; M2.23 is blocked on reflective-lookup
+> miss semantics: `Class.getMethod` returns `null` where the JDK throws
+> `NoSuchMethodException`, which Spring's `DisposableBeanAdapter` relies on.
 > Keep this file honest and terse.
 
 ## Phase status
@@ -33,7 +33,7 @@ release process, if wanted, becomes its own phase.
 > M0 and M1 are complete, and both gate reviews have passed. M2 is in progress, with
 > M2.1, M2.2, M2.3, M2.4, M2.5, M2.6, M2.7, M2.8, M2.9, M2.10, M2.11, M2.12, M2.13,
 > M2.14, M2.15, M2.16, M2.17, M2.18, M2.19, M2.20, M2.21, M2.22, M2.24, M2.25, M2.26,
-> M2.27 and M2.28 done.
+> M2.27, M2.28 and M2.29 done.
 
 | Milestone | Delivers | Gate | Status |
 | :--- | :--- | :--- | :--- |
@@ -92,14 +92,16 @@ release process, if wanted, becomes its own phase.
 | M2.26 | `instanceof(null)` correctness and map constructor surface | R3 | `cargo test -p rava-interp --test spring_fixes` exits 0 | done |
 | M2.27 | Descriptor-closure manifest and C1-tree re-baseline | R3 | `cargo run -p rava-cli -- compat check` exits 0 and `RAVA_SPRING_ACCEPTANCE=1 cargo test -p rava-cli --test spring_context` reaches the next blocker | done |
 | M2.28 | Method/Executable bridge, varargs and synthetic flags | R3 | `cargo test -p rava-interp --test method_flags` exits 0 | done |
-| M2.29 | Minimal `java.text.MessageFormat` for Spring messages | R3 | `cargo test -p rava-interp --test message_format` exits 0 | todo |
+| M2.29 | Minimal `java.text.MessageFormat` for Spring messages | R3 | `cargo test -p rava-interp --test message_format` exits 0 | done |
 
 P0 and P1 are accepted; P2 is done because the M2 increments are sliced. All M0 and
 M1 slices are done, and both gate reviews passed. M2.1, M2.2, M2.3, M2.4, M2.5,
 M2.6, M2.7, M2.8, M2.9, M2.10, M2.11, M2.12, M2.13, M2.14, M2.15, M2.16, M2.17,
-M2.18, M2.19, M2.20, M2.21, M2.22, M2.24, M2.25, M2.26, M2.27 and M2.28 are done; M2.23
-is blocked on a runtime class the startup path now needs,
-`java.text.MessageFormat` (see the M2.23 boundary). The M2 gate is not claimed.
+M2.18, M2.19, M2.20, M2.21, M2.22, M2.24, M2.25, M2.26, M2.27, M2.28 and M2.29 are
+done; M2.23 is blocked on reflective-lookup miss semantics: a named lookup returns
+`null` where the JDK throws `NoSuchMethodException`/`NoSuchFieldException`, and
+Spring's `DisposableBeanAdapter` catches the exception (see the M2.23 and M2.29
+boundaries). The M2 gate is not claimed.
 
 ## Slice log
 
@@ -144,6 +146,7 @@ is blocked on a runtime class the startup path now needs,
 | M2.26 | `cargo test -p rava-interp --test spring_fixes` | 0 | 2026-11-24 | `instanceof` of a null operand now pushes 0 for a named class, an interface and an array (JVMS §6.5) instead of 1, and the committed M2.21 test `instanceof_handles_null_and_primitive_operands` was corrected to expect 0; null still passes every reference `checkcast`. `java/util/LinkedHashMap.<init>(IFZ)V` exists and its `accessOrder` flag is honoured: `get`/`getOrDefault`/`put` (existing key)/`putIfAbsent` (existing key) move the entry to the end of `MapObject::entries`, which `keySet`/`values`/`entrySet` and iteration observe; `(I)V`, `(IF)V` and `HashMap(IF)V` keep insertion order, and a negative capacity or a non-positive/NaN load factor is a typed error. The registry's map constructors were corrected from the non-existent `(ILF)V` to the JDK's `(IF)V` on every map surface. The Spring rerun then exposed and this slice fixed: a heap-lock re-entry deadlock in `computeIfAbsent` (`keys_equal` locked the heap while the caller held it), `Class.getDeclaredClasses` over the `InnerClasses` metadata (member rows only; a member outside the C1 subset is skipped), `Comparator.comparingInt` over the new `LambdaTargetKind::Native` lambda target, `Comparator.reversed`, and non-SAM default interface calls on a lambda (`invokeinterface` on a `Comparator` lambda now falls through to a concrete declaration instead of the SAM-mismatch error). The new `crates/interp/tests/spring_fixes.rs` has 9 tests; `cargo test -p rava-interp` 211, `rava-vm` 50, `rava-cli` 78 and `rava-classfile` 56 pass, workspace 395; `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all --check` and `cargo xtask ci` exit 0. The Spring acceptance still exits 1, now at `error: runtime error: class java/lang/annotation/ElementType not found from loader 0`; the M2.23 boundary records the root cause. |
 | M2.27 | `cargo run -p rava-cli -- compat check` | 0 | 2026-11-24 | The M1.2 scanner now records every platform class named by a field or method descriptor, a class/method/field `Signature` (type-parameter bounds, type arguments, wildcard bounds, nested `Outer<T>.Inner<U>` owners and `^` throws) and an annotation's encoded type descriptors (the annotation type, an enum constant's type and a class literal), with arrays unwrapped. The re-baselined manifest has 1047 classes (67 more: 17 named only by a declared descriptor or `Signature`, 36 named only by a member-reference descriptor and 14 named only by an annotation), 177 fields, 3,626 methods and 1,048 interface methods; `compat/surface/c1-unreferenced.txt` grows from 28 to 36 owners (the JSR-305 `javax.annotation` qualifiers, `jdk.internal.vm.annotation.IntrinsicCandidate`, JCache's `Cache` and Moneta's `NumberValue`); `stdlib/classes` and `stdlib/c1/classes` each hold 1047 regenerated class files (1011 projected from ct.sym, 1,160 fields and 13,359 methods); `compat manifest --check`, `compat check` (link-check 1047 classes and 4,851 member records with `unresolved 0`; stub determinism 1047 files) and `compat metadata --check` (0 differences across 1011 classes) exit 0; `cargo test -p rava-cli` passes 85 tests and `cargo xtask ci` passes 402 workspace tests. The Spring rerun gets past `ElementType` and stops at `error: method java/lang/reflect/Method.isBridge()Z has no bytecode`; M2.23 stays blocked. |
 | M2.28 | `cargo test -p rava-interp --test method_flags` | 0 | 2026-11-24 | `rava-vm`'s reflection natives now answer `Method.isBridge()Z`, `Method`/`Constructor`/`Executable.isVarArgs()Z` and `Field`/`Method`/`Constructor`/`Executable`/`Member.isSynthetic()Z` from the parsed class-file `ACC_BRIDGE`/`ACC_VARARGS`/`ACC_SYNTHETIC` bits, never by inference; a member absent from its class file is a typed `VmError::Native` instead of a fabricated flag. `getModifiers()` keeps the JDK masks: a method's includes `bridge`, `varargs` and `synthetic` (`0x1DFF`, the JDK's `Modifier.methodModifiers()` mask), a field's includes `synthetic` and `enum`, a constructor's is the three access bits, so `Constructor.isVarArgs()` reports the `0x0080` its `getModifiers()` hides. The Spring rerun then exposed and this slice fixed `Set(Collection)` constructor deduplication on `LinkedHashSet`/`HashSet`/`TreeSet`/`CopyOnWriteArraySet` (a repeated element, `null` included, contributes once in first-occurrence order), the `(Collection)` copy constructor on `ArrayList`, `LinkedList`, `ArrayDeque` and `CopyOnWriteArrayList`, `removeAll`/`retainAll`/`containsAll` over the heap lists and sets on every declaration site a virtual call reaches (`AbstractCollection`, `AbstractSet`, the `Collection`/`List`/`Set` interfaces, the concrete collections and `ConcurrentHashMap$KeySetView`), and callback dispatch that resolves `accept`/`apply`/`compare`/`applyAsInt` up the receiver's superclass chain, which is what Spring's `AnnotationAwareOrderComparator` needs for its inherited `OrderComparator.compare`. The committed `crates/interp/tests/fixtures/method_flags/` fixture (`demo.FlagsProbe`, `javac --release 17`) pins the exact flags of a bridge method (`0x1041`), a varargs method (`0x0089`), a varargs constructor (`0x0081`), a synthetic lambda method (`0x1002`), the enum `$VALUES` field (`0x101A`) and `$values()` (`0x100A`), plus the discovery loops, the `Executable`/`Member` declarations, a missing-declaration typed error, a lookup miss that stays null, and the collection/callback fixes; 10 tests; `cargo test -p rava-interp` 221, `rava-vm` 50, `rava-classfile` 56 and `rava-cli` 85 pass, workspace 412; `cargo test -p rava-interp --test method_flags` exits 0. The Spring acceptance still exits 1, now at `error: method java/text/MessageFormat.<init>(Ljava/lang/String;)V has no bytecode` (Spring's `AbstractMessageSource` static initializer builds `new MessageFormat("")`); M2.23 stays blocked. |
+| M2.29 | `cargo test -p rava-interp --test message_format` | 0 | 2026-11-24 | `rava-vm::format` adds `HeapObject::MessageFormat` (the pattern text in a dedicated heap shape, since the C1 stub declares no pattern field), `HeapObject::StringBuffer` and `Shared::allocate_instance` selection for both; the natives are `<init>(String)`, `<init>(String, Locale)` (locale accepted and ignored), `applyPattern`, `toPattern`, the inherited `Format.format(Object)` Spring calls, both `format(..., StringBuffer, FieldPosition)` forms and the static `format(String, Object...)`. The parser supports literal text, `{index}`, repeated indices, the JDK's single-quote rules (`''`, quote toggling) and the JDK's literal `{index}` for an absent argument; a null argument renders `"null"`, and `number`/`date`/`time`/`choice` subformats are typed errors once a non-null argument reaches them. A null pattern and a malformed pattern are typed errors (no exception synthesis), and an argument renders through the VM's `String.valueOf` shape rather than a virtual Java `toString`. `StringBuffer` gets both constructors, `append(String)`, `toString` and `length`. The Spring rerun then exposed and this slice fixed four more concrete gaps: the `AccessibleObject` annotation queries (`getAnnotation`/`isAnnotationPresent`/`getDeclaredAnnotations`) that virtual resolution finds on that owner, `AccessibleObject.isAccessible`/`setAccessible` with a real per-member flag, `List.addAll(int, Collection)` on its four declaration sites, and the C1 tree's omitted transitive interfaces (`java.lang.constant.Constable` on `String`) in `Class.getInterfaces` and the inherited-lookup walk, skipped with the same rule M2.19 already used. The new `crates/interp/tests/message_format.rs` has 11 tests through the interpreter (`new`/`invokespecial`/`invokevirtual`/`invokestatic`), including the simple, repeated, missing, quoted, null-argument, null-pattern, static-format and `StringBuffer` forms and a typed subformat error; `cargo test -p rava-interp` passes, `cargo test -p rava-vm` and `cargo test -p rava-cli` pass, `cargo fmt --all --check` and `cargo clippy --workspace --all-targets -- -D warnings` exit 0. The Spring acceptance now stops at `Class.getMethod`'s null miss: `Class.getMethod("close", new Class[0])` returns `null` instead of throwing `NoSuchMethodException`, so `DisposableBeanAdapter.inferDestroyMethodsIfNecessary` calls `Method.getName` on null and the CLI reports `error: operand has the wrong type`; M2.23 stays blocked. |
 M0.6 boundary: the reference and class-unloading hooks are registration points only.
 M0 has no collector, so no weak/soft/phantom reference is cleared and no class is
 unloaded; M5 (ADR-0008) implements them on this seam. `MemoryRegion` is a VM-owned
@@ -801,13 +804,16 @@ pinned manifest and both committed stub trees, so `ElementType` and `RetentionPo
 resolve and the startup proceeds further (see the M2.27 boundary). M2.28 implemented the
 reflected-member predicate flags Spring's bridge-method check calls, and this slice's
 rerun exposed and fixed the collection-constructor, bulk-collection and inherited
-callback dispatch gaps behind it (see the M2.28 boundary). The next blocker is a runtime
-class rather than a member flag: Spring's `AbstractMessageSource` static initializer
-constructs `new java.text.MessageFormat("")`, and `java/text/MessageFormat.<init>(Ljava/lang/String;)V`
-has no native implementation and no `Code` in the C1 tree, so the interpreter reports
-`method java/text/MessageFormat.<init>(Ljava/lang/String;)V has no bytecode`.
-The local acceptance exits 1 with that error. The test and fixture are committed and
-must not be weakened.
+callback dispatch gaps behind it (see the M2.28 boundary). M2.29 then implemented the
+`java.text.MessageFormat` class Spring's `MessageSourceSupport` static initializer
+constructs and the message-formatting path calls, and fixed the gaps the next rerun
+exposed (see the M2.29 boundary). The current blocker is reflective-lookup miss
+semantics: `Class.getMethod("close", new Class[0])` returns `null` where the JDK throws
+`NoSuchMethodException`, so Spring's `DisposableBeanAdapter.inferDestroyMethodsIfNecessary`
+does not take its exception path, calls `Method.getName` on null and stops the CLI with
+`error: operand has the wrong type`. `RAVA_SPRING_ACCEPTANCE=1 cargo test -p rava-cli
+--test spring_context` exits 1 with that diagnostic. The test and fixture are committed
+and must not be weakened.
 
 M2.27 boundary: the manifest's descriptor closure is static and jar-only. It reads
 every `.class` entry in the pinned jars and adds a `class` record for each platform
@@ -873,6 +879,62 @@ committed `crates/interp/tests/fixtures/method_flags/` fixture pins the exact fl
 these fixes through Java 17 bytecode. The local Spring acceptance exits 1 at
 `java/text/MessageFormat.<init>(Ljava/lang/String;)V`; M2.23 stays blocked and the M2 gate
 is not claimed.
+
+M2.29 boundary: a `java.text.MessageFormat` is `HeapObject::MessageFormat`, a dedicated heap
+shape holding the pattern text; the C1 stub declares no instance field for it, so the object
+is not an `Instance` and an instance-field opcode does not apply to it. The pattern is stored
+verbatim and parsed on each format call, so `toPattern` returns the caller's text and
+`applyPattern` replaces it; the `(String, Locale)` constructor accepts and ignores the locale
+(the subset is locale-independent), and `getLocale`/`setLocale` have no native.
+`Shared::allocate_instance` selects the shape for `new` and reflection, `Shared::get_class`
+and `Object.toString` report `java.text.MessageFormat`, and the shape holds no references of
+its own.
+
+The parser supports literal text, `{index}`, repeated indices, an absent argument (the JDK's
+literal `{index}`), a null argument (`"null"`) and the JDK's single-quote rules (`''` is one
+quote; a lone quote toggles a quoted section in which `{`/`}` are literal, and an unterminated
+quote simply ends with the pattern). A `number`, `date`, `time`, `choice` or other subformat
+is a typed `VmError::Native` once a non-null argument reaches it; a null argument with a
+subformat still renders `"null"`. An unmatched `{` or a non-numeric argument index is a typed
+error raised by the constructor and `applyPattern`, not a synthesized
+`IllegalArgumentException`. An argument renders through the VM's `String.valueOf` conversion
+(String, boxed primitives, the `ClassName@hex` default), not a virtual Java `toString`;
+`parse`, `setFormat(s)`, `getFormats`, `formatToCharacterIterator` and
+`equals`/`hashCode`/`clone` have no native and fail loudly.
+
+`Format.format(Object)` — the JDK's `final` convenience method, which is the declaration a
+virtual call on a `MessageFormat` resolves to — is a native on `java/text/Format`. It requires
+the argument to be an `Object[]` (or null, the JDK's empty argument list); a non-array is a
+typed error where the JDK throws `ClassCastException`. `MessageFormat.format(Object,
+StringBuffer, FieldPosition)` and its `Object[]` overload append to a real
+`HeapObject::StringBuffer` and return the same buffer; the `FieldPosition` is ignored. The
+static `MessageFormat.format(String, Object...)` is registered too. `StringBuffer` gains both
+constructors, `append(String)`, `toString` and `length`; it is a second heap shape (the JDK's
+`AbstractStringBuilder` superclass is absent from the C1 tree, so
+`Shared::resolution_superclass` continues that one chain at `Object`, as it already did for
+`StringBuilder`). Other `StringBuffer` methods have no native.
+
+The Spring rerun behind this slice exposed and fixed four further concrete gaps.
+`AccessibleObject` is where virtual resolution finds `isAnnotationPresent` and `getAnnotation`,
+so those two and `getDeclaredAnnotations` are now registered on that owner as well as on the
+concrete member classes. `AccessibleObject.isAccessible` and `setAccessible` are implemented
+with a real per-member flag in `Shared` (there is still no access-control check, so the flag
+only answers the query). `List.addAll(int, Collection)` is implemented on `ArrayList`,
+`LinkedList`, `AbstractList` and `List`, inserting in order and returning whether the source
+was non-empty. `Class.getInterfaces` and the inherited-lookup walk now skip an interface the
+C1 tree does not ship (for example `java.lang.constant.Constable` on `String`), the rule
+M2.19 already applied to assignability and interface-method search, instead of turning the
+walk into a loader error.
+
+The Spring acceptance gets past `MessageFormat` and stops at reflective-lookup miss semantics:
+`Class.getMethod("close", new Class[0])` returns `null` (the M2.14 shape), where the JDK throws
+`NoSuchMethodException`. Spring's `DisposableBeanAdapter` relies on that exception
+(`inferDestroyMethodsIfNecessary` catches it and tries `"shutdown"`), so it calls
+`Method.getName` on the null result and the CLI reports `error: operand has the wrong type`.
+`RAVA_SPRING_ACCEPTANCE=1 cargo test -p rava-cli --test spring_context` exits 1; M2.23 stays
+blocked and the M2 gate is not claimed. The next slice should synthesize
+`NoSuchMethodException`/`NoSuchFieldException` for the six named lookups (and update the
+M2.14/M2.15/M2.16 tests that pin the null miss) instead of returning null.
 
 M2.24 boundary: the stream pipeline is **eager**. A `Stream` holds its whole element list, and `filter`/`map`/`flatMap`/`distinct`/`sorted`/`peek`/`limit`/`skip`/`sequential`/`parallel`/`unordered` each allocate a new stream with a computed vector; there is no lazy stage graph, no short-circuiting until a terminal operation, no `Spliterator`-backed stream after construction, no parallel execution (the `boolean` of `StreamSupport.stream` is recorded and `isParallel` reports it) and no close action (`onClose` returns the stream, `close` does nothing). `sorted()` compares `Integer`/`Long`/`Float`/`Double` numerically and `String` by UTF-16 code unit; any other element or a null is a typed error rather than a synthesized `ClassCastException`/`NullPointerException`. `distinct` and `toSet` compare strings by content, boxed primitives by per-kind value equality and everything else by reference identity; `Collectors.toMap` appends without the JDK's duplicate-key `IllegalStateException`, `toList`/`toUnmodifiableList` return an ordinary modifiable heap list (there is no unmodifiable wrapper), `toUnmodifiableSet` is the ordinary linked set, and `Collectors.counting()` boxes a `Long` (M2.25 replaced the temporary `Integer` count that stood in before the primitive-box family existed). `joining` renders a non-null element through the VM's `String.valueOf` shape, so a non-`CharSequence` is accepted where the JDK would reject it. A VM `Spliterator` is a snapshot plus a cursor with `ORDERED|SIZED|SUBSIZED` (`DISTINCT` added for a set); `trySplit` returns null and `getComparator` null. A Java object implementing `Spliterator` is drained through its own `tryAdvance` and a native `Consumer` sink, so a Java default `forEachRemaining` is not executed by the VM; Spring's and the fixture's spliterators implement the abstract `tryAdvance`, which is the shape this slice supports. `Optional.empty()` allocates a fresh object rather than the JDK singleton, and a present value is a `Value`, so `Optional` identity is not the JDK's. `Collection.stream`/`spliterator` snapshot the collection, so a later mutation is not observed. `removeIf` and `Map.forEach` are the two callback-taking collection operations added here; `compute`/`merge`/`removeIf`'s concurrent variants and the primitive `IntStream`/`LongStream`/`DoubleStream` pipelines are out of scope. `java.util.stream` `gather`, `mapMulti`, `takeWhile`/`dropWhile`, `reduce` with three arguments, `Collectors.groupingBy`/`partitioningBy`/`teeing`/`summarizing*` and `Spliterator.OfInt`/`OfLong`/`OfDouble` are not implemented and fail loudly. No Spring behavior is faked: the acceptance fixture and test are unchanged, and the remaining blocker is recorded above.
 
@@ -1069,17 +1131,23 @@ A fresh session should:
     `Method`, `Constructor`, `Executable`, `Field` and `Member`) with the JDK's
     `getModifiers()` masking, plus the `Set`/list `(Collection)` constructors,
     `removeAll`/`retainAll`/`containsAll` and the superclass-chain callback resolution
-    the rerun exposed (`cargo test -p rava-interp --test method_flags`). M2.23 is
-    **blocked**: the Spring startup path runs through class loading, logging, annotation
-    reflection, the primitive-box step, the stream pipeline,
-    `CachingMetadataReaderFactory`, `computeIfAbsent`, member reflection,
-    `Class.getDeclaredClasses` and comparators. The next blocker is
-    `java/text/MessageFormat.<init>(Ljava/lang/String;)V`, which Spring's
-    `AbstractMessageSource` static initializer reaches and which has no native
-    implementation and no `Code` in the C1 tree. `RAVA_SPRING_ACCEPTANCE=1 cargo test -p
-    rava-cli --test spring_context` runs the fixture and exits 1 with `error: method
-    java/text/MessageFormat.<init>(Ljava/lang/String;)V has no bytecode`; the M2 gate is
-    not claimed. Start the next slice at that runtime gap.
+    the rerun exposed (`cargo test -p rava-interp --test method_flags`). M2.29 landed the
+    minimal `java.text.MessageFormat` (`HeapObject::MessageFormat`, the pattern parser and
+    the `Format.format(Object)`/`StringBuffer`/static forms), the `StringBuffer` shape and
+    the M2.23 rerun fixes: the `AccessibleObject` annotation queries and accessibility
+    flags, `List.addAll(int, Collection)` and the C1 tree's omitted transitive interfaces
+    in `Class.getInterfaces` and the inherited-lookup walk
+    (`cargo test -p rava-interp --test message_format`). M2.23 is **blocked**: the Spring
+    startup path runs through class loading, logging, annotation reflection, the
+    primitive-box step, the stream pipeline, `CachingMetadataReaderFactory`,
+    `computeIfAbsent`, member reflection, `Class.getDeclaredClasses`, comparators and
+    message formatting. The next blocker is reflective-lookup miss semantics:
+    `Class.getMethod("close", new Class[0])` returns `null` where the JDK throws
+    `NoSuchMethodException`, so Spring's `DisposableBeanAdapter` dereferences the null and
+    `RAVA_SPRING_ACCEPTANCE=1 cargo test -p rava-cli --test spring_context` exits 1 with
+    `error: operand has the wrong type`; the M2 gate is not claimed. Start the next slice
+    by synthesizing the JDK's `NoSuchMethodException`/`NoSuchFieldException` for the six
+    named lookups instead of returning null.
 4. Do not write runtime code outside a defined slice.
 
 ## Open decisions

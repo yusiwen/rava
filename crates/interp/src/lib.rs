@@ -1838,6 +1838,12 @@ fn runtime_class_ref(shared: &Shared, reference: ObjRef) -> Result<ClassRef, Int
             HeapObject::StringBuilder(_) => {
                 RuntimeKind::Library(rava_vm::collections::STRING_BUILDER_CLASS)
             }
+            HeapObject::StringBuffer(_) => {
+                RuntimeKind::Library(rava_vm::format::STRING_BUFFER_CLASS)
+            }
+            HeapObject::MessageFormat(_) => {
+                RuntimeKind::Library(rava_vm::format::MESSAGE_FORMAT_CLASS)
+            }
             HeapObject::List(list) => RuntimeKind::Named(list.class),
             HeapObject::Set(set) => RuntimeKind::Named(set.class),
             HeapObject::Map(map) => RuntimeKind::Named(map.class),
@@ -2042,6 +2048,12 @@ fn dispatch_class(
             HeapObject::Annotation(annotation) => ReceiverKind::Annotation(annotation.class),
             HeapObject::Enum(constant) => ReceiverKind::Enum(constant.class),
             HeapObject::StringBuilder(_) => ReceiverKind::StringBuilder,
+            HeapObject::StringBuffer(_) => ReceiverKind::Named(
+                shared.load_library_class(rava_vm::format::STRING_BUFFER_CLASS)?,
+            ),
+            HeapObject::MessageFormat(_) => ReceiverKind::Named(
+                shared.load_library_class(rava_vm::format::MESSAGE_FORMAT_CLASS)?,
+            ),
             HeapObject::List(list) => ReceiverKind::Named(list.class),
             HeapObject::Set(set) => ReceiverKind::Named(set.class),
             HeapObject::Map(map) => ReceiverKind::Named(map.class),

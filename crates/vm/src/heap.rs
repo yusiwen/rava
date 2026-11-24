@@ -1109,6 +1109,16 @@ pub struct SinkObject {
     pub destination: ObjRef,
 }
 
+/// One `java.text.MessageFormat`: the pattern its constructor or `applyPattern` stored.
+///
+/// The pattern is kept verbatim and parsed on each format call, so `toPattern` returns the
+/// caller's text and `applyPattern` is a plain replacement. The Java `Locale` argument is
+/// accepted but not stored; see [`crate::format`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MessageFormatObject {
+    pub pattern: String,
+}
+
 /// One `java.util.regex.Pattern`: its Java source text.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PatternObject {
@@ -1291,6 +1301,18 @@ pub enum HeapObject {
     /// count and index units, and an operation that would leave a lone surrogate is a
     /// typed error, exactly as for a string.
     StringBuilder(String),
+    /// A `java.lang.StringBuffer` (the same `java.lang.AbstractStringBuilder` state as
+    /// [`HeapObject::StringBuilder`]).
+    ///
+    /// `MessageFormat`'s `format(Object, StringBuffer, FieldPosition)` form appends to one
+    /// of these. The stored text is valid UTF-8, exactly as for a builder.
+    StringBuffer(String),
+    /// One `java.text.MessageFormat`: its pattern text.
+    ///
+    /// The C1 stub declares no instance field for the pattern, so the pattern lives in this
+    /// dedicated heap shape. A `Locale` is not stored: the formatting subset is
+    /// locale-independent.
+    MessageFormat(MessageFormatObject),
     /// A `java.util.List`-family object: its runtime class and elements in index order.
     ///
     /// An element is a [`Value`], so the list can hold a reference (including null) and
@@ -1542,6 +1564,19 @@ impl Heap {
     /// is the entry point that creates one for `new` and reflection.
     pub fn allocate_string_builder(&mut self) -> ObjRef {
         self.allocate(HeapObject::StringBuilder(String::new()))
+    }
+
+    /// Allocate an empty `java.lang.StringBuffer`. [`crate::Shared::allocate_instance`] is
+    /// the entry point that creates one for `new` and reflection.
+    pub fn allocate_string_buffer(&mut self) -> ObjRef {
+        self.allocate(HeapObject::StringBuffer(String::new()))
+    }
+
+    /// Allocate a `java.text.MessageFormat` holding `pattern`.
+    pub fn allocate_message_format(&mut self, pattern: impl Into<String>) -> ObjRef {
+        self.allocate(HeapObject::MessageFormat(MessageFormatObject {
+            pattern: pattern.into(),
+        }))
     }
 
     /// Allocate an empty list of the given runtime class.
@@ -1879,6 +1914,53 @@ impl Heap {
             _ => Err(HeapError::WrongObjectKind {
                 reference,
                 expected: "a String builder",
+            }),
+        }
+    }
+
+    /// The text behind a `java.lang.StringBuffer` reference.
+    pub fn string_buffer(&self, reference: ObjRef) -> Result<&str, HeapError> {
+        match self.get(reference)? {
+            HeapObject::StringBuffer(text) => Ok(text),
+            _ => Err(HeapError::WrongObjectKind {
+                reference,
+                expected: "a String buffer",
+            }),
+        }
+    }
+
+    /// The mutable text behind a `java.lang.StringBuffer` reference.
+    pub fn string_buffer_mut(&mut self, reference: ObjRef) -> Result<&mut String, HeapError> {
+        match self.get_mut(reference)? {
+            HeapObject::StringBuffer(text) => Ok(text),
+            _ => Err(HeapError::WrongObjectKind {
+                reference,
+                expected: "a String buffer",
+            }),
+        }
+    }
+
+    /// The state behind a `java.text.MessageFormat` reference.
+    pub fn message_format(&self, reference: ObjRef) -> Result<&MessageFormatObject, HeapError> {
+        match self.get(reference)? {
+            HeapObject::MessageFormat(format) => Ok(format),
+            _ => Err(HeapError::WrongObjectKind {
+                reference,
+                expected: "a MessageFormat",
+            }),
+        }
+    }
+
+    /// The mutable state behind a `java.text.MessageFormat` reference.
+    pub fn message_format_mut(
+        &mut self,
+        reference: ObjRef,
+    ) -> Result<&mut MessageFormatObject, HeapError> {
+        match self.get_mut(reference)? {
+            HeapObject::MessageFormat(format) => Ok(format),
+            _ => Err(HeapError::WrongObjectKind {
+                reference,
+                expected: "a MessageFormat",
             }),
         }
     }

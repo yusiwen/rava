@@ -12,6 +12,7 @@ pub mod boxed;
 pub mod collections;
 pub mod error;
 pub mod exceptions;
+pub mod format;
 pub mod generic;
 pub mod heap;
 pub mod hooks;
@@ -44,8 +45,9 @@ pub use heap::{
     CollectorKind, CollectorObject, ConditionState, EnumConstant, EnumerationObject, FieldLayout,
     FieldSlot, GenericArrayType, Heap, HeapError, HeapObject, Instance, IteratorObject,
     LambdaObject, LambdaTarget, LambdaTargetKind, ListObject, MapEntry, MapObject, MemberKind,
-    ObjRef, ParameterizedType, PrimitiveKind, ReflectMember, SetObject, SinkObject,
-    SpliteratorObject, StreamObject, TypeDeclaration, TypeObject, TypeVariableType, WildcardType,
+    MessageFormatObject, ObjRef, ParameterizedType, PrimitiveKind, ReflectMember, SetObject,
+    SinkObject, SpliteratorObject, StreamObject, TypeDeclaration, TypeObject, TypeVariableType,
+    WildcardType,
 };
 pub use hooks::{ClassUnloadHook, Hooks, ReferenceHook};
 pub use loader::{ClassEntry, ClassId, ClassState, LoaderId};

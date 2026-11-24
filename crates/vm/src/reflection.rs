@@ -375,6 +375,71 @@ pub fn register_natives(shared: &Shared) {
         "()Ljava/lang/String;",
         constructor_get_name,
     );
+    // `AccessibleObject` declares both accessibility methods in the C1 stub, and every
+    // concrete member inherits them there. The flag is bookkeeping only: this VM has no
+    // access-control check.
+    shared.register_native(
+        "java/lang/reflect/AccessibleObject",
+        "isAccessible",
+        "()Z",
+        accessible_is_accessible,
+    );
+    shared.register_native(
+        "java/lang/reflect/AccessibleObject",
+        "setAccessible",
+        "(Z)V",
+        accessible_set_accessible,
+    );
+    // `Field`, `Method` and `Constructor` redeclare `setAccessible` in the C1 stub, so
+    // each declaration site needs the entry; `isAccessible` stays inherited.
+    for owner in [
+        "java/lang/reflect/Field",
+        "java/lang/reflect/Method",
+        "java/lang/reflect/Constructor",
+    ] {
+        shared.register_native(owner, "setAccessible", "(Z)V", accessible_set_accessible);
+    }
+}
+
+/// `AccessibleObject.isAccessible()`: whether `setAccessible(true)` was recorded.
+fn accessible_is_accessible(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    _args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    if receiver.is_null() {
+        return Err(VmError::Native(
+            "AccessibleObject.isAccessible called with a null receiver".to_owned(),
+        ));
+    }
+    Ok(Some(Value::Int(i32::from(shared.is_accessible(receiver)))))
+}
+
+/// `AccessibleObject.setAccessible(Z)`: record the flag for this member and return void.
+fn accessible_set_accessible(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let accessible = match args.first().copied() {
+        Some(Value::Int(value)) => value != 0,
+        _ => {
+            return Err(VmError::Native(
+                "AccessibleObject.setAccessible expects a boolean argument".to_owned(),
+            ));
+        }
+    };
+    if receiver.is_null() {
+        return Err(VmError::Native(
+            "AccessibleObject.setAccessible called with a null receiver".to_owned(),
+        ));
+    }
+    shared.set_accessible(receiver, accessible);
+    Ok(None)
 }
 
 fn heap_error(error: HeapError) -> VmError {
@@ -1002,6 +1067,11 @@ fn class_is_false(
 }
 
 /// `Class.getInterfaces()`: the direct interfaces, in class-file order.
+///
+/// The C1 tree is the class library this VM ships; a transitive interface it omits (for
+/// example `java.lang.constant.Constable` on `String`) cannot be reported. It is skipped,
+/// the same rule M2.19's assignability walk and the interface-method search already use,
+/// rather than turning every `String.class.getInterfaces()` into a loader error.
 fn class_get_interfaces(
     shared: &Shared,
     _thread: &ThreadState,
@@ -1016,8 +1086,11 @@ fn class_get_interfaces(
                 .ok_or_else(|| VmError::Loader(format!("class id {} is not loaded", class.0)))?;
             let mut objects = Vec::new();
             for name in entry.file.interface_names()? {
-                let interface = shared.load_class(entry.loader, name)?;
-                objects.push(Value::Ref(shared.class_object(interface)?));
+                match shared.load_class(entry.loader, name) {
+                    Ok(interface) => objects.push(Value::Ref(shared.class_object(interface)?)),
+                    Err(VmError::ClassNotFound { .. }) => {}
+                    Err(error) => return Err(error),
+                }
             }
             objects
         }
@@ -1722,8 +1795,15 @@ fn collect_lookup_order(
         }
     }
     for interface in interfaces {
-        let interface = shared.load_class(loader, &interface)?;
-        collect_lookup_order(shared, interface, visited, order)?;
+        // The C1 tree omits a few transitive interfaces (for example
+        // `java.lang.constant.Constable` on `String`); they cannot be part of the
+        // inherited-lookup walk, while a genuinely missing class elsewhere is still a
+        // loader error.
+        match shared.load_class(loader, &interface) {
+            Ok(interface) => collect_lookup_order(shared, interface, visited, order)?,
+            Err(VmError::ClassNotFound { .. }) => {}
+            Err(error) => return Err(error),
+        }
     }
     Ok(())
 }

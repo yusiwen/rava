@@ -334,6 +334,8 @@ pub(crate) fn runtime_binary_name(shared: &Shared, receiver: ObjRef) -> Result<S
         Annotation,
         Enum(ClassId),
         StringBuilder,
+        StringBuffer,
+        MessageFormat,
         Named(ClassId),
         Array(ClassRef),
         Lambda(ClassId),
@@ -368,6 +370,8 @@ pub(crate) fn runtime_binary_name(shared: &Shared, receiver: ObjRef) -> Result<S
             HeapObject::Annotation(_) => Kind::Annotation,
             HeapObject::Enum(constant) => Kind::Enum(constant.class),
             HeapObject::StringBuilder(_) => Kind::StringBuilder,
+            HeapObject::StringBuffer(_) => Kind::StringBuffer,
+            HeapObject::MessageFormat(_) => Kind::MessageFormat,
             HeapObject::List(list) => Kind::Named(list.class),
             HeapObject::Set(set) => Kind::Named(set.class),
             HeapObject::Map(map) => Kind::Named(map.class),
@@ -420,6 +424,8 @@ pub(crate) fn runtime_binary_name(shared: &Shared, receiver: ObjRef) -> Result<S
             Ok(entry.name.replace('/', "."))
         }
         Kind::StringBuilder => Ok("java.lang.StringBuilder".to_owned()),
+        Kind::StringBuffer => Ok("java.lang.StringBuffer".to_owned()),
+        Kind::MessageFormat => Ok("java.text.MessageFormat".to_owned()),
         Kind::Named(class) => {
             let entry = shared
                 .entry(class)

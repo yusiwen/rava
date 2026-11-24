@@ -127,6 +127,28 @@ pub fn register_natives(shared: &Shared) {
         format!("(){ANNOTATION_ARRAY}"),
         get_annotations,
     );
+    // `AccessibleObject` is the class that declares `isAnnotationPresent` and
+    // `getAnnotation` in the C1 stub, and a `Method`/`Field`/`Constructor` receiver
+    // resolves those inherited declarations there. Registering them on that owner is what
+    // serves Spring's `AccessibleObject.isAnnotationPresent` call without a `Code` body.
+    shared.register_native(
+        "java/lang/reflect/AccessibleObject",
+        "getAnnotation",
+        format!("(Ljava/lang/Class;){}", &ANNOTATION_ARRAY[1..]),
+        get_annotation,
+    );
+    shared.register_native(
+        "java/lang/reflect/AccessibleObject",
+        "isAnnotationPresent",
+        "(Ljava/lang/Class;)Z",
+        is_annotation_present,
+    );
+    shared.register_native(
+        "java/lang/reflect/AccessibleObject",
+        "getDeclaredAnnotations",
+        format!("(){ANNOTATION_ARRAY}"),
+        get_declared_annotations,
+    );
 
     // `Enum.name` is what makes an `e` element value observable: the object stores the
     // constant's name, not the enum's static field value.
