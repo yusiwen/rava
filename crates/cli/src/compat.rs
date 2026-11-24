@@ -1,11 +1,11 @@
 //! `rava compat` — compatibility tooling.
 //!
-//! M1.1 adds `compat target`, M1.2 adds `compat manifest`, and M1.3 adds
-//! `compat stubs` plus `compat link-check`.
+//! M1.1 adds `compat target`, M1.2 adds `compat manifest`, M1.3 adds `compat stubs`
+//! and `compat link-check`, and M1.4 adds `compat check`, which runs all of them.
 
 use std::process::ExitCode;
 
-use crate::{manifest, stubs, target};
+use crate::{check, manifest, stubs, target};
 
 pub fn run(args: &[String]) -> ExitCode {
     match args.first().map(String::as_str) {
@@ -13,6 +13,7 @@ pub fn run(args: &[String]) -> ExitCode {
         Some("manifest") => manifest::command(&args[1..]),
         Some("stubs") => stubs::stubs_command(&args[1..]),
         Some("link-check") => stubs::link_check_command(&args[1..]),
+        Some("check") => check::command(&args[1..]),
         Some("-h" | "--help" | "help") => {
             print_usage();
             ExitCode::SUCCESS
@@ -38,4 +39,5 @@ fn print_usage() {
     println!("  manifest    generate the static surface manifest, or --check the committed one");
     println!("  stubs       write the signature-only stub class library");
     println!("  link-check  resolve the manifest against the stub class library");
+    println!("  check       run the local M1 compatibility gate");
 }

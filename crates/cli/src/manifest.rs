@@ -268,6 +268,15 @@ pub fn command(args: &[String]) -> ExitCode {
     }
 }
 
+/// Regenerates the manifest in memory and byte-compares it with the committed file.
+///
+/// `compat check` uses this; `compat manifest --check` reaches it through
+/// [`manifest`] so both commands compare the same bytes.
+pub(crate) fn check(root: &Path) -> Result<Counts, ManifestError> {
+    let (_, counts) = manifest(root, true)?;
+    Ok(counts)
+}
+
 /// Generates the manifest in memory and either writes it or compares it with the
 /// committed file. The comparison is over bytes, not lines.
 fn manifest(root: &Path, check: bool) -> Result<(PathBuf, Counts), ManifestError> {

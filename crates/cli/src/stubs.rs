@@ -71,11 +71,11 @@ struct StubReport {
 }
 
 /// The result of resolving the committed manifest against the stub tree.
-struct LinkReport {
+pub(crate) struct LinkReport {
     manifest: String,
     stubs: String,
-    counts: Counts,
-    unresolved: Vec<String>,
+    pub(crate) counts: Counts,
+    pub(crate) unresolved: Vec<String>,
 }
 
 /// The members grouped by owner, in the order the stubs declare them.
@@ -214,27 +214,44 @@ fn parse_root(args: &[String], usage: fn()) -> Result<Option<PathBuf>, u8> {
 /// Writes a fresh `stdlib/classes` tree from the committed manifest.
 fn write_stubs(root: &Path) -> Result<StubReport, StubError> {
     let (lock, surface) = load_surface(root)?;
-    let stub_dir = root.join(&lock.stubs_path);
+    let files = write_stub_tree(&root.join(&lock.stubs_path), &lock, &surface)?;
 
-    // The directory is generated output. Replacing it wholesale removes files for
-    // classes that left the manifest and keeps the tree byte-identical across runs.
+    Ok(StubReport {
+        manifest: lock.manifest_path,
+        stubs: lock.stubs_path,
+        counts: surface.counts(),
+        files,
+    })
+}
+
+/// Writes a complete stub tree into `stub_dir` and returns the number of class files.
+///
+/// The directory is generated output. Replacing it wholesale removes files for
+/// classes that left the manifest and keeps the tree byte-identical across runs.
+/// `compat check` calls this with a temporary directory, so the committed stub tree
+/// is never rewritten by the gate.
+pub(crate) fn write_stub_tree(
+    stub_dir: &Path,
+    lock: &TargetLock,
+    surface: &Surface,
+) -> Result<usize, StubError> {
     if stub_dir.exists() {
-        fs::remove_dir_all(&stub_dir).map_err(|error| {
+        fs::remove_dir_all(stub_dir).map_err(|error| {
             StubError::new(format!(
                 "cannot clear stub directory {}: {error}",
                 stub_dir.display()
             ))
         })?;
     }
-    fs::create_dir_all(&stub_dir).map_err(|error| {
+    fs::create_dir_all(stub_dir).map_err(|error| {
         StubError::new(format!(
             "cannot create stub directory {}: {error}",
             stub_dir.display()
         ))
     })?;
 
-    let major = class_major(&lock)?;
-    let entries = StubEntries::collect(&surface);
+    let major = class_major(lock)?;
+    let entries = StubEntries::collect(surface);
     for owner in surface.classes() {
         let bytes = stub_class(owner, &entries, major)?;
         let path = stub_dir.join(format!("{owner}.class"));
@@ -251,16 +268,11 @@ fn write_stubs(root: &Path) -> Result<StubReport, StubError> {
         })?;
     }
 
-    Ok(StubReport {
-        manifest: lock.manifest_path,
-        stubs: lock.stubs_path,
-        counts: surface.counts(),
-        files: surface.counts().classes,
-    })
+    Ok(surface.counts().classes)
 }
 
 /// Reads and parses the committed manifest through the validated target lock.
-fn load_surface(root: &Path) -> Result<(TargetLock, Surface), StubError> {
+pub(crate) fn load_surface(root: &Path) -> Result<(TargetLock, Surface), StubError> {
     let lock = target::load_target(root)?;
     let path = root.join(&lock.manifest_path);
     let text = fs::read_to_string(&path).map_err(|error| {
@@ -539,7 +551,7 @@ impl ClassIndex {
 
 /// Resolves every manifest record against the stubs. It parses class files only; it
 /// never asks the loader to define them, so no verification or execution happens.
-fn link_check(root: &Path) -> Result<LinkReport, StubError> {
+pub(crate) fn link_check(root: &Path) -> Result<LinkReport, StubError> {
     let (lock, surface) = load_surface(root)?;
     let source = DirectorySource::new(root.join(&lock.stubs_path));
     let mut classes: BTreeMap<String, ClassIndex> = BTreeMap::new();

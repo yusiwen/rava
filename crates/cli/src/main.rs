@@ -3,6 +3,7 @@
 //! Deliberately dependency-light: M1 needs only the `compat` commands, so argument
 //! handling is a small match instead of a CLI framework.
 
+mod check;
 mod compat;
 mod manifest;
 mod stubs;
@@ -41,4 +42,5 @@ fn print_usage() {
     println!("  compat manifest    generate or check the static surface manifest");
     println!("  compat stubs       write the signature-only stub class library");
     println!("  compat link-check  resolve the manifest against the stub class library");
+    println!("  compat check       run the local M1 compatibility gate");
 }

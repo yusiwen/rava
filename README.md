@@ -4,15 +4,16 @@ A Java 17 runtime in Rust, built to run Spring — not just a corpus.
 
 ## Status
 
-**Decisions accepted (2026-11-23). M0 is complete; M1.1, M1.2 and M1.3 are done
-(2026-11-24):** workspace, parser, loader identity, heap/seams, the interpreter core,
-Hello, safepoint/GC-root and no-lock-across-Java-call invariants, the verifier
-dataflow skeleton with the metadata dump fixture, the pinned target lock with the
-reference application and its 35-jar set, the static surface manifest
-(`compat/surface/spring-boot-3.5.16.txt`: 980 classes, 177 fields, 3,626 methods,
-1,048 interface methods), and the signature-only stub library under `stdlib/classes/`
-(980 class files) with a zero-unresolved link-check. **M1.4 (manifest reproducibility
-and M1 gate review) is next.**
+**Decisions accepted (2026-11-23). M0 and M1 are complete (2026-11-24):** workspace,
+parser, loader identity, heap/seams, the interpreter core, Hello, safepoint/GC-root
+and no-lock-across-Java-call invariants, the verifier dataflow skeleton with the
+metadata dump fixture, the pinned target lock with the reference application and its
+35-jar set, the static surface manifest (`compat/surface/spring-boot-3.5.16.txt`:
+980 classes, 177 fields, 3,626 methods, 1,048 interface methods), and the
+signature-only stub library under `stdlib/classes/` (980 class files) with a
+zero-unresolved link-check. The manifest and stubs regenerate byte-identically, and
+`rava compat check` runs the whole M1 gate. **M2 (C1 metadata, the minimal library
+and the Spring context) is next.**
 
 ## What this project is
 
@@ -90,6 +91,17 @@ The signature-only stub library is generated and link-checked with:
 cargo run -p rava-cli -- compat stubs
 cargo run -p rava-cli -- compat link-check
 ```
+
+The local M1 compatibility gate runs all four stages and prints `compat check: ok`
+only when they pass:
+
+```sh
+cargo run -p rava-cli -- compat check
+```
+
+It reads the already-fetched `compat/jars/` (the manifest stage scans the pinned
+class files) but needs no network. It does not re-hash the jars; that stays with
+`bash compat/fetch-jars.sh --check`.
 
 `stdlib/classes/` is a generated deliverable, not the runtime class library; see
 [`stdlib/README.md`](stdlib/README.md) for what the stubs do and do not contain.
