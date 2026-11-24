@@ -110,6 +110,30 @@ impl Assembler {
         self.op(0x15, &[slot]);
     }
 
+    /// `lload` for a long local.
+    pub fn lload(&mut self, slot: u8) {
+        match slot {
+            0..=3 => self.bytes.push(0x1e + slot),
+            _ => self.op(0x16, &[slot]),
+        }
+    }
+
+    /// `fload` for a float local.
+    pub fn fload(&mut self, slot: u8) {
+        match slot {
+            0..=3 => self.bytes.push(0x22 + slot),
+            _ => self.op(0x17, &[slot]),
+        }
+    }
+
+    /// `dload` for a double local.
+    pub fn dload(&mut self, slot: u8) {
+        match slot {
+            0..=3 => self.bytes.push(0x26 + slot),
+            _ => self.op(0x18, &[slot]),
+        }
+    }
+
     /// `aload` for a reference local. Slots 0..=3 use the implicit one-byte form.
     pub fn aload(&mut self, slot: u8) {
         match slot {
@@ -237,6 +261,13 @@ impl Assembler {
     /// `invokespecial`: constructors, private methods and superclass calls.
     pub fn invokespecial(&mut self, index: u16) {
         self.op(0xb7, &index.to_be_bytes());
+    }
+
+    /// `invokedynamic`: a call site through a `CONSTANT_InvokeDynamic`. The two reserved
+    /// operand bytes are zero, as JVMS §6.5.invokedynamic requires.
+    pub fn invokedynamic(&mut self, index: u16) {
+        let [high, low] = index.to_be_bytes();
+        self.op(0xba, &[high, low, 0, 0]);
     }
 
     /// `ifeq`, `ifne`, `iflt`, `ifge`, `ifgt`, `ifle` by their JVMS opcodes.

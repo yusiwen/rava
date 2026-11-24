@@ -20,10 +20,18 @@
 //! reference identity. A class constant keeps its name: the class is resolved through
 //! the executing frame's loader, so the name cannot be turned into a class id at decode
 //! time.
+//!
+//! M2.18 adds `invokedynamic` (`0xba`): its `CONSTANT_InvokeDynamic` supplies the
+//! call-site name, descriptor and bootstrap method index, and the class's
+//! `BootstrapMethods` entry is materialized into its typed handle and static arguments
+//! here. Decoding therefore reports an out-of-range or malformed bootstrap reference as
+//! a typed class-file error, before any execution. `lload`/`fload`/`dload` were added so
+//! an assembled call site can pass a long/float/double argument to the concatenation
+//! conversion.
 
 use std::collections::HashMap;
 
-use rava_classfile::{ClassFile, Constant};
+use rava_classfile::{BootstrapMethodEntry, ClassFile, Constant};
 use rava_vm::ArrayKind;
 
 use crate::error::InterpError;
@@ -79,10 +87,16 @@ const CONDITIONS: [IntCondition; 6] = [
     IntCondition::Le,
 ];
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Instr {
     Iconst(i32),
     ILoad(u8),
+    /// `lload`/`lload_<n>`.
+    LLoad(u8),
+    /// `fload`/`fload_<n>`.
+    FLoad(u8),
+    /// `dload`/`dload_<n>`.
+    DLoad(u8),
     ALoad(u8),
     IStore(u8),
     AStore(u8),
@@ -130,6 +144,15 @@ pub enum Instr {
         name: String,
         descriptor: String,
     },
+    /// `invokedynamic`: a call site whose target the class's `BootstrapMethods` entry
+    /// supplies. The entry is resolved at decode time into its typed handle and static
+    /// arguments; execution supports `StringConcatFactory` only.
+    InvokeDynamic {
+        /// The call-site name from `CONSTANT_InvokeDynamic` (`makeConcatWithConstants`).
+        name: String,
+        descriptor: String,
+        bootstrap: BootstrapMethodEntry,
+    },
     /// `newarray`: the primitive element kind the `atype` operand names.
     NewArray(ArrayKind),
     /// `anewarray`: the component class name or array descriptor from the class constant.
@@ -165,7 +188,7 @@ pub enum Instr {
     Return,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct DecodedMethod {
     pub instructions: Vec<Instr>,
     /// The exception table, in class-file order. The order is the search order: the
@@ -225,12 +248,30 @@ pub fn decode(file: &ClassFile, attribute_data: &[u8]) -> Result<DecodedMethod, 
                 pc += 1;
                 Instr::ILoad(index)
             }
+            0x16 => {
+                let index = byte(code, pc)?;
+                pc += 1;
+                Instr::LLoad(index)
+            }
+            0x17 => {
+                let index = byte(code, pc)?;
+                pc += 1;
+                Instr::FLoad(index)
+            }
+            0x18 => {
+                let index = byte(code, pc)?;
+                pc += 1;
+                Instr::DLoad(index)
+            }
             0x19 => {
                 let index = byte(code, pc)?;
                 pc += 1;
                 Instr::ALoad(index)
             }
             0x1a..=0x1d => Instr::ILoad(opcode - 0x1a),
+            0x1e..=0x21 => Instr::LLoad(opcode - 0x1e),
+            0x22..=0x25 => Instr::FLoad(opcode - 0x22),
+            0x26..=0x29 => Instr::DLoad(opcode - 0x26),
             0x2a..=0x2d => Instr::ALoad(opcode - 0x2a),
             0x36 => {
                 let index = byte(code, pc)?;
@@ -405,6 +446,26 @@ pub fn decode(file: &ClassFile, attribute_data: &[u8]) -> Result<DecodedMethod, 
                     class,
                     name,
                     descriptor,
+                }
+            }
+            0xba => {
+                let index = u16::from_be_bytes([byte(code, pc)?, byte(code, pc + 1)?]);
+                pc += 2;
+                // JVMS §6.5.invokedynamic: the two bytes after the index are reserved and
+                // must be zero. A non-zero value is malformed, not a second operand.
+                let reserved = u16::from_be_bytes([byte(code, pc)?, byte(code, pc + 1)?]);
+                pc += 2;
+                if reserved != 0 {
+                    return Err(InterpError::Decode(format!(
+                        "invokedynamic constant {index} has non-zero reserved bytes 0x{reserved:04x}"
+                    )));
+                }
+                let (name, descriptor, bootstrap_index) = resolve_invoke_dynamic(file, index)?;
+                let bootstrap = file.bootstrap_method(bootstrap_index)?;
+                Instr::InvokeDynamic {
+                    name,
+                    descriptor,
+                    bootstrap,
                 }
             }
             0xbb => {
@@ -671,6 +732,34 @@ fn resolve_field(file: &ClassFile, index: u16) -> Result<(String, String, String
     let class = file.constant_pool.class_name(*class_index)?.to_owned();
     let (name, descriptor) = file.constant_pool.name_and_type(*name_and_type_index)?;
     Ok((class, name.to_owned(), descriptor.to_owned()))
+}
+
+/// Resolve a `CONSTANT_InvokeDynamic` to its call-site name, descriptor and bootstrap
+/// method index.
+///
+/// The bootstrap index names an entry of the class's `BootstrapMethods` attribute; it is
+/// passed back so `decode` can materialize the typed entry through
+/// [`ClassFile::bootstrap_method`], which reports a malformed or out-of-range reference as
+/// a typed class-file error.
+fn resolve_invoke_dynamic(
+    file: &ClassFile,
+    index: u16,
+) -> Result<(String, String, u16), InterpError> {
+    let Constant::InvokeDynamic {
+        bootstrap_method_attr_index,
+        name_and_type_index,
+    } = file.constant_pool.get(index)?
+    else {
+        return Err(InterpError::Decode(format!(
+            "constant {index} is not an InvokeDynamic"
+        )));
+    };
+    let (name, descriptor) = file.constant_pool.name_and_type(*name_and_type_index)?;
+    Ok((
+        name.to_owned(),
+        descriptor.to_owned(),
+        *bootstrap_method_attr_index,
+    ))
 }
 
 fn resolve_method(

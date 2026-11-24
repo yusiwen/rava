@@ -66,6 +66,15 @@ pub enum VmError {
     /// unchanged and the interpreter turns it back into `InterpError::Thrown`. The
     /// caller's exception table can therefore catch it.
     Thrown(ObjRef),
+    /// An `invokedynamic` call site named a bootstrap method this VM does not implement.
+    ///
+    /// M2.18 implements `java.lang.invoke.StringConcatFactory` only; every other bootstrap,
+    /// including `LambdaMetafactory`, is a typed error rather than a silent no-op.
+    UnsupportedBootstrapMethod {
+        owner: String,
+        name: String,
+        descriptor: String,
+    },
     /// The same `(loader, name)` was defined twice.
     DuplicateClass { loader: LoaderId, name: String },
     /// No loader in the delegation chain supplied the class.
@@ -100,6 +109,14 @@ impl fmt::Display for VmError {
                 "{method} would produce an unpaired UTF-16 surrogate, which the heap's String storage cannot represent"
             ),
             Self::Thrown(throwable) => write!(f, "reflective invocation threw {throwable}"),
+            Self::UnsupportedBootstrapMethod {
+                owner,
+                name,
+                descriptor,
+            } => write!(
+                f,
+                "unsupported invokedynamic bootstrap method {owner}.{name}{descriptor}"
+            ),
             Self::DuplicateClass { loader, name } => {
                 write!(f, "class {name} is already defined in loader {}", loader.0)
             }

@@ -37,6 +37,6 @@ pub use metadata::{
     TypePathKind,
 };
 pub use model::{
-    Attribute, BootstrapMethod, ClassFile, Field, Method, ModuleExport, ModuleInfo, ModuleProvides,
-    ModuleRequires,
+    Attribute, BootstrapArgument, BootstrapMethod, BootstrapMethodEntry, BootstrapMethodHandle,
+    ClassFile, Field, Method, ModuleExport, ModuleInfo, ModuleProvides, ModuleRequires,
 };

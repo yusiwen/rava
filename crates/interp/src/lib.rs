@@ -17,8 +17,11 @@
 //! element descriptor, so `Class.getDeclaredMethod(String, Class[])` is callable from
 //! bytecode. M2.17 adds the class literal: `ldc`/`ldc_w` of a `CONSTANT_Class` pushes the
 //! cached class object (a loaded class, a primitive or an array class), resolved through
-//! the executing frame's loader. The decoded form and the frame are the contracts a later
-//! JIT consumes; there is no second frame model.
+//! the executing frame's loader. M2.18 adds `invokedynamic` execution for the
+//! `StringConcatFactory` call sites javac emits for `+`, dispatching to
+//! [`rava_vm::string_concat`] with the decoded bootstrap entry and the call site's
+//! arguments. The decoded form and the frame are the contracts a later JIT consumes;
+//! there is no second frame model.
 
 #![forbid(unsafe_code)]
 
@@ -243,7 +246,11 @@ fn execute(
                 let value = slot.as_int().ok_or(InterpError::WrongValue)?;
                 *slot = Value::Int(value.wrapping_add(i32::from(increment)));
             }
-            Instr::ILoad(index) | Instr::ALoad(index) => {
+            Instr::ILoad(index)
+            | Instr::LLoad(index)
+            | Instr::FLoad(index)
+            | Instr::DLoad(index)
+            | Instr::ALoad(index) => {
                 let value = *frame.locals.get(usize::from(index)).ok_or_else(|| {
                     InterpError::Decode(format!("local {index} is outside the frame"))
                 })?;
@@ -517,6 +524,25 @@ fn execute(
                 publish_roots(guard, frame, &args);
                 let result = run_static_method(shared, thread, target, &name, &descriptor, args);
                 deliver_call(shared, frame, caller_pc, &descriptor, result)?;
+            }
+            Instr::InvokeDynamic {
+                name,
+                descriptor,
+                bootstrap,
+            } => {
+                // M2.18 dispatches only the `StringConcatFactory` bootstrap. The call
+                // site's arguments are popped exactly as for any other call; the
+                // factory's text conversion does not re-enter the interpreter, so no
+                // callee roots are needed.
+                let args = pop_arguments(frame, &descriptor)?;
+                let reference = rava_vm::string_concat::invoke_call_site(
+                    shared,
+                    &bootstrap,
+                    &name,
+                    &descriptor,
+                    &args,
+                )?;
+                frame.push(Value::Ref(reference))?;
             }
             Instr::Athrow => {
                 let throwable = throw_reference(frame)?;

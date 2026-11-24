@@ -32,6 +32,14 @@ pub enum Error {
     MalformedAttribute { detail: String },
     /// Assembling bytecode failed: an unbound label, or a branch beyond a 16-bit offset.
     InvalidAssembly { detail: String },
+    /// A `BootstrapMethods` entry could not be resolved: an out-of-range index, a
+    /// `bootstrap_method_ref` that is not a `CONSTANT_MethodHandle`, a handle kind or
+    /// reference the JVM does not allow as a bootstrap method, or a static argument this
+    /// VM does not implement.
+    ///
+    /// The raw table is retained on [`crate::ClassFile`]; this error is produced when one
+    /// entry is materialized into its typed form.
+    BadBootstrapMethod { detail: String },
     /// A structure this VM does not implement yet.
     Unsupported {
         feature: &'static str,
@@ -69,6 +77,9 @@ impl fmt::Display for Error {
             }
             Self::MalformedAttribute { detail } => write!(f, "malformed attribute: {detail}"),
             Self::InvalidAssembly { detail } => write!(f, "invalid assembly: {detail}"),
+            Self::BadBootstrapMethod { detail } => {
+                write!(f, "invalid bootstrap method: {detail}")
+            }
             Self::Unsupported { feature, detail } => {
                 write!(f, "unsupported {feature}: {detail}")
             }

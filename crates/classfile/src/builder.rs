@@ -8,9 +8,20 @@
 //! What it is **not**, yet: an instruction assembler. A method body is given as raw bytes, so the
 //! opcodes are still the caller's problem — labels, branches and the operand encodings are the next
 //! increment. The names it knows are the ones the fixtures needed: `Utf8`, `Class`, `String`,
-//! `NameAndType`, `Fieldref`, `Methodref`, and one `Code` attribute per method.
+//! `Integer`, `Float`, `Long`, `Double`, `NameAndType`, `Fieldref`, `Methodref`,
+//! `MethodHandle`, `InvokeDynamic`, and one `Code` attribute per method. A class-level
+//! `BootstrapMethods` attribute is written when [`ClassBuilder::bootstrap_method`] (or
+//! [`ClassBuilder::bootstrap_method_handle`]) has added an entry.
 
 use std::collections::HashMap;
+
+use crate::constant_pool::ReferenceKind;
+
+/// One `BootstrapMethods` attribute entry under construction.
+struct BootstrapEntry {
+    method_handle: u16,
+    arguments: Vec<u16>,
+}
 
 /// One field the caller wants in the class.
 struct FieldEntry {
@@ -40,6 +51,9 @@ pub struct ClassBuilder {
     fields: Vec<FieldEntry>,
     interfaces: Vec<u16>,
     methods: Vec<MethodEntry>,
+    /// The `BootstrapMethods` entries, in attribute order; an index into this vector is
+    /// the `bootstrap_method_attr_index` of a `CONSTANT_InvokeDynamic`.
+    bootstrap_methods: Vec<BootstrapEntry>,
     source_file: Option<u16>,
     /// The next constant-pool index; `long`/`double` consume two (JVMS §4.4.5).
     next_index: u16,
@@ -65,6 +79,7 @@ impl ClassBuilder {
             fields: Vec::new(),
             interfaces: Vec::new(),
             methods: Vec::new(),
+            bootstrap_methods: Vec::new(),
             source_file: None,
             next_index: 1,
         };
@@ -135,6 +150,28 @@ impl ClassBuilder {
         self.push(key, entry, 2)
     }
 
+    /// A `CONSTANT_Integer` (JVMS §4.4.4), one entry wide.
+    pub fn integer(&mut self, value: i32) -> u16 {
+        let key = format!("I{value}");
+        if let Some(index) = self.index.get(&key) {
+            return *index;
+        }
+        let mut entry = vec![3u8];
+        entry.extend_from_slice(&value.to_be_bytes());
+        self.push(key, entry, 1)
+    }
+
+    /// A `CONSTANT_Float` (JVMS §4.4.4), one entry wide.
+    pub fn float(&mut self, value: f32) -> u16 {
+        let key = format!("R{}", value.to_bits());
+        if let Some(index) = self.index.get(&key) {
+            return *index;
+        }
+        let mut entry = vec![4u8];
+        entry.extend_from_slice(&value.to_bits().to_be_bytes());
+        self.push(key, entry, 1)
+    }
+
     /// A `CONSTANT_Double` (JVMS §4.4.5), also two entries wide.
     pub fn double(&mut self, value: f64) -> u16 {
         let key = format!("D{}", value.to_bits());
@@ -186,6 +223,70 @@ impl ClassBuilder {
         entry.extend_from_slice(&class_index.to_be_bytes());
         entry.extend_from_slice(&nat_index.to_be_bytes());
         self.push(key, entry, 1)
+    }
+
+    /// A `CONSTANT_MethodHandle` (JVMS §4.4.8).
+    pub fn method_handle(&mut self, reference_kind: ReferenceKind, reference_index: u16) -> u16 {
+        let key = format!("H{}:{reference_index}", reference_kind.as_byte());
+        if let Some(index) = self.index.get(&key) {
+            return *index;
+        }
+        let mut entry = vec![15u8, reference_kind.as_byte()];
+        entry.extend_from_slice(&reference_index.to_be_bytes());
+        self.push(key, entry, 1)
+    }
+
+    /// A `CONSTANT_InvokeDynamic` naming bootstrap entry `bootstrap_index` and a
+    /// call-site name/descriptor (JVMS §4.4.10).
+    pub fn invoke_dynamic(&mut self, bootstrap_index: u16, name: &str, descriptor: &str) -> u16 {
+        let name_and_type = self.name_and_type(name, descriptor);
+        let key = format!("I{bootstrap_index}:{name}{descriptor}");
+        if let Some(index) = self.index.get(&key) {
+            return *index;
+        }
+        let mut entry = vec![18u8];
+        entry.extend_from_slice(&bootstrap_index.to_be_bytes());
+        entry.extend_from_slice(&name_and_type.to_be_bytes());
+        self.push(key, entry, 1)
+    }
+
+    /// Append a `BootstrapMethods` entry whose handle is `method_handle` and return its
+    /// attribute index.
+    ///
+    /// `method_handle` must be a `CONSTANT_MethodHandle` index, typically from
+    /// [`method_handle`](Self::method_handle).
+    pub fn bootstrap_method_handle(&mut self, method_handle: u16, arguments: Vec<u16>) -> u16 {
+        if let Some((index, _)) = self
+            .bootstrap_methods
+            .iter()
+            .enumerate()
+            .find(|(_, entry)| entry.method_handle == method_handle && entry.arguments == arguments)
+        {
+            return index as u16;
+        }
+        let index = self.bootstrap_methods.len() as u16;
+        self.bootstrap_methods.push(BootstrapEntry {
+            method_handle,
+            arguments,
+        });
+        index
+    }
+
+    /// Append a `BootstrapMethods` entry for a static bootstrap method and return its
+    /// attribute index.
+    ///
+    /// This is the common shape: the handle is `REF_invokeStatic` to
+    /// `owner.name:descriptor`, exactly as javac emits `StringConcatFactory` bootstraps.
+    pub fn bootstrap_method(
+        &mut self,
+        owner: &str,
+        name: &str,
+        descriptor: &str,
+        arguments: Vec<u16>,
+    ) -> u16 {
+        let reference = self.method_ref(owner, name, descriptor);
+        let handle = self.method_handle(ReferenceKind::InvokeStatic, reference);
+        self.bootstrap_method_handle(handle, arguments)
     }
 
     /// Declares that this class implements `name` (a binary name), in the order given.
@@ -242,6 +343,11 @@ impl ClassBuilder {
     /// Serialises the class file.
     pub fn build(&mut self) -> Vec<u8> {
         let code_name = self.utf8("Code");
+        let bootstrap_methods_name = if self.bootstrap_methods.is_empty() {
+            None
+        } else {
+            Some(self.utf8("BootstrapMethods"))
+        };
         let source_file_name = if self.source_file.is_some() {
             Some(self.utf8("SourceFile"))
         } else {
@@ -302,14 +408,33 @@ impl ClassBuilder {
             }
         }
 
-        match (self.source_file, source_file_name) {
-            (Some(source), Some(name)) => {
-                out.extend_from_slice(&1u16.to_be_bytes()); // one class attribute
-                out.extend_from_slice(&name.to_be_bytes());
-                out.extend_from_slice(&2u32.to_be_bytes()); // attribute length
-                out.extend_from_slice(&source.to_be_bytes());
+        let class_attribute_count =
+            u16::from(self.source_file.is_some()) + u16::from(bootstrap_methods_name.is_some());
+        out.extend_from_slice(&class_attribute_count.to_be_bytes());
+        if let (Some(source), Some(name)) = (self.source_file, source_file_name) {
+            out.extend_from_slice(&name.to_be_bytes());
+            out.extend_from_slice(&2u32.to_be_bytes()); // attribute length
+            out.extend_from_slice(&source.to_be_bytes());
+        }
+        if let Some(name) = bootstrap_methods_name {
+            // count u2, then (method_handle u2, argument_count u2, arguments u2 each).
+            let payload = 2
+                + self.bootstrap_methods.len() as u32 * 4
+                + self
+                    .bootstrap_methods
+                    .iter()
+                    .map(|entry| entry.arguments.len() as u32 * 2)
+                    .sum::<u32>();
+            out.extend_from_slice(&name.to_be_bytes());
+            out.extend_from_slice(&payload.to_be_bytes());
+            out.extend_from_slice(&(self.bootstrap_methods.len() as u16).to_be_bytes());
+            for entry in &self.bootstrap_methods {
+                out.extend_from_slice(&entry.method_handle.to_be_bytes());
+                out.extend_from_slice(&(entry.arguments.len() as u16).to_be_bytes());
+                for argument in &entry.arguments {
+                    out.extend_from_slice(&argument.to_be_bytes());
+                }
             }
-            _ => out.extend_from_slice(&0u16.to_be_bytes()),
         }
         out
     }

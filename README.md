@@ -158,7 +158,18 @@ cache, without initializing the class. `ldc` of a `String` still interns, `ldc_w
 two-byte index is supported, and a numeric constant or any other constant kind is a
 typed error; a missing class and a malformed array descriptor are typed errors too.
 Generic `Type`, `MethodType`/`MethodHandle` constants, lambdas, annotation changes and
-Spring remain later slices. **M2.18 is next.**
+Spring remain later slices. **M2.18 is done (2026-11-24):** `invokedynamic` decodes
+opcode `0xba` and resolves its `BootstrapMethods` entry into a typed `REF_invokeStatic`
+handle plus `String`/`Class`/`int`/`long`/`float`/`double` static arguments, with typed
+decode errors for a malformed, non-static or out-of-range bootstrap reference.
+`StringConcatFactory.makeConcat` and `makeConcatWithConstants` build the result from the
+call-site arguments and the recipe (`\u0001` dynamic argument, `\u0002` recipe constant),
+convert every value through the M2.9/M2.13 `String.valueOf` rules, and push an interned
+String; any other bootstrap is a typed error. A committed `javac --release 17` fixture
+covers the compiler-emitted call sites, and assembled probes cover `makeConcat`, every
+supported primitive descriptor, static recipe constants and the documented failures.
+`LambdaMetafactory`, method handles, arbitrary bootstrap methods, call-site caching and
+Spring remain later slices. **M2.19 is next.**
 
 ## What this project is
 

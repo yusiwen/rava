@@ -1,6 +1,6 @@
 //! The parsed shape of a class file (JVMS §4.1).
 
-use crate::constant_pool::{Constant, ConstantPool};
+use crate::constant_pool::{Constant, ConstantPool, ReferenceKind};
 use crate::error::Error;
 use crate::reader::Reader;
 
@@ -70,6 +70,42 @@ impl Method {
 pub struct BootstrapMethod {
     pub method_ref: u16,
     pub arguments: Vec<u16>,
+}
+
+/// A bootstrap method's `CONSTANT_MethodHandle`, resolved to the member it names.
+///
+/// M2.18 only executes `invokedynamic` call sites whose bootstrap is a static method, so
+/// the resolution accepts `REF_invokeStatic` only. The owner, name and descriptor are
+/// copied out of the constant pool; nothing is loaded.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BootstrapMethodHandle {
+    pub reference_kind: ReferenceKind,
+    pub owner: String,
+    pub name: String,
+    pub descriptor: String,
+}
+
+/// One static argument of a bootstrap method.
+///
+/// JVMS §4.7.23 allows the loadable constants; this VM implements the scalar and text
+/// kinds it can convert, and rejects the rest when the entry is materialized.
+#[derive(Debug, Clone, PartialEq)]
+pub enum BootstrapArgument {
+    /// A `CONSTANT_String`.
+    String(String),
+    /// A `CONSTANT_Class`, which may name an array type (`[Ljava/lang/String;`).
+    Class(String),
+    Integer(i32),
+    Long(i64),
+    Float(f32),
+    Double(f64),
+}
+
+/// One `BootstrapMethods` entry with its handle and static arguments resolved.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BootstrapMethodEntry {
+    pub handle: BootstrapMethodHandle,
+    pub arguments: Vec<BootstrapArgument>,
 }
 
 /// One `requires` entry of a module descriptor (JVMS §4.7.25).
@@ -216,6 +252,103 @@ impl ClassFile {
         Ok(None)
     }
 
+    /// One `BootstrapMethods` entry, resolved to its handle and typed static arguments.
+    ///
+    /// The raw table ([`Self::bootstrap_methods`]) is parsed with the class; this is the
+    /// typed view `invokedynamic` decoding needs. Resolution is on demand, so a class that
+    /// carries a bootstrap method this VM does not implement still loads and parses: only
+    /// the call site that names it fails.
+    ///
+    /// An out-of-range index, a `bootstrap_method_ref` that is not a
+    /// `CONSTANT_MethodHandle`, a handle that is not `REF_invokeStatic` to a method, or a
+    /// static argument that is not a `String`/`Class`/`int`/`long`/`float`/`double` is
+    /// [`Error::BadBootstrapMethod`].
+    pub fn bootstrap_method(&self, index: u16) -> Result<BootstrapMethodEntry, Error> {
+        let raw = self
+            .bootstrap_methods
+            .get(usize::from(index))
+            .ok_or_else(|| Error::BadBootstrapMethod {
+                detail: format!(
+                    "index {index} is outside the table of {} bootstrap method(s)",
+                    self.bootstrap_methods.len()
+                ),
+            })?;
+
+        let (reference_kind, reference_index) = match self.constant_pool.get(raw.method_ref)? {
+            Constant::MethodHandle {
+                reference_kind,
+                reference_index,
+            } => (*reference_kind, *reference_index),
+            other => {
+                return Err(Error::BadBootstrapMethod {
+                    detail: format!(
+                        "bootstrap_method_ref {} is a {}, not a MethodHandle",
+                        raw.method_ref,
+                        constant_kind(other)
+                    ),
+                });
+            }
+        };
+        if reference_kind != ReferenceKind::InvokeStatic {
+            return Err(Error::BadBootstrapMethod {
+                detail: format!(
+                    "bootstrap method handle {} is not REF_invokeStatic",
+                    raw.method_ref
+                ),
+            });
+        }
+        let (owner, name, descriptor) = match self.constant_pool.get(reference_index)? {
+            Constant::MethodRef {
+                class_index,
+                name_and_type_index,
+            }
+            | Constant::InterfaceMethodRef {
+                class_index,
+                name_and_type_index,
+            } => {
+                let (name, descriptor) = self.constant_pool.name_and_type(*name_and_type_index)?;
+                (
+                    self.constant_pool.class_name(*class_index)?.to_owned(),
+                    name.to_owned(),
+                    descriptor.to_owned(),
+                )
+            }
+            other => {
+                return Err(Error::BadBootstrapMethod {
+                    detail: format!(
+                        "REF_invokeStatic references constant {reference_index}, a {}, not a method",
+                        constant_kind(other)
+                    ),
+                });
+            }
+        };
+
+        let mut arguments = Vec::with_capacity(raw.arguments.len());
+        for argument_index in &raw.arguments {
+            arguments.push(bootstrap_argument(&self.constant_pool, *argument_index)?);
+        }
+
+        Ok(BootstrapMethodEntry {
+            handle: BootstrapMethodHandle {
+                reference_kind,
+                owner,
+                name,
+                descriptor,
+            },
+            arguments,
+        })
+    }
+
+    /// Every `BootstrapMethods` entry, materialized in table order.
+    ///
+    /// This fails on the first entry this VM cannot type; [`Self::bootstrap_method`] is the
+    /// per-call-site form that keeps an unsupported call site from affecting the others.
+    pub fn bootstrap_method_table(&self) -> Result<Vec<BootstrapMethodEntry>, Error> {
+        (0..self.bootstrap_methods.len() as u16)
+            .map(|index| self.bootstrap_method(index))
+            .collect()
+    }
+
     /// Returns the raw `Code` attribute of a method, if it has one.
     /// The `Module` attribute, if this is a module descriptor (JVMS §4.7.25).
     pub fn module(&self) -> Result<Option<ModuleInfo>, Error> {
@@ -302,6 +435,54 @@ impl ClassFile {
             }
         }
         Ok(None)
+    }
+}
+
+/// One bootstrap static argument, typed from its constant-pool entry.
+fn bootstrap_argument(pool: &ConstantPool, index: u16) -> Result<BootstrapArgument, Error> {
+    let argument = match pool.get(index)? {
+        Constant::String { string_index } => {
+            BootstrapArgument::String(pool.utf8(*string_index)?.to_owned())
+        }
+        Constant::Class { name_index } => {
+            BootstrapArgument::Class(pool.utf8(*name_index)?.to_owned())
+        }
+        Constant::Integer(value) => BootstrapArgument::Integer(*value),
+        Constant::Long(value) => BootstrapArgument::Long(*value),
+        Constant::Float(value) => BootstrapArgument::Float(*value),
+        Constant::Double(value) => BootstrapArgument::Double(*value),
+        other => {
+            return Err(Error::BadBootstrapMethod {
+                detail: format!(
+                    "static argument {index} is a {}, which this VM does not support",
+                    constant_kind(other)
+                ),
+            });
+        }
+    };
+    Ok(argument)
+}
+
+/// The class-file name of a constant kind, for a bootstrap diagnostic.
+fn constant_kind(constant: &Constant) -> &'static str {
+    match constant {
+        Constant::Utf8(_) => "Utf8",
+        Constant::Integer(_) => "Integer",
+        Constant::Float(_) => "Float",
+        Constant::Long(_) => "Long",
+        Constant::Double(_) => "Double",
+        Constant::Class { .. } => "Class",
+        Constant::String { .. } => "String",
+        Constant::FieldRef { .. } => "Fieldref",
+        Constant::MethodRef { .. } => "Methodref",
+        Constant::InterfaceMethodRef { .. } => "InterfaceMethodref",
+        Constant::NameAndType { .. } => "NameAndType",
+        Constant::MethodHandle { .. } => "MethodHandle",
+        Constant::MethodType { .. } => "MethodType",
+        Constant::Dynamic { .. } => "Dynamic",
+        Constant::InvokeDynamic { .. } => "InvokeDynamic",
+        Constant::Module { .. } => "Module",
+        Constant::Package { .. } => "Package",
     }
 }
 

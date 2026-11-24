@@ -21,6 +21,7 @@ pub mod reflection;
 pub mod shared;
 pub mod source;
 pub mod string;
+pub mod string_concat;
 pub mod thread;
 pub mod value;
 pub mod verify;
