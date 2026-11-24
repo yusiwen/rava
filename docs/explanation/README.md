@@ -41,6 +41,8 @@ When the fact is only a status, update `PROJECT.md` instead.
 | :--- | :--- | :--- |
 | [`compatibility-gates.md`](compatibility-gates.md) | How are C0–C4 measured, which artifact/command owns each gate, and how does `cargo xtask ci` relate to them? | current |
 | [`class-loading-and-libraries.md`](class-loading-and-libraries.md) | How do sources, loader identity, parent-first delegation, the two `stdlib` trees and native dispatch fit together? | current |
+| [`interpreter-execution.md`](interpreter-execution.md) | How does a method call become a frame, dispatch, exception, lambda or stream callback? | current |
+| [`reflection-and-metadata.md`](reflection-and-metadata.md) | How does a C1 metadata record become a `Class`/member/annotation/generic `Type` at runtime? | current |
 | [`c1-metadata.md`](c1-metadata.md) | What exactly does the M2 C1 metadata diff compare, and what does “diff 0” prove? | current |
 | [`spring-context.md`](spring-context.md) | How does a real Spring `AnnotationConfigApplicationContext` reach a bean on rava? | current |
 
@@ -57,8 +59,6 @@ have been re-run and its boundaries re-checked against `PROJECT.md`.
 
 | Priority | Document | Already landed in | Question it must answer |
 | :--- | :--- | :--- | :--- |
-| P1 | `interpreter-execution.md` | M0.5a, M2.5–M2.7, M2.18, M2.19, M2.24 | How do decoded IR, frames, static/instance calls, the native ABI, exceptions, `invokedynamic`, lambdas and streams execute a method? |
-| P1 | `reflection-and-metadata.md` | M2.1, M2.4, M2.8, M2.10, M2.11, M2.22 | How does a C1 metadata record become a `Class`/member/annotation/generic `Type` at runtime? |
 | P2 | `testing-and-evidence.md` | M0–M2 gates | How are fixtures, golden dumps, opt-in Spring acceptance and reproducible stub trees generated and checked? |
 
 M2 history is a **History** document under `docs/notes/`, not an explanation; it is
