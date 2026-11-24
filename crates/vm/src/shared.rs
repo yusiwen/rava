@@ -14,7 +14,7 @@ use std::sync::{Mutex, MutexGuard, RwLock};
 use crate::VmError;
 use crate::heap::{
     AnnotationObject, BoxedPrimitive, FieldLayout, Heap, HeapObject, MemberKind, ObjRef,
-    ReflectMember,
+    PrimitiveKind, ReflectMember,
 };
 use crate::hooks::Hooks;
 use crate::loader::{ClassEntry, ClassId, ClassTable, LoaderId};
@@ -40,6 +40,7 @@ pub enum SharedLock {
     ClassTable,
     Heap,
     ClassObjects,
+    PrimitiveClasses,
     ReflectMembers,
     EnumConstants,
     InternedStrings,
@@ -53,6 +54,7 @@ impl fmt::Display for SharedLock {
             Self::ClassTable => write!(f, "class table"),
             Self::Heap => write!(f, "heap"),
             Self::ClassObjects => write!(f, "class-object cache"),
+            Self::PrimitiveClasses => write!(f, "primitive-class cache"),
             Self::ReflectMembers => write!(f, "reflected-member cache"),
             Self::EnumConstants => write!(f, "enum-constant cache"),
             Self::InternedStrings => write!(f, "interned-string table"),
@@ -83,6 +85,10 @@ pub struct Shared {
     /// owner of those objects: they are never freed while `Shared` lives, and
     /// [`Shared::roots`] reports them as roots.
     class_objects: Mutex<HashMap<ClassId, ObjRef>>,
+    /// One primitive class object per [`PrimitiveKind`]. The cache owns the objects, which
+    /// are never freed while `Shared` lives and are reported as roots by
+    /// [`Shared::roots`].
+    primitive_classes: Mutex<HashMap<PrimitiveKind, ObjRef>>,
     /// One reflected-member object per `(class, kind, name, descriptor)`. The cache owns
     /// the objects, which are never freed while `Shared` lives and are reported as roots
     /// by [`Shared::roots`].
@@ -106,6 +112,7 @@ impl Shared {
             classes: RwLock::new(ClassTable::with_bootstrap(source)),
             heap: Mutex::new(Heap::new()),
             class_objects: Mutex::new(HashMap::new()),
+            primitive_classes: Mutex::new(HashMap::new()),
             reflect_members: Mutex::new(HashMap::new()),
             enum_constants: Mutex::new(HashMap::new()),
             interned_strings: Mutex::new(HashMap::new()),
@@ -191,6 +198,69 @@ impl Shared {
             .allocate_class(class);
         cache.insert(class, reference);
         Ok(reference)
+    }
+
+    /// The class object for one primitive kind, allocated on first use.
+    ///
+    /// A primitive has no defining loader and no class file, so its class object is
+    /// keyed by the kind alone: one object per primitive for the life of the `Shared`.
+    /// `Class.forName("int")` and `Integer.TYPE` both resolve here, which is what makes
+    /// them reference-identical. The returned handle is stable: primitive class objects
+    /// are never freed and are reported as roots by [`Shared::roots`].
+    ///
+    /// Lock order is cache, then heap, matching [`Shared::class_object`].
+    pub fn primitive_class(&self, kind: PrimitiveKind) -> ObjRef {
+        let mut cache = self
+            .primitive_classes
+            .lock()
+            .expect("primitive-class cache lock poisoned");
+        if let Some(reference) = cache.get(&kind) {
+            return *reference;
+        }
+        let reference = self
+            .heap
+            .lock()
+            .expect("heap lock poisoned")
+            .allocate_primitive_class(kind);
+        cache.insert(kind, reference);
+        reference
+    }
+
+    /// The value of a static field, including the primitive wrapper `TYPE` fields.
+    ///
+    /// The statics table is the ordinary home of a static field's value, but the C1 stubs
+    /// carry no initializer `Code`, so `Integer.TYPE` and the other eight wrapper `TYPE`
+    /// fields would read as absent. This resolves them virtually: a missing
+    /// `TYPE:Ljava/lang/Class;` on one of the nine wrapper classes returns the cached
+    /// primitive class object, which is the same object `Class.forName("int")` returns.
+    /// Nothing is written into the statics table, so the value is not duplicated.
+    ///
+    /// Returns `None` for any other missing field, so the interpreter reports it exactly
+    /// as before.
+    pub fn static_field_value(
+        &self,
+        class: ClassId,
+        name: &str,
+        descriptor: &str,
+    ) -> Result<Option<Value>, VmError> {
+        let entry = self
+            .entry(class)
+            .ok_or_else(|| VmError::Loader(format!("class id {} is not loaded", class.0)))?;
+        let stored = entry
+            .statics
+            .lock()
+            .expect("static field lock poisoned")
+            .get(&(name.to_owned(), descriptor.to_owned()))
+            .copied();
+        if stored.is_some() {
+            return Ok(stored);
+        }
+        if name == "TYPE" && descriptor == "Ljava/lang/Class;" {
+            if let Some(kind) = PrimitiveKind::from_wrapper_class(&entry.name) {
+                return Ok(Some(Value::Ref(self.primitive_class(kind))));
+            }
+        }
+        Ok(None)
     }
 
     /// The reflected-member object for one `(class, kind, name, descriptor)`, allocated on
@@ -372,9 +442,9 @@ impl Shared {
     /// The class object of a heap object: `Object.getClass` without the dispatch.
     ///
     /// An instance reports its defining class, a string reports `java.lang.String`, a
-    /// class object reports `java.lang.Class`, a reflected member reports
-    /// `java.lang.reflect.Field`, `Method` or `Constructor`, a box reports its boxed
-    /// class (`java.lang.Integer`), an annotation reports
+    /// class object (a loaded class or a primitive) reports `java.lang.Class`, a
+    /// reflected member reports `java.lang.reflect.Field`, `Method` or `Constructor`, a
+    /// box reports its boxed class (`java.lang.Integer`), an annotation reports
     /// `java.lang.annotation.Annotation` (its `annotationType()` names the annotation
     /// type), an enum constant reports its enum class, a `StringBuilder` reports
     /// `java.lang.StringBuilder`, an `ArrayList` reports `java.util.ArrayList` and a
@@ -405,6 +475,7 @@ impl Shared {
                 HeapObject::Instance(instance) => Kind::Instance(instance.class),
                 HeapObject::Str(_) => Kind::Str,
                 HeapObject::Class(_) => Kind::Class,
+                HeapObject::PrimitiveClass(_) => Kind::Class,
                 HeapObject::Reflect(member) => Kind::Reflect(member.kind),
                 HeapObject::Boxed(boxed) => Kind::Boxed(*boxed),
                 HeapObject::Annotation(_) => Kind::Annotation,
@@ -599,8 +670,8 @@ impl Shared {
     }
 
     /// Collect the VM roots: every non-null class static field, every cached class object
-    /// and reflected member, the references held by a heap list or map, plus the roots the
-    /// given threads' active frames published.
+    /// (a loaded class or a primitive), every reflected member, the references held by a
+    /// heap list or map, plus the roots the given threads' active frames published.
     ///
     /// The class table is snapshotted before any per-class statics lock is taken, and
     /// each statics lock is released before the next class is visited, so this never
@@ -634,6 +705,18 @@ impl Shared {
                 .lock()
                 .expect("class-object cache lock poisoned");
             for reference in class_objects.values() {
+                if seen.insert(*reference) {
+                    roots.push(*reference);
+                }
+            }
+        }
+
+        {
+            let primitive_classes = self
+                .primitive_classes
+                .lock()
+                .expect("primitive-class cache lock poisoned");
+            for reference in primitive_classes.values() {
                 if seen.insert(*reference) {
                     roots.push(*reference);
                 }
@@ -734,6 +817,11 @@ impl Shared {
         {
             let _guard = self.class_objects.try_lock().map_err(|_| LockHeld {
                 lock: SharedLock::ClassObjects,
+            })?;
+        }
+        {
+            let _guard = self.primitive_classes.try_lock().map_err(|_| LockHeld {
+                lock: SharedLock::PrimitiveClasses,
             })?;
         }
         {

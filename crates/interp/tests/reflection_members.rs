@@ -1346,49 +1346,63 @@ fn probe_declared_fields_keep_class_file_order_and_find_by_name() {
 }
 
 #[test]
-fn primitive_and_array_descriptors_are_typed_errors() {
+fn primitive_descriptors_are_primitive_class_objects_and_array_ones_are_typed_errors() {
     let fixture = fixture();
 
-    // `Integer.MAX_VALUE` is an `int`; `String.charAt` takes an `int`.
+    // M2.15: `Integer.MAX_VALUE` is an `int`, and a primitive descriptor now resolves to
+    // the cached primitive class object instead of a typed error.
     let integer_class = fixture
         .shared
         .load_library_class("java/lang/Integer")
         .unwrap();
     let integer_object = fixture.shared.class_object(integer_class).unwrap();
-    let max_value = call(
-        &fixture,
-        "fieldTypeName",
-        "(Ljava/lang/Class;Ljava/lang/String;)Ljava/lang/String;",
-        vec![
-            Value::Ref(integer_object),
-            name_argument(&fixture, "MAX_VALUE"),
-        ],
+    let max_value = string_value(
+        &fixture.shared,
+        call(
+            &fixture,
+            "fieldTypeName",
+            "(Ljava/lang/Class;Ljava/lang/String;)Ljava/lang/String;",
+            vec![
+                Value::Ref(integer_object),
+                name_argument(&fixture, "MAX_VALUE"),
+            ],
+        )
+        .unwrap(),
     );
-    assert!(
-        matches!(
-            max_value,
-            Err(InterpError::Vm(VmError::Native(ref detail)))
-                if detail.contains("primitive class objects")
-        ),
-        "{max_value:?}"
-    );
+    assert_eq!(max_value, "int");
 
-    let char_at = call(
+    let char_at = string_value(
+        &fixture.shared,
+        call(
+            &fixture,
+            "methodParameterTypeName",
+            "(Ljava/lang/Class;Ljava/lang/String;)Ljava/lang/String;",
+            vec![
+                string_class_argument(&fixture),
+                name_argument(&fixture, "charAt"),
+            ],
+        )
+        .unwrap(),
+    );
+    assert_eq!(char_at, "int");
+
+    // An array descriptor still has no class identity, so it stays a typed error.
+    let to_char_array = call(
         &fixture,
-        "methodParameterTypeName",
+        "methodReturnTypeName",
         "(Ljava/lang/Class;Ljava/lang/String;)Ljava/lang/String;",
         vec![
             string_class_argument(&fixture),
-            name_argument(&fixture, "charAt"),
+            name_argument(&fixture, "toCharArray"),
         ],
     );
     assert!(
         matches!(
-            char_at,
+            to_char_array,
             Err(InterpError::Vm(VmError::Native(ref detail)))
-                if detail.contains("primitive class objects")
+                if detail.contains("array class objects")
         ),
-        "{char_at:?}"
+        "{to_char_array:?}"
     );
 }
 

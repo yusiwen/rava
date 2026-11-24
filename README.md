@@ -113,10 +113,26 @@ itself, a boxed `Integer` its decimal value, and any other object the VM's
 by name, a method or constructor by name plus the parameter descriptors built from a
 `Class[]`, with inherited lookup through the superclass chain and interfaces and
 declared-only constructor lookup. A hit is the cached reflected-member object, a miss is
-null, and a primitive or array parameter class, a null `Class[]`, a null element or a
-non-`Class` element is a typed error because those class objects do not exist yet.
-Access-control filtering, primitive and array `Class` identity, the generic `Type` graph
-and Spring remain later slices. **M2.15 is next.**
+null, and at M2.14 a primitive or array parameter class, a null `Class[]`, a null element
+or a non-`Class` element was a typed error because those class objects did not exist yet;
+M2.15 adds the primitive class objects (array class identity is still absent).
+Access-control filtering, array `Class` identity, the generic `Type` graph and Spring
+remain later slices. **M2.15 is done (2026-11-24):** a primitive class object is a
+dedicated heap kind (`HeapObject::PrimitiveClass`) cached one per `PrimitiveKind` in
+`Shared::primitive_class` and enumerated by `Shared::roots`, so `Class.forName("int")` and
+`Integer.TYPE` return the same object. All nine primitives report the JDK name, the
+`0x0411` modifiers (`public abstract final`, `void` included), `isPrimitive` true,
+`isArray` false and a null superclass and component type, while `getClass()` on a
+primitive class object reports `java.lang.Class`; a primitive declares no members, so the
+declared-member arrays are empty and the named lookups are null misses.
+`Field.getType`, `Method.getReturnType`/`getParameterTypes` and
+`Constructor.getParameterTypes` return primitive class objects for primitive descriptors,
+and a `Class[]` of primitive class objects builds the exact one-character descriptor for
+`getDeclaredMethod`/`getMethod`/`getDeclaredConstructor`/`getConstructor`, so a reflected
+method or constructor with an `int` parameter resolves and invokes. The nine wrapper
+`TYPE` fields resolve virtually because the C1 stubs carry no initializer `Code`, while
+every other wrapper static stays absent; array `Class` identity, the generic `Type` graph,
+annotation changes and Spring remain later slices. **M2.16 is next.**
 
 ## What this project is
 

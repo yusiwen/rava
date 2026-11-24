@@ -355,12 +355,11 @@ fn execute(
                 let entry = shared
                     .entry(target)
                     .ok_or_else(|| InterpError::Decode("static class vanished".to_owned()))?;
-                let value = entry
-                    .statics
-                    .lock()
-                    .expect("static field lock poisoned")
-                    .get(&(name.clone(), descriptor.clone()))
-                    .copied()
+                // The statics table is the normal home of the value; the primitive
+                // wrapper `TYPE` fields are resolved virtually by the VM because the C1
+                // stubs carry no initializer `Code` to write them.
+                let value = shared
+                    .static_field_value(target, &name, &descriptor)?
                     .ok_or_else(|| {
                         InterpError::Decode(format!(
                             "no static field {}.{name}:{descriptor}",
@@ -975,6 +974,7 @@ fn dispatch_class(
             HeapObject::Instance(instance) => ReceiverKind::Instance(instance.class),
             HeapObject::Str(_) => ReceiverKind::Str,
             HeapObject::Class(_) => ReceiverKind::Class,
+            HeapObject::PrimitiveClass(_) => ReceiverKind::Class,
             HeapObject::Reflect(member) => ReceiverKind::Reflect(member.kind),
             HeapObject::Boxed(boxed) => ReceiverKind::Boxed(*boxed),
             HeapObject::Annotation(annotation) => ReceiverKind::Annotation(annotation.class),

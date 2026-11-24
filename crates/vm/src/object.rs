@@ -133,6 +133,7 @@ pub(crate) fn runtime_binary_name(shared: &Shared, receiver: ObjRef) -> Result<S
             HeapObject::Instance(instance) => Kind::Instance(instance.class),
             HeapObject::Str(_) => Kind::Str,
             HeapObject::Class(_) => Kind::Class,
+            HeapObject::PrimitiveClass(_) => Kind::Class,
             HeapObject::Reflect(member) => Kind::Reflect(member.kind),
             HeapObject::Boxed(boxed) => Kind::Boxed(boxed.binary_name()),
             HeapObject::Annotation(_) => Kind::Annotation,

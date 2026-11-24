@@ -7,7 +7,7 @@
 
 > Ledger. P0 and P1 were accepted on 2026-11-23. M1 is complete; M2 is in progress
 > (M2.1, M2.2, M2.3, M2.4, M2.5, M2.6, M2.7, M2.8, M2.9, M2.10, M2.11, M2.12,
-> M2.13 and M2.14 done). Keep this file honest and terse.
+> M2.13, M2.14 and M2.15 done). Keep this file honest and terse.
 
 ## Phase status
 
@@ -27,8 +27,8 @@ release process, if wanted, becomes its own phase.
 
 > Gates are defined in `docs/requirements.md` § Milestones. P0 and P1 are accepted;
 > M0 and M1 are complete, and both gate reviews have passed. M2 is in progress, with
-> M2.1, M2.2, M2.3, M2.4, M2.5, M2.6, M2.7, M2.8, M2.9, M2.10, M2.11, M2.12, M2.13
-> and M2.14 done.
+> M2.1, M2.2, M2.3, M2.4, M2.5, M2.6, M2.7, M2.8, M2.9, M2.10, M2.11, M2.12, M2.13,
+> M2.14 and M2.15 done.
 
 | Milestone | Delivers | Gate | Status |
 | :--- | :--- | :--- | :--- |
@@ -73,12 +73,12 @@ release process, if wanted, becomes its own phase.
 | M2.12 | `StringBuilder` and core collection behavior | R3 | `cargo test -p rava-interp --test collections` exits 0 | done |
 | M2.13 | `HashMap` and `String.valueOf`/value conversion | R3 | `cargo test -p rava-interp --test maps_values` exits 0 | done |
 | M2.14 | Named member lookup (`getDeclaredMethod`/`getField`/`getConstructor`) | R3 | `cargo test -p rava-interp --test member_lookup` exits 0 | done |
-| M2.15 | Primitive `Class` identity and primitive member types | R3 | `cargo test -p rava-interp --test primitive_classes` exits 0 | todo |
+| M2.15 | Primitive `Class` identity and primitive member types | R3 | `cargo test -p rava-interp --test primitive_classes` exits 0 | done |
 
 P0 and P1 are accepted; P2 is done because the M2 increments are sliced. All M0 and
 M1 slices are done, and both gate reviews passed. M2.1, M2.2, M2.3, M2.4, M2.5,
-M2.6, M2.7, M2.8, M2.9, M2.10, M2.11, M2.12, M2.13 and M2.14 are done; M2.15 is
-next.
+M2.6, M2.7, M2.8, M2.9, M2.10, M2.11, M2.12, M2.13, M2.14 and M2.15 are done;
+M2.16 is next.
 
 ## Slice log
 
@@ -110,6 +110,7 @@ next.
 | M2.12 | `cargo test -p rava-interp --test collections` | 0 | 2026-11-24 | `HeapObject::StringBuilder(String)` and `HeapObject::List(Vec<Value>)` are ordinary heap objects selected by their class identity in `Shared::allocate_instance`; `Shared::get_class`, `invokevirtual` dispatch and `Object.toString`'s runtime name report `java/lang/StringBuilder` and `java/util/ArrayList`, and `Shared::roots` enumerates every non-null reference held by a heap list. The builder natives cover the three constructors, the `String`/`Object`/`int`/`long`/`char`/`boolean`/`float`/`double`/`CharSequence` `append` overloads, `toString`, `length`, `charAt`, `setLength`, `reverse`, `deleteCharAt` and `insert(I,String)` over UTF-16 units (null String appends `"null"`, a split surrogate is `UnpairedSurrogate`); the list natives cover both constructors, `size`, `isEmpty`, both `add` forms, `get`, `set`, `clear`, both `remove` forms, `contains` and `indexOf` with reference-equality membership and typed bounds errors. The `CollectionsProbe` fixture exercises the bytecode path (including `getClass().getName()` on both VM classes), and the registry is called directly only for the `long`/`float`/`double` overloads the decoded instruction subset cannot load. 12 new tests; `cargo test -p rava-interp` 92, `rava-vm` 47, `rava-classfile` 50 and `rava-cli` 67 pass, workspace 256; `cargo xtask ci` exits 0 |
 | M2.13 | `cargo test -p rava-interp --test maps_values` | 0 | 2026-11-24 | `HeapObject::Map(Vec<(Value, Value)>)` is an insertion-ordered map with a heap allocator and accessors, selected by the `java.util.HashMap` class identity in `Shared::allocate_instance`; `Shared::get_class`, `invokevirtual` dispatch and `Object.toString`'s runtime name report `java.util.HashMap`, and `Shared::roots` enumerates every non-null key and value a map holds. The natives cover the `()V`/`(I)V` constructors, `size`, `isEmpty`, `put` (returning the previous value or null), `get`, `containsKey`, `containsValue`, `remove` and `clear`; null keys and values are stored, a string key compares by content, a boxed `Integer` key by value and every other key by reference identity, and a negative capacity or a non-reference argument is a typed `VmError::Native`. `String.valueOf` covers `Object`, `int`, `long`, `boolean`, `char`, `float` and `double`: null renders `"null"`, a `String` returns itself, a boxed `Integer` its decimal value, any other object the VM's `ClassName@hex` shape that matches M2.9 `Object.toString`, `valueOf(int)` is byte-identical to `Integer.toString(int)`, and a lone surrogate `char` is `UnpairedSurrogate`; the value-conversion helpers moved from `collections` to `string`, so `StringBuilder.append(Object)` keeps the same text. The assembled `MapProbe` exercises the bytecode path, two distinct equal-content string keys and two distinct boxed `Integer` keys, roots, and typed errors; 16 tests; `cargo test -p rava-interp` 108, `rava-vm` 47, `rava-classfile` 50 and `rava-cli` 67 pass, workspace 272; `cargo xtask ci` exits 0 |
 | M2.14 | `cargo test -p rava-interp --test member_lookup` | 0 | 2026-11-24 | `Class.getDeclaredField`/`getField`, `getDeclaredMethod`/`getMethod` and `getDeclaredConstructor`/`getConstructor` are registry natives; a field matches by name and an executable by name plus the parameter descriptors built from its `Class[]` argument (reference parameter classes only), first in class-file order, and a method's return type is not part of the query; `get*` searches the class, its superclass chain and its interfaces with a visited set, while `getDeclared*` and the constructor queries stay on the receiver; a miss is null (the JDK's `NoSuchFieldException`/`NoSuchMethodException` is deferred because exception objects are not synthesized), and a primitive, array, null or non-`Class` parameter class is a typed `VmError::Native`; every hit is the M2.8 `Shared::reflect_member` object, so it is reference-identical to the array queries and stable across calls; the interpreter's `argument_count` now skips an array parameter's element descriptor, so `Class.getDeclaredMethod(String, Class[])` is callable from bytecode; the fixture has a field-hiding subclass, an interface method and three constructors; 5 tests; `cargo test -p rava-interp` 113, `rava-vm` 47, `rava-classfile` 50 and `rava-cli` 67 pass, workspace 277; `cargo xtask ci` exits 0 |
+| M2.15 | `cargo test -p rava-interp --test primitive_classes` | 0 | 2026-11-24 | `HeapObject::PrimitiveClass(PrimitiveKind)` is a heap kind distinct from `HeapObject::Class(ClassId)`, with `Shared::primitive_class` as the one-object-per-kind cache, its own lock and no-lock probe entry, and `Shared::roots` leaving every cached primitive class object a root; `Class.forName` of `boolean`, `byte`, `char`, `short`, `int`, `long`, `float`, `double` and `void` returns that cached object, whose `getName` is the Java name, `getModifiers` is `0x0411` (`public abstract final`, `void` included), `isPrimitive` is true, `isArray`/`isInterface` are false and `getSuperclass`/`getComponentType` are null, while `getClass()` reports `java.lang.Class`; a primitive class object declares no members, so the declared-member array queries return empty arrays and the named lookups return the documented null miss; `Field.getType`, `Method.getReturnType`/`getParameterTypes` and `Constructor.getParameterTypes` resolve primitive descriptors to primitive class objects, and a `Class[]` of primitive class objects builds the exact one-character descriptor (`I`, `Z`, ...) a named lookup matches, while a reference class object still builds `L...;` and a `Void.TYPE` parameter builds `V`, which matches nothing; the nine wrapper `TYPE` fields are resolved virtually by `Shared::static_field_value` on the interpreter's `getstatic` fallback because the C1 stubs have no initializer `Code`, and every other wrapper static (`Integer.MAX_VALUE`) stays absent; the `Bean`/`PrimitiveProbe` fixture asserts the flags, names, member types, lookup hits and misses, a bytecode `setValue`/`getValue` round trip through `int.class`, all nine `TYPE` fields, and the documented boundaries; 6 new tests; `cargo test -p rava-interp` 119, `rava-vm` 47, `rava-classfile` 50 and `rava-cli` 67 pass, workspace 283; `cargo xtask ci` exits 0 |
 
 M0.6 boundary: the reference and class-unloading hooks are registration points only.
 M0 has no collector, so no weak/soft/phantom reference is cleared and no class is
@@ -525,6 +526,40 @@ what lets `getDeclaredMethod`/`getMethod` be called from bytecode. Array and pri
 `Class` identity, the generic `Type` graph, annotation changes and Spring remain later
 slices.
 
+M2.15 boundary: a primitive class object is `HeapObject::PrimitiveClass(PrimitiveKind)`,
+a distinct heap kind from `HeapObject::Class(ClassId)`; a loaded class keeps its class id
+and nothing about its identity changes. There is exactly one cached object per kind in
+`Shared::primitive_class`, so `Class.forName("int")` and `Integer.TYPE` are
+reference-identical; the cache is enumerated by `Shared::roots`, has its own lock and is
+part of the no-lock probe. The nine kinds are `boolean`, `byte`, `char`, `short`, `int`,
+`long`, `float`, `double` and `void`; `getName` is the Java name, `getModifiers` is
+`0x0411` (`public abstract final`, `void` included), `isPrimitive` is true, `isArray` and
+`isInterface` are false, and `getSuperclass`/`getComponentType` are null. `getClass()` on a
+primitive class object reports `java.lang.Class`, as it does for any class object, and
+`Shared::get_class` agrees. A primitive class object has no class file, so the
+`getDeclaredFields`/`getDeclaredMethods`/`getDeclaredConstructors` queries return an empty
+array and the named lookups (`getDeclaredField`, `getField`, `getDeclaredMethod`,
+`getMethod`, `getDeclaredConstructor`, `getConstructor`) return the documented null miss
+rather than a second lookup path. `Field.getType`, `Method.getReturnType`,
+`Method.getParameterTypes` and `Constructor.getParameterTypes` resolve a primitive
+descriptor to the primitive class object; an array descriptor still returns a typed error
+because array class identity is not modeled. A named lookup accepts primitive class
+objects in its `Class[]` and builds the one-character descriptor (`I`, `Z`, ...), while a
+reference class object still builds `L...;`; `Void.TYPE` builds `V`, which matches no
+method or constructor, as on the JDK, and a loaded class whose binary name is a primitive
+keyword is still a typed error. The nine wrapper `TYPE` fields are resolved virtually by
+`Shared::static_field_value` because the C1 stubs carry no initializer `Code`: the
+interpreter's `getstatic` reads the statics table first and falls back to the primitive
+class object, so `Integer.TYPE` read from bytecode is the same object `Class.forName("int")`
+returns. Nothing is written into the statics table, and every other static field of a
+wrapper (`Integer.MAX_VALUE`, for example) is still absent and fails exactly as before.
+Generic `Type`, the generic member-type queries, array class identity, annotation changes
+and Spring stay out of this slice; an annotation query on a primitive class object is
+still a typed error, and `Class.toString` is not overridden, so `Object.toString` on a
+primitive class object keeps the M2.9 `java.lang.Class@hash` shape instead of the JDK's
+`class int`. The `crates/interp/tests/primitive_classes.rs` fixture is assembled in Rust
+because it needs no JDK.
+
 ## Decision log
 
 | ADR | Decision | Status |
@@ -592,7 +627,13 @@ A fresh session should:
     `getDeclaredConstructor`/`getConstructor` match a field by name and an executable by
     name plus parameter descriptors, search the superclass chain and interfaces for the
     inherited forms, return null for a miss, and return the M2.8 cached member object
-    (`cargo test -p rava-interp --test member_lookup`). M2.15 is next.
+    (`cargo test -p rava-interp --test member_lookup`). M2.15 landed primitive class
+    identity and primitive member types: the `HeapObject::PrimitiveClass(PrimitiveKind)`
+    heap kind and its `Shared::primitive_class` cache, the primitive `Class` queries and
+    `Class.forName` names, primitive member types from `Field`/`Method`/`Constructor`,
+    primitive parameter descriptors in named lookup, the virtual wrapper `TYPE` fields,
+    and the `Bean`/`PrimitiveProbe` fixture (`cargo test -p rava-interp --test
+    primitive_classes`). M2.16 is next.
 4. Do not write runtime code outside a defined slice.
 
 ## Open decisions

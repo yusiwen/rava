@@ -110,6 +110,123 @@ impl fmt::Display for ArrayKind {
     }
 }
 
+/// One Java primitive type, `void` included.
+///
+/// A primitive class object (`int.class`, `Class.forName("int")`) is a
+/// [`HeapObject::PrimitiveClass`] holding this kind. The kind is the whole identity: a
+/// primitive has exactly one class object per VM, no defining loader, no class file and
+/// no metadata, which is why it is not a [`ClassId`]. The nine names, descriptors and
+/// modifiers match the JDK: every primitive reports the same
+/// `public abstract final` modifiers (`0x0411`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum PrimitiveKind {
+    Boolean,
+    Byte,
+    Char,
+    Short,
+    Int,
+    Long,
+    Float,
+    Double,
+    Void,
+}
+
+impl PrimitiveKind {
+    /// Every primitive kind in `boolean`, `byte`, `char`, `short`, `int`, `long`,
+    /// `float`, `double`, `void` order.
+    pub const ALL: [Self; 9] = [
+        Self::Boolean,
+        Self::Byte,
+        Self::Char,
+        Self::Short,
+        Self::Int,
+        Self::Long,
+        Self::Float,
+        Self::Double,
+        Self::Void,
+    ];
+
+    /// The Java source name, which is also `Class.getName()` for the primitive and the
+    /// spelling `Class.forName` accepts.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Boolean => "boolean",
+            Self::Byte => "byte",
+            Self::Char => "char",
+            Self::Short => "short",
+            Self::Int => "int",
+            Self::Long => "long",
+            Self::Float => "float",
+            Self::Double => "double",
+            Self::Void => "void",
+        }
+    }
+
+    /// The JVM field descriptor and the return type of a `void` method (`V`).
+    pub fn descriptor(self) -> &'static str {
+        match self {
+            Self::Boolean => "Z",
+            Self::Byte => "B",
+            Self::Char => "C",
+            Self::Short => "S",
+            Self::Int => "I",
+            Self::Long => "J",
+            Self::Float => "F",
+            Self::Double => "D",
+            Self::Void => "V",
+        }
+    }
+
+    /// `Class.getModifiers()` for a primitive: `Modifier.PUBLIC | Modifier.ABSTRACT |
+    /// Modifier.FINAL`, which is `0x0411` on the reference JDK for all nine kinds.
+    pub fn modifiers(self) -> u16 {
+        0x0411
+    }
+
+    /// The primitive whose Java name is `name`, if any.
+    pub fn from_name(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|kind| kind.name() == name)
+    }
+
+    /// The primitive whose JVM descriptor is `descriptor`, if any.
+    ///
+    /// A one-character field descriptor (`I`, not `[I`) is the whole match, so an array
+    /// descriptor is never mistaken for its element primitive.
+    pub fn from_descriptor(descriptor: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|kind| kind.descriptor() == descriptor)
+    }
+
+    /// The `java.lang` wrapper class that declares this primitive's `TYPE` field.
+    pub fn wrapper_class(self) -> &'static str {
+        match self {
+            Self::Boolean => "java/lang/Boolean",
+            Self::Byte => "java/lang/Byte",
+            Self::Char => "java/lang/Character",
+            Self::Short => "java/lang/Short",
+            Self::Int => "java/lang/Integer",
+            Self::Long => "java/lang/Long",
+            Self::Float => "java/lang/Float",
+            Self::Double => "java/lang/Double",
+            Self::Void => "java/lang/Void",
+        }
+    }
+
+    /// The primitive whose wrapper class is the internal name `name`, if any.
+    pub fn from_wrapper_class(name: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|kind| kind.wrapper_class() == name)
+    }
+}
+
+impl fmt::Display for PrimitiveKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.name())
+    }
+}
+
 /// One instance field's position in a class layout.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FieldSlot {
@@ -306,6 +423,14 @@ pub enum HeapObject {
     /// are created and cached by [`crate::Shared::class_object`], never by a caller
     /// allocating directly.
     Class(ClassId),
+    /// A primitive class object (`int.class`, `Class.forName("int")`).
+    ///
+    /// The object holds only a [`PrimitiveKind`]. There is exactly one object per kind:
+    /// [`crate::Shared::primitive_class`] creates and caches them, and
+    /// [`crate::Shared::roots`] reports the cache as roots. A primitive class object is
+    /// distinct from [`HeapObject::Class`], which stays the representation of a loaded
+    /// class's identity.
+    PrimitiveClass(PrimitiveKind),
     /// A reflected `Field`, `Method` or `Constructor`: one heap object per member.
     ///
     /// Like a class object, the object holds identity only; the class's member record is
@@ -436,6 +561,12 @@ impl Heap {
     /// which caches one object per class identity.
     pub fn allocate_class(&mut self, class: ClassId) -> ObjRef {
         self.allocate(HeapObject::Class(class))
+    }
+
+    /// Allocate a primitive class object. Callers go through
+    /// [`crate::Shared::primitive_class`], which caches one object per primitive kind.
+    pub fn allocate_primitive_class(&mut self, kind: PrimitiveKind) -> ObjRef {
+        self.allocate(HeapObject::PrimitiveClass(kind))
     }
 
     /// Allocate a reflected member. Callers go through
@@ -609,6 +740,20 @@ impl Heap {
             _ => Err(HeapError::WrongObjectKind {
                 reference,
                 expected: "a class object",
+            }),
+        }
+    }
+
+    /// The primitive kind behind a primitive class object.
+    ///
+    /// A loaded class object is a different heap object kind, so this reports a typed
+    /// error for it rather than inventing a primitive.
+    pub fn primitive_class(&self, reference: ObjRef) -> Result<PrimitiveKind, HeapError> {
+        match self.get(reference)? {
+            HeapObject::PrimitiveClass(kind) => Ok(*kind),
+            _ => Err(HeapError::WrongObjectKind {
+                reference,
+                expected: "a primitive class object",
             }),
         }
     }
