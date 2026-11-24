@@ -11,7 +11,7 @@ use rava_classfile::{Assembler, ClassBuilder};
 use rava_interp::{InterpError, run_static_method};
 use rava_vm::{
     ClassId, ClassRef, FieldLayout, LoaderId, ObjRef, PrimitiveKind, Shared, ThreadState, Value,
-    VmError, reflection,
+    reflection,
 };
 
 const ACC_PUBLIC_STATIC: u16 = 0x0009;
@@ -499,7 +499,7 @@ fn an_array_reports_its_cached_array_class() {
 }
 
 #[test]
-fn class_for_name_of_a_missing_class_is_a_typed_error() {
+fn class_for_name_of_a_missing_class_throws_class_not_found() {
     let fixture = fixture();
     let argument = fixture
         .shared
@@ -512,10 +512,13 @@ fn class_for_name_of_a_missing_class_is_a_typed_error() {
         "(Ljava/lang/String;)Ljava/lang/Class;",
         Value::Ref(argument),
     );
-    assert!(matches!(
-        error,
-        Err(InterpError::Vm(VmError::ClassNotFound { .. }))
-    ));
+    // `Class.forName` is the JDK's probe for optional classes: a miss is a Java
+    // `ClassNotFoundException` throwable, not a VM error, so a caller's handler catches
+    // it exactly as on the JDK.
+    assert!(
+        matches!(error, Err(InterpError::Thrown(_))),
+        "expected a ClassNotFoundException throwable, found {error:?}"
+    );
 }
 
 #[test]

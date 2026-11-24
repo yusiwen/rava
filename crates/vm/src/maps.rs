@@ -31,47 +31,180 @@ use crate::value::Value;
 /// The internal name of the map's runtime class.
 pub const HASH_MAP_CLASS: &str = "java/util/HashMap";
 
+/// The internal name of the insertion-ordered map's runtime class.
+pub const LINKED_HASH_MAP_CLASS: &str = "java/util/LinkedHashMap";
+
+/// The internal name of the sorted map's runtime class.
+pub const TREE_MAP_CLASS: &str = "java/util/TreeMap";
+
+/// The internal name of the identity map's runtime class.
+pub const IDENTITY_HASH_MAP_CLASS: &str = "java/util/IdentityHashMap";
+
+/// The internal name of the concurrent map's runtime class.
+pub const CONCURRENT_HASH_MAP_CLASS: &str = "java/util/concurrent/ConcurrentHashMap";
+
+/// The internal name of the legacy hash table.
+pub const HASHTABLE_CLASS: &str = "java/util/Hashtable";
+
+/// The internal name of the properties table.
+pub const PROPERTIES_CLASS: &str = "java/util/Properties";
+
+/// The internal name of the map entry interface.
+pub const MAP_ENTRY_CLASS: &str = "java/util/Map$Entry";
+
 /// Registers the M2.13 `java.util.HashMap` natives.
 ///
 /// Every entry is keyed by `java.util.HashMap`, the class the C1 stub declares the method
 /// on, so `invokevirtual`, `invokespecial` and `invokestatic` all reach the registry before
 /// the stub's missing `Code` is consulted.
 pub fn register_natives(shared: &Shared) {
-    shared.register_native(HASH_MAP_CLASS, "<init>", "()V", hash_map_init);
-    shared.register_native(HASH_MAP_CLASS, "<init>", "(I)V", hash_map_init_capacity);
-    shared.register_native(HASH_MAP_CLASS, "size", "()I", hash_map_size);
-    shared.register_native(HASH_MAP_CLASS, "isEmpty", "()Z", hash_map_is_empty);
-    shared.register_native(
+    for class in [
         HASH_MAP_CLASS,
+        TREE_MAP_CLASS,
+        IDENTITY_HASH_MAP_CLASS,
+        CONCURRENT_HASH_MAP_CLASS,
+        HASHTABLE_CLASS,
+    ] {
+        register_map_surface(shared, class);
+    }
+    // `Properties` extends `Hashtable`, so the `Hashtable` entries serve a `Properties`
+    // receiver through the superclass walk; only its own constructors and property access
+    // are distinct.
+    for descriptor in ["()V", "(Ljava/util/Properties;)V", "(I)V"] {
+        shared.register_native(PROPERTIES_CLASS, "<init>", descriptor, map_init);
+    }
+    shared.register_native(
+        PROPERTIES_CLASS,
+        "getProperty",
+        "(Ljava/lang/String;)Ljava/lang/String;",
+        properties_get,
+    );
+    shared.register_native(
+        PROPERTIES_CLASS,
+        "getProperty",
+        "(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;",
+        properties_get_default,
+    );
+    shared.register_native(
+        PROPERTIES_CLASS,
+        "setProperty",
+        "(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/Object;",
+        properties_set,
+    );
+    // `LinkedHashMap` inherits the `HashMap` surface, so the `HashMap` entries serve it
+    // through the ordinary superclass walk; only its constructors are distinct.
+    shared.register_native(LINKED_HASH_MAP_CLASS, "<init>", "()V", map_init);
+    shared.register_native(LINKED_HASH_MAP_CLASS, "<init>", "(I)V", map_init_capacity);
+    shared.register_native(
+        LINKED_HASH_MAP_CLASS,
+        "<init>",
+        "(ILF)V",
+        map_init_threshold,
+    );
+    shared.register_native(
+        LINKED_HASH_MAP_CLASS,
+        "<init>",
+        "(Ljava/util/Map;)V",
+        map_init_from,
+    );
+    shared.register_native(
+        CONCURRENT_HASH_MAP_CLASS,
+        "newKeySet",
+        "()Ljava/util/concurrent/ConcurrentHashMap$KeySetView;",
+        concurrent_hash_map_new_key_set,
+    );
+    shared.register_native(
+        CONCURRENT_HASH_MAP_CLASS,
+        "newKeySet",
+        "(I)Ljava/util/concurrent/ConcurrentHashMap$KeySetView;",
+        concurrent_hash_map_new_key_set,
+    );
+    register_map_entry_natives(shared);
+}
+
+/// Register the map surface for one concrete map class.
+fn register_map_surface(shared: &Shared, class: &'static str) {
+    shared.register_native(class, "<init>", "()V", map_init);
+    shared.register_native(class, "<init>", "(I)V", map_init_capacity);
+    shared.register_native(class, "<init>", "(ILF)V", map_init_threshold);
+    shared.register_native(class, "<init>", "(Ljava/util/Map;)V", map_init_from);
+    shared.register_native(class, "size", "()I", hash_map_size);
+    shared.register_native(class, "isEmpty", "()Z", hash_map_is_empty);
+    shared.register_native(
+        class,
         "put",
         "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;",
         hash_map_put,
     );
     shared.register_native(
-        HASH_MAP_CLASS,
+        class,
         "get",
         "(Ljava/lang/Object;)Ljava/lang/Object;",
         hash_map_get,
     );
     shared.register_native(
-        HASH_MAP_CLASS,
+        class,
+        "getOrDefault",
+        "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;",
+        hash_map_get_or_default,
+    );
+    shared.register_native(
+        class,
         "containsKey",
         "(Ljava/lang/Object;)Z",
         hash_map_contains_key,
     );
     shared.register_native(
-        HASH_MAP_CLASS,
+        class,
         "containsValue",
         "(Ljava/lang/Object;)Z",
         hash_map_contains_value,
     );
     shared.register_native(
-        HASH_MAP_CLASS,
+        class,
         "remove",
         "(Ljava/lang/Object;)Ljava/lang/Object;",
         hash_map_remove,
     );
-    shared.register_native(HASH_MAP_CLASS, "clear", "()V", hash_map_clear);
+    shared.register_native(
+        class,
+        "remove",
+        "(Ljava/lang/Object;Ljava/lang/Object;)Z",
+        hash_map_remove_pair,
+    );
+    shared.register_native(class, "clear", "()V", hash_map_clear);
+    shared.register_native(class, "putAll", "(Ljava/util/Map;)V", hash_map_put_all);
+    shared.register_native(
+        class,
+        "putIfAbsent",
+        "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;",
+        hash_map_put_if_absent,
+    );
+    shared.register_native(class, "keySet", "()Ljava/util/Set;", hash_map_key_set);
+    shared.register_native(class, "entrySet", "()Ljava/util/Set;", hash_map_entry_set);
+    shared.register_native(class, "values", "()Ljava/util/Collection;", hash_map_values);
+}
+
+/// Register the `java.util.Map$Entry` surface.
+fn register_map_entry_natives(shared: &Shared) {
+    shared.register_native(
+        MAP_ENTRY_CLASS,
+        "getKey",
+        "()Ljava/lang/Object;",
+        entry_get_key,
+    );
+    shared.register_native(
+        MAP_ENTRY_CLASS,
+        "getValue",
+        "()Ljava/lang/Object;",
+        entry_get_value,
+    );
+    shared.register_native(
+        MAP_ENTRY_CLASS,
+        "setValue",
+        "(Ljava/lang/Object;)Ljava/lang/Object;",
+        entry_set_value,
+    );
 }
 
 fn heap_error(error: HeapError) -> VmError {
@@ -142,7 +275,7 @@ fn entries_mut(heap: &mut Heap, receiver: ObjRef) -> Result<&mut Vec<(Value, Val
 /// references compares by identity, and null equals only null. The non-reference arm is
 /// unreachable through the `Object`-typed signatures this slice registers, but the map
 /// stores [`Value`]s, so it is defined rather than left to panic.
-fn values_equal(heap: &Heap, left: Value, right: Value) -> Result<bool, HeapError> {
+pub(crate) fn values_equal(heap: &Heap, left: Value, right: Value) -> Result<bool, HeapError> {
     let (Value::Ref(left_ref), Value::Ref(right_ref)) = (left, right) else {
         return Ok(left == right);
     };
@@ -184,42 +317,6 @@ fn find_value(
             return Ok(Some(position));
         }
     }
-    Ok(None)
-}
-
-/// `HashMap.<init>()V`: the empty map `new` already allocated.
-fn hash_map_init(
-    shared: &Shared,
-    _thread: &ThreadState,
-    _loader: LoaderId,
-    receiver: ObjRef,
-    _args: &[Value],
-) -> Result<Option<Value>, VmError> {
-    let heap = shared.heap();
-    entries(&heap, receiver, "HashMap.<init>")?;
-    Ok(None)
-}
-
-/// `HashMap.<init>(I)V`: a capacity hint, not a stored size.
-///
-/// The JDK raises `IllegalArgumentException` for a negative capacity; this slice has no
-/// exception-object synthesis, so it is a typed error. The capacity itself is ignored, the
-/// same choice the M2.12 `ArrayList` and `StringBuilder` constructors make.
-fn hash_map_init_capacity(
-    shared: &Shared,
-    _thread: &ThreadState,
-    _loader: LoaderId,
-    receiver: ObjRef,
-    args: &[Value],
-) -> Result<Option<Value>, VmError> {
-    let capacity = int_argument(args, 0, "HashMap.<init>")?;
-    if capacity < 0 {
-        return Err(VmError::Native(format!(
-            "HashMap.<init>: negative capacity {capacity}"
-        )));
-    }
-    let heap = shared.heap();
-    entries(&heap, receiver, "HashMap.<init>")?;
     Ok(None)
 }
 
@@ -378,4 +475,412 @@ fn hash_map_clear(
     let mut heap = shared.heap();
     entries_mut(&mut heap, receiver)?.clear();
     Ok(None)
+}
+
+/// `Map.<init>()V`: the empty map `new` already allocated.
+fn map_init(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    _args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let heap = shared.heap();
+    entries(&heap, receiver, "Map.<init>")?;
+    Ok(None)
+}
+
+/// `Map.<init>(I)V`: a capacity hint, not a stored size.
+fn map_init_capacity(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let capacity = int_argument(args, 0, "Map.<init>")?;
+    if capacity < 0 {
+        return Err(VmError::Native(format!(
+            "Map.<init>: negative capacity {capacity}"
+        )));
+    }
+    let heap = shared.heap();
+    entries(&heap, receiver, "Map.<init>")?;
+    Ok(None)
+}
+
+/// `Map.<init>(IF)V`: a capacity and load-factor hint.
+fn map_init_threshold(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let capacity = int_argument(args, 0, "Map.<init>")?;
+    if capacity < 0 {
+        return Err(VmError::Native(format!(
+            "Map.<init>: negative capacity {capacity}"
+        )));
+    }
+    let heap = shared.heap();
+    entries(&heap, receiver, "Map.<init>")?;
+    Ok(None)
+}
+
+/// `Map.<init>(Map)V`: copy every entry of the source map.
+fn map_init_from(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    put_all_entries(shared, receiver, args, "Map.<init>")
+}
+
+/// `Map.getOrDefault(Object, Object)`.
+fn hash_map_get_or_default(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let key = reference_argument(args, 0, "Map.getOrDefault")?;
+    let fallback = reference_argument(args, 1, "Map.getOrDefault")?;
+    let found = {
+        let heap = shared.heap();
+        let entries = entries(&heap, receiver, "Map.getOrDefault")?;
+        find_key(&heap, entries, Value::Ref(key))
+            .map_err(heap_error)?
+            .map(|position| entries[position].1)
+    };
+    Ok(Some(found.unwrap_or(Value::Ref(fallback))))
+}
+
+/// `Map.remove(Object, Object)`: remove only when the stored value matches.
+fn hash_map_remove_pair(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let key = reference_argument(args, 0, "Map.remove")?;
+    let value = reference_argument(args, 1, "Map.remove")?;
+    let position = {
+        let heap = shared.heap();
+        let entries = entries(&heap, receiver, "Map.remove")?;
+        let position = find_key(&heap, entries, Value::Ref(key)).map_err(heap_error)?;
+        match position {
+            Some(position) => {
+                let (_, stored) = entries[position];
+                if values_equal(&heap, stored, Value::Ref(value)).map_err(heap_error)? {
+                    Some(position)
+                } else {
+                    None
+                }
+            }
+            None => None,
+        }
+    };
+    let removed = match position {
+        Some(position) => {
+            shared
+                .heap()
+                .map_mut(receiver)
+                .map_err(heap_error)?
+                .remove(position);
+            true
+        }
+        None => false,
+    };
+    Ok(Some(Value::Int(i32::from(removed))))
+}
+
+/// `Map.putAll(Map)`: copy every entry of the argument map.
+fn hash_map_put_all(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    put_all_entries(shared, receiver, args, "Map.putAll")
+}
+
+fn put_all_entries(
+    shared: &Shared,
+    receiver: ObjRef,
+    args: &[Value],
+    method: &'static str,
+) -> Result<Option<Value>, VmError> {
+    let source = reference_argument(args, 0, method)?;
+    let source_entries = {
+        let heap = shared.heap();
+        entries(&heap, source, method)?.to_vec()
+    };
+    for (key, value) in source_entries {
+        let position = {
+            let heap = shared.heap();
+            let entries = entries(&heap, receiver, method)?;
+            find_key(&heap, entries, key).map_err(heap_error)?
+        };
+        let mut heap = shared.heap();
+        match position {
+            Some(position) => {
+                heap.map_mut(receiver).map_err(heap_error)?[position].1 = value;
+            }
+            None => heap
+                .map_mut(receiver)
+                .map_err(heap_error)?
+                .push((key, value)),
+        }
+    }
+    Ok(None)
+}
+
+/// `Map.putIfAbsent(Object, Object)`: insert unless the key is present.
+fn hash_map_put_if_absent(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let key = reference_argument(args, 0, "Map.putIfAbsent")?;
+    let value = reference_argument(args, 1, "Map.putIfAbsent")?;
+    let mut heap = shared.heap();
+    let position = {
+        let entries = entries(&heap, receiver, "Map.putIfAbsent")?;
+        find_key(&heap, entries, Value::Ref(key)).map_err(heap_error)?
+    };
+    match position {
+        Some(position) => {
+            let previous = entries(&heap, receiver, "Map.putIfAbsent")?[position].1;
+            Ok(Some(previous))
+        }
+        None => {
+            heap.map_mut(receiver)
+                .map_err(heap_error)?
+                .push((Value::Ref(key), Value::Ref(value)));
+            Ok(Some(Value::Ref(ObjRef::NULL)))
+        }
+    }
+}
+
+/// `Map.keySet()`: a set of the current keys.
+fn hash_map_key_set(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    _args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let keys = {
+        let heap = shared.heap();
+        entries(&heap, receiver, "Map.keySet")?
+            .iter()
+            .map(|(key, _)| *key)
+            .collect::<Vec<_>>()
+    };
+    let set = new_set(shared, keys)?;
+    Ok(Some(Value::Ref(set)))
+}
+
+/// `Map.values()`: a list of the current values.
+fn hash_map_values(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    _args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let values = {
+        let heap = shared.heap();
+        entries(&heap, receiver, "Map.values")?
+            .iter()
+            .map(|(_, value)| *value)
+            .collect::<Vec<_>>()
+    };
+    let list = new_list(shared, values)?;
+    Ok(Some(Value::Ref(list)))
+}
+
+/// `Map.entrySet()`: a set of `Map.Entry` objects over a snapshot of the entries.
+fn hash_map_entry_set(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    _args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let entries = {
+        let heap = shared.heap();
+        entries(&heap, receiver, "Map.entrySet")?.to_vec()
+    };
+    let mut values = Vec::with_capacity(entries.len());
+    for (key, value) in entries {
+        let entry = shared.heap().allocate_map_entry(key, value);
+        values.push(Value::Ref(entry));
+    }
+    let set = new_set(shared, values)?;
+    Ok(Some(Value::Ref(set)))
+}
+
+/// `ConcurrentHashMap.newKeySet()`: an empty concurrent set.
+fn concurrent_hash_map_new_key_set(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    _args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let set = new_set(shared, Vec::new())?;
+    Ok(Some(Value::Ref(set)))
+}
+
+fn new_set(shared: &Shared, values: Vec<Value>) -> Result<ObjRef, VmError> {
+    let class = shared.load_library_class(crate::collections::LINKED_HASH_SET_CLASS)?;
+    let set = shared.heap().allocate_set(class);
+    {
+        let mut heap = shared.heap();
+        *heap.set_mut(set).expect("a freshly allocated set is a set") = values;
+    }
+    Ok(set)
+}
+
+fn new_list(shared: &Shared, values: Vec<Value>) -> Result<ObjRef, VmError> {
+    let class = shared.load_library_class(crate::collections::ARRAY_LIST_CLASS)?;
+    let list = shared.heap().allocate_list(class);
+    {
+        let mut heap = shared.heap();
+        *heap
+            .list_mut(list)
+            .expect("a freshly allocated list is a list") = values;
+    }
+    Ok(list)
+}
+
+/// `Map.Entry.getKey()`.
+fn entry_get_key(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    _args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let key = {
+        let heap = shared.heap();
+        heap.map_entry(receiver).map_err(heap_error)?.key
+    };
+    Ok(Some(key))
+}
+
+/// `Map.Entry.getValue()`.
+fn entry_get_value(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    _args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let value = {
+        let heap = shared.heap();
+        heap.map_entry(receiver).map_err(heap_error)?.value
+    };
+    Ok(Some(value))
+}
+
+/// `Map.Entry.setValue(Object)`: replace this entry's value and return the previous one.
+///
+/// The entry is a snapshot: updating it does not write back to the source map, which is
+/// the documented M2.23 boundary.
+fn entry_set_value(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let value = reference_argument(args, 0, "Map.Entry.setValue")?;
+    let mut heap = shared.heap();
+    let entry = heap
+        .get_mut(receiver)
+        .map_err(heap_error)
+        .and_then(|object| match object {
+            HeapObject::MapEntry(entry) => Ok(entry),
+            _ => Err(VmError::Native(
+                "Map.Entry.setValue receiver is not a Map.Entry".to_owned(),
+            )),
+        })?;
+    let previous = entry.value;
+    entry.value = Value::Ref(value);
+    Ok(Some(previous))
+}
+
+fn properties_get(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    properties_get_default(
+        shared,
+        _thread,
+        _loader,
+        receiver,
+        &[args[0], Value::Ref(ObjRef::NULL)],
+    )
+}
+
+fn properties_get_default(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let key = reference_argument(args, 0, "Properties.getProperty")?;
+    let fallback = args.get(1).copied().unwrap_or(Value::Ref(ObjRef::NULL));
+    let found = {
+        let heap = shared.heap();
+        let entries = entries(&heap, receiver, "Properties.getProperty")?;
+        find_key(&heap, entries, Value::Ref(key))
+            .map_err(heap_error)?
+            .map(|position| entries[position].1)
+    };
+    Ok(Some(found.unwrap_or(fallback)))
+}
+
+fn properties_set(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let key = reference_argument(args, 0, "Properties.setProperty")?;
+    let value = reference_argument(args, 1, "Properties.setProperty")?;
+    let mut heap = shared.heap();
+    let position = {
+        let entries = entries(&heap, receiver, "Properties.setProperty")?;
+        find_key(&heap, entries, Value::Ref(key)).map_err(heap_error)?
+    };
+    match position {
+        Some(position) => {
+            let entries = heap.map_mut(receiver).map_err(heap_error)?;
+            let previous = entries[position].1;
+            entries[position].1 = Value::Ref(value);
+            Ok(Some(previous))
+        }
+        None => {
+            heap.map_mut(receiver)
+                .map_err(heap_error)?
+                .push((Value::Ref(key), Value::Ref(value)));
+            Ok(Some(Value::Ref(ObjRef::NULL)))
+        }
+    }
 }

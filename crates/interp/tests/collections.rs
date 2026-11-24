@@ -1892,7 +1892,11 @@ fn get_class_reports_the_vm_class_of_builders_and_lists() {
         "java/lang/StringBuilder"
     );
 
-    let list = fixture.shared.heap().allocate_list();
+    let list_class = fixture
+        .shared
+        .load_library_class("java/util/ArrayList")
+        .unwrap();
+    let list = fixture.shared.heap().allocate_list(list_class);
     let class = fixture.shared.get_class(list).unwrap();
     let id = fixture.shared.heap().class(class).unwrap();
     assert_eq!(
@@ -1918,10 +1922,14 @@ fn heap_lists_and_builders_have_dedicated_representations() {
         .push_str("hi");
     assert_eq!(fixture.shared.heap().string_builder(builder).unwrap(), "hi");
 
-    let list = fixture.shared.heap().allocate_list();
+    let list_class = fixture
+        .shared
+        .load_library_class("java/util/ArrayList")
+        .unwrap();
+    let list = fixture.shared.heap().allocate_list(list_class);
     assert!(matches!(
         fixture.shared.heap().get(list).unwrap(),
-        HeapObject::List(elements) if elements.is_empty()
+        HeapObject::List(list) if list.elements.is_empty()
     ));
     assert!(fixture.shared.heap().string_builder(list).is_err());
     assert!(fixture.shared.heap().list(builder).is_err());
@@ -1970,7 +1978,11 @@ fn list_elements_are_enumerated_as_roots() {
 
     // A list allocated directly behaves the same.
     let second = fixture.shared.heap().allocate_string("second");
-    let direct = fixture.shared.heap().allocate_list();
+    let list_class = fixture
+        .shared
+        .load_library_class("java/util/ArrayList")
+        .unwrap();
+    let direct = fixture.shared.heap().allocate_list(list_class);
     fixture
         .shared
         .heap()

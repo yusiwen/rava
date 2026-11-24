@@ -48,6 +48,7 @@ pub enum SharedLock {
     InternedStrings,
     NativeRegistry,
     Stdout,
+    Stderr,
 }
 
 impl fmt::Display for SharedLock {
@@ -64,6 +65,7 @@ impl fmt::Display for SharedLock {
             Self::InternedStrings => write!(f, "interned-string table"),
             Self::NativeRegistry => write!(f, "native registry"),
             Self::Stdout => write!(f, "stdout"),
+            Self::Stderr => write!(f, "stderr"),
         }
     }
 }
@@ -115,7 +117,69 @@ pub struct Shared {
     interned_strings: Mutex<HashMap<String, ObjRef>>,
     natives: RwLock<HashMap<NativeKey, NativeFn>>,
     stdout: Mutex<Vec<u8>>,
+    stderr: Mutex<Vec<u8>>,
+    /// The minimal `java.util.logging` state: the one `Logger` per name and the fields of
+    /// every live `LogRecord`.
+    jul: Mutex<crate::jul::JulState>,
+    /// The system property table. `System.getProperty` reads it and
+    /// `StandardEnvironment` copies it into its property sources.
+    properties: Mutex<HashMap<String, String>>,
+    /// The name and ordinal of every ordinary enum instance a constructor created.
+    enums: Mutex<HashMap<ObjRef, (String, i32)>>,
+    /// Lock state for a lock object that is an ordinary instance, such as Spring's
+    /// `ConcurrentReferenceHashMap$Segment`, which extends `ReentrantLock` and adds its own
+    /// fields. A plain `ReentrantLock` keeps its state in [`crate::HeapObject::Lock`].
+    locks: Mutex<HashMap<ObjRef, crate::heap::LockState>>,
+    /// The referent of every `java.lang.ref.Reference` instance. There is no collector yet
+    /// (M5), so a reference never clears on its own; `get`/`clear`/`enqueue` still work.
+    references: Mutex<HashMap<ObjRef, ObjRef>>,
+    /// The one `java.lang.Thread` object `Thread.currentThread` returns.
+    main_thread: Mutex<Option<ObjRef>>,
+    /// One value per `java.lang.ThreadLocal` object. There is one thread until M5, so the
+    /// map is the thread-local storage.
+    thread_locals: Mutex<HashMap<ObjRef, Value>>,
+    /// The one `ClassLoader` object reported for application classes.
+    class_loader: Mutex<Option<ObjRef>>,
+    /// The detail message of each throwable a constructor created.
+    throwable_messages: Mutex<HashMap<ObjRef, String>>,
     hooks: Hooks,
+}
+
+/// The system properties the runtime starts with.
+///
+/// These are the values Spring reads by name (`java.version`, `java.home`,
+/// `line.separator`, ...), not a copy of a host JVM's table.
+fn default_properties() -> HashMap<String, String> {
+    let mut properties = HashMap::new();
+    for (name, value) in [
+        ("java.version", "17"),
+        ("java.specification.version", "17"),
+        ("java.vendor", "rava"),
+        ("java.vm.name", "rava"),
+        ("java.home", ""),
+        ("java.class.path", ""),
+        ("file.encoding", "UTF-8"),
+        ("line.separator", "\n"),
+        ("os.name", std::env::consts::OS),
+        ("os.arch", std::env::consts::ARCH),
+        ("user.dir", ""),
+        // This VM has no JPMS module layer yet (ADR-0009 assigns resources, jars and
+        // modules to M4). Advertise the GraalVM native-image environment so Spring's
+        // `NativeDetector` takes its module-free path instead of enumerating system
+        // modules through `java.lang.module.ModuleFinder` and a `Stream` pipeline.
+        ("org.graalvm.nativeimage.imagecode", "runtime"),
+    ] {
+        properties.insert(name.to_owned(), value.to_owned());
+    }
+    properties
+}
+
+/// The VM-level container shape a class is or extends.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum VmContainerKind {
+    List,
+    Set,
+    Map,
 }
 
 impl Shared {
@@ -132,6 +196,16 @@ impl Shared {
             interned_strings: Mutex::new(HashMap::new()),
             natives: RwLock::new(HashMap::new()),
             stdout: Mutex::new(Vec::new()),
+            stderr: Mutex::new(Vec::new()),
+            jul: Mutex::new(crate::jul::JulState::default()),
+            properties: Mutex::new(default_properties()),
+            enums: Mutex::new(HashMap::new()),
+            locks: Mutex::new(HashMap::new()),
+            references: Mutex::new(HashMap::new()),
+            main_thread: Mutex::new(None),
+            thread_locals: Mutex::new(HashMap::new()),
+            class_loader: Mutex::new(None),
+            throwable_messages: Mutex::new(HashMap::new()),
             hooks: Hooks::default(),
         }
     }
@@ -155,6 +229,20 @@ impl Shared {
             .write()
             .expect("class table lock poisoned")
             .add_loader(parent, source)
+    }
+
+    /// The deepest loader in the table: the application loader a runner added, or the
+    /// bootstrap loader when none was added.
+    ///
+    /// `Class.forName` needs a loader but its native ABI receives the *declaring* class's
+    /// loader (`java.lang.Class` is a bootstrap class), not the caller's. In this VM there
+    /// is one application loader, so resolving through the deepest loader is the same
+    /// parent-first lookup the caller's loader would perform.
+    pub fn application_loader(&self) -> LoaderId {
+        self.classes
+            .read()
+            .expect("class table lock poisoned")
+            .last_loader()
     }
 
     pub fn load_class(&self, loader: LoaderId, name: &str) -> Result<ClassId, VmError> {
@@ -659,11 +747,17 @@ impl Shared {
             Annotation,
             Enum(ClassId),
             StringBuilder,
-            List,
-            Map,
+            Named(ClassId),
             Array(ClassRef),
             Lambda(ClassId),
             Type(&'static str),
+            LogLevel,
+            Atomic(&'static str),
+            Lock,
+            Condition,
+            Pattern,
+            Matcher,
+            Enumeration,
         }
 
         let kind = {
@@ -682,8 +776,20 @@ impl Shared {
                 HeapObject::Annotation(_) => Kind::Annotation,
                 HeapObject::Enum(constant) => Kind::Enum(constant.class),
                 HeapObject::StringBuilder(_) => Kind::StringBuilder,
-                HeapObject::List(_) => Kind::List,
-                HeapObject::Map(_) => Kind::Map,
+                HeapObject::List(list) => Kind::Named(list.class),
+                HeapObject::Set(set) => Kind::Named(set.class),
+                HeapObject::Map(map) => Kind::Named(map.class),
+                HeapObject::Iterator(iterator) => Kind::Named(iterator.class),
+                HeapObject::MapEntry(_) => {
+                    Kind::Named(self.load_library_class(crate::maps::MAP_ENTRY_CLASS)?)
+                }
+                HeapObject::LogLevel(_) => Kind::LogLevel,
+                HeapObject::Atomic(cell) => Kind::Atomic(cell.class_name()),
+                HeapObject::Lock(_) => Kind::Lock,
+                HeapObject::Condition(_) => Kind::Condition,
+                HeapObject::Pattern(_) => Kind::Pattern,
+                HeapObject::Matcher(_) => Kind::Matcher,
+                HeapObject::Enumeration(_) => Kind::Enumeration,
                 HeapObject::Array(array) => Kind::Array(array.component.clone()),
                 HeapObject::Lambda(lambda) => Kind::Lambda(lambda.interface),
                 HeapObject::Type(ty) => Kind::Type(ty.class_name()),
@@ -718,17 +824,38 @@ impl Shared {
                 let class = self.load_library_class(crate::collections::STRING_BUILDER_CLASS)?;
                 self.class_object(class)
             }
-            Kind::List => {
-                let class = self.load_library_class(crate::collections::ARRAY_LIST_CLASS)?;
-                self.class_object(class)
-            }
-            Kind::Map => {
-                let class = self.load_library_class(crate::maps::HASH_MAP_CLASS)?;
-                self.class_object(class)
-            }
+            Kind::Named(class) => self.class_object(class),
             Kind::Array(component) => self.array_class(component),
             Kind::Type(name) => {
                 let class = self.load_library_class(name)?;
+                self.class_object(class)
+            }
+            Kind::LogLevel => {
+                let class = self.load_library_class("java/util/logging/Level")?;
+                self.class_object(class)
+            }
+            Kind::Atomic(name) => {
+                let class = self.load_library_class(name)?;
+                self.class_object(class)
+            }
+            Kind::Lock => {
+                let class = self.load_library_class(crate::locks::REENTRANT_LOCK_CLASS)?;
+                self.class_object(class)
+            }
+            Kind::Condition => {
+                let class = self.load_library_class(crate::locks::CONDITION_CLASS)?;
+                self.class_object(class)
+            }
+            Kind::Pattern => {
+                let class = self.load_library_class(crate::regex::PATTERN_CLASS)?;
+                self.class_object(class)
+            }
+            Kind::Matcher => {
+                let class = self.load_library_class(crate::regex::MATCHER_CLASS)?;
+                self.class_object(class)
+            }
+            Kind::Enumeration => {
+                let class = self.load_library_class("java/util/Enumeration")?;
                 self.class_object(class)
             }
         }
@@ -767,6 +894,12 @@ impl Shared {
         let super_name = if entry.name == crate::collections::STRING_BUILDER_CLASS
             && super_name == "java/lang/AbstractStringBuilder"
         {
+            "java/lang/Object".to_owned()
+        } else if super_name == "java/util/Dictionary" {
+            // `ct.sym`'s release-17 view omits `java.util.Dictionary` even though
+            // `Hashtable` extends it. `Dictionary` declares no instance fields and only
+            // abstract methods, so the walk continues at `Object`; `Hashtable` itself
+            // carries the fields and concrete members the VM uses.
             "java/lang/Object".to_owned()
         } else {
             super_name
@@ -808,20 +941,75 @@ impl Shared {
         let entry = self
             .entry(class)
             .ok_or_else(|| VmError::Loader(format!("class id {} is not loaded", class.0)))?;
-        match entry.name.as_str() {
+        let class = entry.id;
+        let name = entry.name.clone();
+        match name.as_str() {
             crate::collections::STRING_BUILDER_CLASS => {
                 return Ok(self.heap().allocate_string_builder());
             }
-            crate::collections::ARRAY_LIST_CLASS => {
-                return Ok(self.heap().allocate_list());
+            "java/lang/String" => {
+                return Ok(self.heap().allocate_string(String::new()));
             }
-            crate::maps::HASH_MAP_CLASS => {
-                return Ok(self.heap().allocate_map());
+            crate::locks::REENTRANT_LOCK_CLASS => {
+                return Ok(self.heap().allocate_lock());
+            }
+            crate::atomic::ATOMIC_BOOLEAN_CLASS
+            | crate::atomic::ATOMIC_INTEGER_CLASS
+            | crate::atomic::ATOMIC_LONG_CLASS
+            | crate::atomic::ATOMIC_REFERENCE_CLASS => {
+                return Ok(self
+                    .heap()
+                    .allocate_atomic(crate::atomic::initial_cell(&name)));
             }
             _ => {}
         }
+        // A Spring class may extend a VM container shape and add fields (for example
+        // `AbstractBeanFactory$BeanPostProcessorCacheAwareList` extends
+        // `CopyOnWriteArrayList` and adds `this$0`). The shape is still selected from the
+        // superclass chain, and the subclass's own field layout starts at its defaults.
+        if let Some(kind) = self.container_kind(class)? {
+            let layout = self.field_layout(class)?;
+            let fields = layout.defaults();
+            return Ok(match kind {
+                VmContainerKind::List => self.heap().allocate_list_with_fields(class, fields),
+                VmContainerKind::Set => self.heap().allocate_set_with_fields(class, fields),
+                VmContainerKind::Map => self.heap().allocate_map_with_fields(class, fields),
+            });
+        }
         let layout = self.field_layout(class)?;
         Ok(self.heap().allocate_instance(class, &layout))
+    }
+
+    /// The VM container shape a class is or extends, if any.
+    fn container_kind(&self, class: ClassId) -> Result<Option<VmContainerKind>, VmError> {
+        let mut current = Some(class);
+        while let Some(id) = current {
+            let entry = self
+                .entry(id)
+                .ok_or_else(|| VmError::Loader(format!("class id {} is not loaded", id.0)))?;
+            match entry.name.as_str() {
+                crate::collections::ARRAY_LIST_CLASS
+                | crate::collections::LINKED_LIST_CLASS
+                | crate::collections::COPY_ON_WRITE_ARRAY_LIST_CLASS
+                | crate::collections::ARRAY_DEQUE_CLASS => return Ok(Some(VmContainerKind::List)),
+                crate::collections::LINKED_HASH_SET_CLASS
+                | crate::collections::HASH_SET_CLASS
+                | crate::collections::TREE_SET_CLASS
+                | crate::collections::COPY_ON_WRITE_ARRAY_SET_CLASS => {
+                    return Ok(Some(VmContainerKind::Set));
+                }
+                crate::maps::HASH_MAP_CLASS
+                | crate::maps::LINKED_HASH_MAP_CLASS
+                | crate::maps::HASHTABLE_CLASS
+                | crate::maps::PROPERTIES_CLASS
+                | crate::maps::TREE_MAP_CLASS
+                | crate::maps::IDENTITY_HASH_MAP_CLASS
+                | crate::maps::CONCURRENT_HASH_MAP_CLASS => return Ok(Some(VmContainerKind::Map)),
+                _ => {}
+            }
+            current = self.resolution_superclass(id)?;
+        }
+        Ok(None)
     }
 
     pub fn define_class(
@@ -995,6 +1183,51 @@ impl Shared {
         }
 
         {
+            // Spring keeps one logger per class name and a `LogRecord` may carry a
+            // throwable; both are permanent roots.
+            let jul = self.jul.lock().expect("jul lock poisoned");
+            for reference in jul.loggers.values() {
+                if seen.insert(*reference) {
+                    roots.push(*reference);
+                }
+            }
+            if let Some(reference) = *self
+                .class_loader
+                .lock()
+                .expect("class-loader lock poisoned")
+            {
+                if seen.insert(reference) {
+                    roots.push(reference);
+                }
+            }
+            if let Some(reference) = self.main_thread() {
+                if seen.insert(reference) {
+                    roots.push(reference);
+                }
+            }
+            let thread_locals = self
+                .thread_locals
+                .lock()
+                .expect("thread-local lock poisoned");
+            for value in thread_locals.values() {
+                push_container_root(&mut roots, &mut seen, *value);
+            }
+            let references = self.references.lock().expect("reference lock poisoned");
+            for referent in references.values() {
+                if !referent.is_null() && seen.insert(*referent) {
+                    roots.push(*referent);
+                }
+            }
+            for record in jul.records.values() {
+                if let Some(reference) = record.thrown {
+                    if !reference.is_null() && seen.insert(reference) {
+                        roots.push(reference);
+                    }
+                }
+            }
+        }
+
+        {
             // A container holds references that are not themselves roots of the class
             // table or a cache. A list's elements and a map's keys and values are
             // enumerated here so a future collector sees them; there is no collector yet,
@@ -1005,15 +1238,37 @@ impl Shared {
             let heap = self.heap.lock().expect("heap lock poisoned");
             for object in heap.live_objects() {
                 match object {
-                    HeapObject::List(elements) => {
-                        for value in elements {
+                    HeapObject::List(list) => {
+                        for value in &list.elements {
                             push_container_root(&mut roots, &mut seen, *value);
                         }
                     }
-                    HeapObject::Map(entries) => {
-                        for (key, value) in entries {
+                    HeapObject::Set(set) => {
+                        for value in &set.elements {
+                            push_container_root(&mut roots, &mut seen, *value);
+                        }
+                    }
+                    HeapObject::Map(map) => {
+                        for (key, value) in &map.entries {
                             push_container_root(&mut roots, &mut seen, *key);
                             push_container_root(&mut roots, &mut seen, *value);
+                        }
+                    }
+                    HeapObject::Iterator(iterator) => {
+                        for value in &iterator.items {
+                            push_container_root(&mut roots, &mut seen, *value);
+                        }
+                    }
+                    HeapObject::MapEntry(entry) => {
+                        push_container_root(&mut roots, &mut seen, entry.key);
+                        push_container_root(&mut roots, &mut seen, entry.value);
+                    }
+                    HeapObject::Atomic(crate::heap::AtomicCell::Reference(value)) => {
+                        push_container_root(&mut roots, &mut seen, *value);
+                    }
+                    HeapObject::Condition(condition) => {
+                        if !condition.lock.is_null() && seen.insert(condition.lock) {
+                            roots.push(condition.lock);
                         }
                     }
                     HeapObject::Lambda(lambda) => {
@@ -1027,7 +1282,13 @@ impl Shared {
         }
 
         for thread in threads {
-            for reference in thread.frame_roots() {
+            // Frames and held monitors are both roots: a `monitorenter` keeps its object
+            // alive for the duration of the critical section.
+            for reference in thread
+                .frame_roots()
+                .into_iter()
+                .chain(thread.monitor_roots())
+            {
                 if seen.insert(reference) {
                     roots.push(reference);
                 }
@@ -1099,6 +1360,11 @@ impl Shared {
                 lock: SharedLock::Stdout,
             })?;
         }
+        {
+            let _guard = self.stderr.try_lock().map_err(|_| LockHeld {
+                lock: SharedLock::Stderr,
+            })?;
+        }
         Ok(())
     }
 
@@ -1143,6 +1409,232 @@ impl Shared {
 
     pub fn stdout(&self) -> String {
         String::from_utf8_lossy(&self.stdout.lock().expect("stdout lock poisoned")).into_owned()
+    }
+
+    /// Record a throwable's detail message.
+    pub fn set_throwable_message(&self, reference: ObjRef, message: String) {
+        self.throwable_messages
+            .lock()
+            .expect("throwable lock poisoned")
+            .insert(reference, message);
+    }
+
+    /// A throwable's detail message, if a constructor recorded one.
+    pub fn throwable_message(&self, reference: ObjRef) -> Option<String> {
+        self.throwable_messages
+            .lock()
+            .expect("throwable lock poisoned")
+            .get(&reference)
+            .cloned()
+    }
+
+    /// The `ClassLoader` object reported for a non-bootstrap class.
+    ///
+    /// The VM has no user-visible loader hierarchy; one opaque object stands for the
+    /// application loader so `getClassLoader` is non-null for Spring's own classes and
+    /// `ClassLoader.getResources` has a receiver.
+    pub fn class_loader_object(&self) -> Result<ObjRef, VmError> {
+        if let Some(reference) = *self
+            .class_loader
+            .lock()
+            .expect("class-loader lock poisoned")
+        {
+            return Ok(reference);
+        }
+        let class = self.load_library_class("java/lang/ClassLoader")?;
+        let reference = self.allocate_instance(class)?;
+        *self
+            .class_loader
+            .lock()
+            .expect("class-loader lock poisoned") = Some(reference);
+        Ok(reference)
+    }
+
+    /// The value stored in a `ThreadLocal`, if it was set.
+    pub fn thread_local(&self, reference: ObjRef) -> Option<Value> {
+        self.thread_locals
+            .lock()
+            .expect("thread-local lock poisoned")
+            .get(&reference)
+            .copied()
+    }
+
+    /// Store a value in a `ThreadLocal`.
+    pub fn set_thread_local(&self, reference: ObjRef, value: Value) {
+        self.thread_locals
+            .lock()
+            .expect("thread-local lock poisoned")
+            .insert(reference, value);
+    }
+
+    /// Remove a `ThreadLocal`'s value.
+    pub fn remove_thread_local(&self, reference: ObjRef) {
+        self.thread_locals
+            .lock()
+            .expect("thread-local lock poisoned")
+            .remove(&reference);
+    }
+
+    /// The cached object `Thread.currentThread` returns, if one has been created.
+    pub fn main_thread(&self) -> Option<ObjRef> {
+        *self
+            .main_thread
+            .lock()
+            .expect("thread-object lock poisoned")
+    }
+
+    /// Cache the object `Thread.currentThread` returns.
+    pub fn set_main_thread(&self, reference: ObjRef) {
+        *self
+            .main_thread
+            .lock()
+            .expect("thread-object lock poisoned") = Some(reference);
+    }
+
+    /// Record a reference object's referent.
+    pub fn set_referent(&self, reference: ObjRef, referent: ObjRef) {
+        self.references
+            .lock()
+            .expect("reference lock poisoned")
+            .insert(reference, referent);
+    }
+
+    /// The referent of a reference object, or null when it has been cleared.
+    pub fn referent(&self, reference: ObjRef) -> Option<ObjRef> {
+        self.references
+            .lock()
+            .expect("reference lock poisoned")
+            .get(&reference)
+            .copied()
+    }
+
+    /// Clear a reference object's referent.
+    pub fn clear_referent(&self, reference: ObjRef) {
+        self.references
+            .lock()
+            .expect("reference lock poisoned")
+            .insert(reference, ObjRef::NULL);
+    }
+
+    /// The state of a lock object, whether it is the `ReentrantLock` heap shape or an
+    /// ordinary instance (a subclass such as Spring's `Segment`).
+    pub fn lock_state(&self, reference: ObjRef) -> Option<crate::heap::LockState> {
+        if let Ok(crate::HeapObject::Lock(state)) = self.heap().get(reference) {
+            return Some(state.clone());
+        }
+        self.locks
+            .lock()
+            .expect("lock-state lock poisoned")
+            .get(&reference)
+            .cloned()
+    }
+
+    /// Replace a lock object's state.
+    pub fn set_lock_state(&self, reference: ObjRef, state: crate::heap::LockState) {
+        self.update_lock(reference, |cell| *cell = state);
+    }
+
+    /// Read-modify-write a lock object's state.
+    ///
+    /// A plain `ReentrantLock` lives in the heap shape; a subclass instance (Spring's
+    /// `Segment`) lives in the side table. The closure runs under the owning lock, so the
+    /// read and the write cannot interleave.
+    pub fn update_lock<T>(
+        &self,
+        reference: ObjRef,
+        update: impl FnOnce(&mut crate::heap::LockState) -> T,
+    ) -> T {
+        {
+            let mut heap = self.heap();
+            if let Ok(crate::HeapObject::Lock(state)) = heap.get_mut(reference) {
+                return update(state);
+            }
+        }
+        let mut locks = self.locks.lock().expect("lock-state lock poisoned");
+        let state = locks.entry(reference).or_default();
+        update(state)
+    }
+
+    /// Record an enum instance's constant name and ordinal.
+    pub fn set_enum(&self, reference: ObjRef, name: String, ordinal: i32) {
+        self.enums
+            .lock()
+            .expect("enum lock poisoned")
+            .insert(reference, (name, ordinal));
+    }
+
+    /// The constant name of an ordinary enum instance, if its constructor ran.
+    pub fn enum_name(&self, reference: ObjRef) -> Option<String> {
+        self.enums
+            .lock()
+            .expect("enum lock poisoned")
+            .get(&reference)
+            .map(|(name, _)| name.clone())
+    }
+
+    /// The ordinal of an ordinary enum instance, if its constructor ran.
+    pub fn enum_ordinal(&self, reference: ObjRef) -> Option<i32> {
+        self.enums
+            .lock()
+            .expect("enum lock poisoned")
+            .get(&reference)
+            .map(|(_, ordinal)| *ordinal)
+    }
+
+    /// The value of one system property, if it is set.
+    pub fn property(&self, name: &str) -> Option<String> {
+        self.properties
+            .lock()
+            .expect("property lock poisoned")
+            .get(name)
+            .cloned()
+    }
+
+    /// Set a system property and return the previous value.
+    pub fn set_property(&self, name: &str, value: &str) -> Option<String> {
+        self.properties
+            .lock()
+            .expect("property lock poisoned")
+            .insert(name.to_owned(), value.to_owned())
+    }
+
+    /// Remove a system property and return its previous value.
+    pub fn remove_property(&self, name: &str) -> Option<String> {
+        self.properties
+            .lock()
+            .expect("property lock poisoned")
+            .remove(name)
+    }
+
+    /// The whole system property table.
+    pub fn properties(&self) -> Vec<(String, String)> {
+        self.properties
+            .lock()
+            .expect("property lock poisoned")
+            .iter()
+            .map(|(name, value)| (name.clone(), value.clone()))
+            .collect()
+    }
+
+    /// The minimal `java.util.logging` state.
+    pub(crate) fn jul(&self) -> std::sync::MutexGuard<'_, crate::jul::JulState> {
+        self.jul.lock().expect("jul lock poisoned")
+    }
+
+    /// Append bytes to the captured error stream.
+    ///
+    /// `java.util.logging` writes here, so Spring's diagnostics never pollute `System.out`.
+    /// The runner flushes the buffer to the process's stderr.
+    pub fn write_stderr(&self, bytes: &[u8]) {
+        self.stderr
+            .lock()
+            .expect("stderr lock poisoned")
+            .extend_from_slice(bytes);
+    }
+
+    /// The captured error stream as text.
+    pub fn stderr(&self) -> String {
+        String::from_utf8_lossy(&self.stderr.lock().expect("stderr lock poisoned")).into_owned()
     }
 }
 

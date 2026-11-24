@@ -2,7 +2,7 @@
 
 use std::fmt;
 
-use rava_vm::{ArrayKind, ObjRef, VmError};
+use rava_vm::{ArrayKind, MonitorError, ObjRef, VmError};
 
 #[derive(Debug)]
 pub enum InterpError {
@@ -55,6 +55,7 @@ pub enum InterpError {
         found: String,
     },
     NativeOrAbstract {
+        class: String,
         name: String,
         descriptor: String,
     },
@@ -96,6 +97,10 @@ pub enum InterpError {
     WrongValue,
     BadDescriptor(String),
     HeldLock(rava_vm::LockHeld),
+    /// A monitor instruction failed: a null reference or an unlock this thread does not
+    /// own. The JVM raises `NullPointerException`/`IllegalMonitorStateException`; this
+    /// slice reports a typed error instead.
+    Monitor(rava_vm::MonitorError),
 }
 
 impl fmt::Display for InterpError {
@@ -149,8 +154,12 @@ impl fmt::Display for InterpError {
             Self::NotAssignable { expected, found } => {
                 write!(f, "{found} is not assignable to {expected}")
             }
-            Self::NativeOrAbstract { name, descriptor } => {
-                write!(f, "method {name}{descriptor} has no bytecode")
+            Self::NativeOrAbstract {
+                class,
+                name,
+                descriptor,
+            } => {
+                write!(f, "method {class}.{name}{descriptor} has no bytecode")
             }
             Self::Lambda(detail) => write!(f, "lambda error: {detail}"),
             Self::ArrayIndexOutOfBounds { index, length } => {
@@ -168,6 +177,15 @@ impl fmt::Display for InterpError {
             Self::Thrown(throwable) => write!(f, "uncaught exception {throwable}"),
             Self::StackUnderflow => write!(f, "operand stack underflow"),
             Self::WrongValue => write!(f, "operand has the wrong type"),
+            Self::Monitor(MonitorError::Null) => {
+                write!(f, "monitor instruction on a null reference")
+            }
+            Self::Monitor(MonitorError::NotOwned) => {
+                write!(
+                    f,
+                    "monitorexit on a monitor the current thread does not own"
+                )
+            }
             Self::BadDescriptor(descriptor) => write!(f, "unsupported descriptor {descriptor}"),
             Self::HeldLock(error) => write!(f, "call-boundary invariant violated: {error}"),
         }
@@ -207,6 +225,12 @@ impl From<VmError> for InterpError {
 impl From<rava_vm::HeapError> for InterpError {
     fn from(error: rava_vm::HeapError) -> Self {
         Self::Heap(error)
+    }
+}
+
+impl From<rava_vm::MonitorError> for InterpError {
+    fn from(error: rava_vm::MonitorError) -> Self {
+        Self::Monitor(error)
     }
 }
 

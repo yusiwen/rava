@@ -194,6 +194,21 @@ fn method_invoke(
                 "Method.invoke received a null instance receiver".to_owned(),
             ));
         }
+        // An annotation instance answers its element methods and `annotationType`
+        // through the M2.11 annotation representation, not through an instance field
+        // layout. `AnnotationUtils.invokeAnnotationMethod` reaches this path.
+        if let Some(annotation) = shared.annotation(target)? {
+            if let Some(value) = rava_vm::annotation::invoke_member(
+                shared,
+                &annotation,
+                &member.name,
+                &member.descriptor,
+                &values,
+            )? {
+                let return_type = reflection::return_descriptor(&member.descriptor)?;
+                return Ok(Some(boxed::box_result(shared, return_type, Some(value))?));
+            }
+        }
         require_instance(shared, target, member.class, "Method.invoke")?;
         run_instance_method(
             shared,

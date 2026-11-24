@@ -102,6 +102,136 @@ pub fn register_natives(shared: &Shared) {
         "()Ljava/lang/String;",
         string_intern,
     );
+    shared.register_native("java/lang/String", "<init>", "()V", string_init_empty);
+    shared.register_native(
+        "java/lang/String",
+        "<init>",
+        "(Ljava/lang/String;)V",
+        string_init_string,
+    );
+    shared.register_native("java/lang/String", "<init>", "([C)V", string_init_chars);
+    shared.register_native(
+        "java/lang/String",
+        "<init>",
+        "([CII)V",
+        string_init_chars_range,
+    );
+    shared.register_native("java/lang/String", "indexOf", "(I)I", string_index_of_char);
+    shared.register_native(
+        "java/lang/String",
+        "indexOf",
+        "(II)I",
+        string_index_of_char_from,
+    );
+    shared.register_native(
+        "java/lang/String",
+        "indexOf",
+        "(Ljava/lang/String;I)I",
+        string_index_of_string_from,
+    );
+    shared.register_native(
+        "java/lang/String",
+        "lastIndexOf",
+        "(I)I",
+        string_last_index_of_char,
+    );
+    shared.register_native(
+        "java/lang/String",
+        "lastIndexOf",
+        "(II)I",
+        string_last_index_of_char_from,
+    );
+    shared.register_native(
+        "java/lang/String",
+        "lastIndexOf",
+        "(Ljava/lang/String;)I",
+        string_last_index_of_string,
+    );
+    shared.register_native(
+        "java/lang/String",
+        "lastIndexOf",
+        "(Ljava/lang/String;I)I",
+        string_last_index_of_string_from,
+    );
+    shared.register_native(
+        "java/lang/String",
+        "startsWith",
+        "(Ljava/lang/String;I)Z",
+        string_starts_with_from,
+    );
+    shared.register_native(
+        "java/lang/String",
+        "contains",
+        "(Ljava/lang/CharSequence;)Z",
+        string_contains,
+    );
+    shared.register_native(
+        "java/lang/String",
+        "trim",
+        "()Ljava/lang/String;",
+        string_trim,
+    );
+    shared.register_native(
+        "java/lang/String",
+        "strip",
+        "()Ljava/lang/String;",
+        string_strip,
+    );
+    shared.register_native("java/lang/String", "isBlank", "()Z", string_is_blank);
+    shared.register_native(
+        "java/lang/String",
+        "toLowerCase",
+        "()Ljava/lang/String;",
+        string_to_lower_case,
+    );
+    shared.register_native(
+        "java/lang/String",
+        "toUpperCase",
+        "()Ljava/lang/String;",
+        string_to_upper_case,
+    );
+    shared.register_native(
+        "java/lang/String",
+        "equalsIgnoreCase",
+        "(Ljava/lang/String;)Z",
+        string_equals_ignore_case,
+    );
+    shared.register_native(
+        "java/lang/String",
+        "repeat",
+        "(I)Ljava/lang/String;",
+        string_repeat,
+    );
+    shared.register_native(
+        "java/lang/String",
+        "replace",
+        "(Ljava/lang/CharSequence;Ljava/lang/CharSequence;)Ljava/lang/String;",
+        string_replace_sequence,
+    );
+    shared.register_native(
+        "java/lang/String",
+        "split",
+        "(Ljava/lang/String;)[Ljava/lang/String;",
+        string_split,
+    );
+    shared.register_native(
+        "java/lang/String",
+        "join",
+        "(Ljava/lang/CharSequence;[Ljava/lang/CharSequence;)Ljava/lang/String;",
+        string_join,
+    );
+    shared.register_native(
+        "java/lang/String",
+        "valueOf",
+        "([C)Ljava/lang/String;",
+        string_value_of_chars,
+    );
+    shared.register_native(
+        "java/lang/String",
+        "valueOf",
+        "([CII)Ljava/lang/String;",
+        string_value_of_chars_range,
+    );
     shared.register_native(
         "java/lang/String",
         "valueOf",
@@ -624,10 +754,15 @@ pub(crate) fn object_text(
         {
             HeapObject::Str(text) => Text::Known(text.clone()),
             HeapObject::StringBuilder(text) => Text::Known(text.clone()),
-            HeapObject::Boxed(boxed) => match boxed.as_int() {
-                Some(value) => Text::Known(value.to_string()),
-                None => Text::Other,
-            },
+            HeapObject::Boxed(crate::heap::BoxedPrimitive::Integer(value)) => {
+                Text::Known(value.to_string())
+            }
+            HeapObject::Boxed(crate::heap::BoxedPrimitive::Character(value)) => {
+                Text::Known(value.to_string())
+            }
+            HeapObject::Boxed(crate::heap::BoxedPrimitive::Boolean(value)) => {
+                Text::Known(value.to_string())
+            }
             _ => Text::Other,
         }
     };
@@ -796,6 +931,594 @@ fn string_value_of_double(
 ) -> Result<Option<Value>, VmError> {
     let value = double_argument(args, 0, "String.valueOf")?;
     Ok(Some(new_string(shared, double_text(value))))
+}
+
+fn text_of(shared: &Shared, receiver: ObjRef) -> Result<String, VmError> {
+    if receiver.is_null() {
+        return Err(VmError::Native(
+            "String method on a null receiver".to_owned(),
+        ));
+    }
+    let text = shared
+        .heap()
+        .string(receiver)
+        .map_err(|error| VmError::Native(error.to_string()))?
+        .to_owned();
+    Ok(text)
+}
+
+fn set_receiver_text(shared: &Shared, receiver: ObjRef, text: String) -> Result<(), VmError> {
+    *shared
+        .heap()
+        .string_mut(receiver)
+        .map_err(|error| VmError::Native(error.to_string()))? = text;
+    Ok(())
+}
+
+fn string_init_empty(
+    _shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    _args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    Ok(None)
+}
+
+fn string_init_string(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let source = match args.first().copied() {
+        Some(Value::Ref(source)) if !source.is_null() => text_of(shared, source)?,
+        _ => String::new(),
+    };
+    set_receiver_text(shared, receiver, source)?;
+    Ok(None)
+}
+
+fn char_array_text(shared: &Shared, reference: ObjRef) -> Result<Vec<u16>, VmError> {
+    let heap = shared.heap();
+    let array = heap
+        .array(reference)
+        .map_err(|error| VmError::Native(error.to_string()))?;
+    let mut units = Vec::with_capacity(array.elements.len());
+    for element in &array.elements {
+        let Value::Int(unit) = *element else {
+            return Err(VmError::Native(
+                "String constructor expects a char array".to_owned(),
+            ));
+        };
+        units.push(unit as u16);
+    }
+    Ok(units)
+}
+
+fn string_init_chars(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let source = match args.first().copied() {
+        Some(Value::Ref(source)) if !source.is_null() => source,
+        _ => return Ok(None),
+    };
+    let units = char_array_text(shared, source)?;
+    let text = string_from_utf16(&units, "String.<init>")?;
+    set_receiver_text(shared, receiver, text)?;
+    Ok(None)
+}
+
+fn string_init_chars_range(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let Some(Value::Ref(source)) = args.first().copied() else {
+        return Ok(None);
+    };
+    if source.is_null() {
+        return Ok(None);
+    }
+    let units = char_array_text(shared, source)?;
+    let start = match args.get(1).copied() {
+        Some(Value::Int(value)) if value >= 0 => value as usize,
+        _ => return Err(VmError::Native("String.<init> has a bad offset".to_owned())),
+    };
+    let count = match args.get(2).copied() {
+        Some(Value::Int(value)) if value >= 0 => value as usize,
+        _ => return Err(VmError::Native("String.<init> has a bad count".to_owned())),
+    };
+    let end = start
+        .checked_add(count)
+        .ok_or_else(|| VmError::Native("String.<init> range overflow".to_owned()))?;
+    let range = units.get(start..end).ok_or_else(|| {
+        VmError::Native("String.<init> range is outside the char array".to_owned())
+    })?;
+    let text = string_from_utf16(range, "String.<init>")?;
+    set_receiver_text(shared, receiver, text)?;
+    Ok(None)
+}
+
+fn char_argument_of(args: &[Value], position: usize, method: &'static str) -> Result<u16, VmError> {
+    match args.get(position).copied() {
+        Some(Value::Int(value)) if (0..=0xffff).contains(&value) => Ok(value as u16),
+        _ => Err(VmError::Native(format!("{method} expects a char argument"))),
+    }
+}
+
+fn string_index_of_char(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let unit = char_argument_of(args, 0, "String.indexOf")?;
+    let text = text_of(shared, receiver)?;
+    let units = utf16_units(&text);
+    let position = units.iter().position(|candidate| *candidate == unit);
+    Ok(Some(Value::Int(index_or_minus_one(position)?)))
+}
+
+fn string_index_of_char_from(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let unit = char_argument_of(args, 0, "String.indexOf")?;
+    let from = match args.get(1).copied() {
+        Some(Value::Int(value)) => value,
+        _ => return Err(VmError::Native("String.indexOf expects an int".to_owned())),
+    };
+    let text = text_of(shared, receiver)?;
+    let units = utf16_units(&text);
+    let start = from.max(0) as usize;
+    if start >= units.len() {
+        return Ok(Some(Value::Int(-1)));
+    }
+    let position = units[start..]
+        .iter()
+        .position(|candidate| *candidate == unit)
+        .map(|position| position + start);
+    Ok(Some(Value::Int(index_or_minus_one(position)?)))
+}
+
+fn string_index_of_string_from(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let needle = match args.first().copied() {
+        Some(Value::Ref(reference)) if !reference.is_null() => text_of(shared, reference)?,
+        _ => {
+            return Err(VmError::Native(
+                "String.indexOf expects a String".to_owned(),
+            ));
+        }
+    };
+    let from = match args.get(1).copied() {
+        Some(Value::Int(value)) => value.max(0),
+        _ => return Err(VmError::Native("String.indexOf expects an int".to_owned())),
+    };
+    let text = text_of(shared, receiver)?;
+    Ok(Some(Value::Int(
+        text.get(from as usize..)
+            .and_then(|tail| tail.find(&needle))
+            .map(|position| position as i32 + from)
+            .unwrap_or(-1),
+    )))
+}
+
+fn string_last_index_of_char(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let unit = char_argument_of(args, 0, "String.lastIndexOf")?;
+    let text = text_of(shared, receiver)?;
+    let units = utf16_units(&text);
+    let position = units.iter().rposition(|candidate| *candidate == unit);
+    Ok(Some(Value::Int(index_or_minus_one(position)?)))
+}
+
+fn string_last_index_of_char_from(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let unit = char_argument_of(args, 0, "String.lastIndexOf")?;
+    let from = match args.get(1).copied() {
+        Some(Value::Int(value)) => value,
+        _ => {
+            return Err(VmError::Native(
+                "String.lastIndexOf expects an int".to_owned(),
+            ));
+        }
+    };
+    let text = text_of(shared, receiver)?;
+    let units = utf16_units(&text);
+    if from < 0 || units.is_empty() {
+        return Ok(Some(Value::Int(-1)));
+    }
+    let end = (from as usize).min(units.len() - 1);
+    let position = units[..=end]
+        .iter()
+        .rposition(|candidate| *candidate == unit);
+    Ok(Some(Value::Int(index_or_minus_one(position)?)))
+}
+
+fn string_last_index_of_string(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    string_last_index_of_string_from(
+        shared,
+        _thread,
+        _loader,
+        receiver,
+        &[args[0], Value::Int(i32::MAX)],
+    )
+}
+
+fn string_last_index_of_string_from(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let needle = match args.first().copied() {
+        Some(Value::Ref(reference)) if !reference.is_null() => text_of(shared, reference)?,
+        _ => {
+            return Err(VmError::Native(
+                "String.lastIndexOf expects a String".to_owned(),
+            ));
+        }
+    };
+    let from = match args.get(1).copied() {
+        Some(Value::Int(value)) => value,
+        _ => {
+            return Err(VmError::Native(
+                "String.lastIndexOf expects an int".to_owned(),
+            ));
+        }
+    };
+    let text = text_of(shared, receiver)?;
+    if from < 0 {
+        return Ok(Some(Value::Int(-1)));
+    }
+    let limit = (from as usize).saturating_add(needle.len()).min(text.len());
+    let position = text[..limit].rfind(&needle);
+    Ok(Some(Value::Int(
+        position.map(|position| position as i32).unwrap_or(-1),
+    )))
+}
+
+fn index_or_minus_one(position: Option<usize>) -> Result<i32, VmError> {
+    match position {
+        Some(position) => i32::try_from(position)
+            .map_err(|_| VmError::Native("string is longer than an int".to_owned())),
+        None => Ok(-1),
+    }
+}
+
+fn string_starts_with_from(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let prefix = match args.first().copied() {
+        Some(Value::Ref(reference)) if !reference.is_null() => text_of(shared, reference)?,
+        _ => {
+            return Err(VmError::Native(
+                "String.startsWith expects a String".to_owned(),
+            ));
+        }
+    };
+    let from = match args.get(1).copied() {
+        Some(Value::Int(value)) => value,
+        _ => {
+            return Err(VmError::Native(
+                "String.startsWith expects an int".to_owned(),
+            ));
+        }
+    };
+    let text = text_of(shared, receiver)?;
+    let starts = from >= 0
+        && text
+            .get(from as usize..)
+            .map(|tail| tail.starts_with(&prefix))
+            .unwrap_or(false);
+    Ok(Some(Value::Int(i32::from(starts))))
+}
+
+fn string_contains(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let needle = match args.first().copied() {
+        Some(Value::Ref(reference)) if !reference.is_null() => {
+            // `CharSequence` is a `String` in this VM for the values Spring passes.
+            text_of(shared, reference)?
+        }
+        _ => return Ok(Some(Value::Int(0))),
+    };
+    let text = text_of(shared, receiver)?;
+    Ok(Some(Value::Int(i32::from(text.contains(&needle)))))
+}
+
+fn string_trim(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    _args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let text = text_of(shared, receiver)?;
+    let trimmed = text
+        .trim_matches(|candidate: char| candidate <= ' ')
+        .to_owned();
+    Ok(Some(new_string(shared, trimmed)))
+}
+
+fn string_strip(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    _args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let text = text_of(shared, receiver)?;
+    Ok(Some(new_string(shared, text.trim().to_owned())))
+}
+
+fn string_is_blank(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    _args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let text = text_of(shared, receiver)?;
+    Ok(Some(Value::Int(i32::from(text.trim().is_empty()))))
+}
+
+fn string_to_lower_case(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    _args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let text = text_of(shared, receiver)?;
+    Ok(Some(new_string(shared, text.to_lowercase())))
+}
+
+fn string_to_upper_case(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    _args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let text = text_of(shared, receiver)?;
+    Ok(Some(new_string(shared, text.to_uppercase())))
+}
+
+fn string_equals_ignore_case(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let other = match args.first().copied() {
+        Some(Value::Ref(reference)) if !reference.is_null() => text_of(shared, reference)?,
+        _ => return Ok(Some(Value::Int(0))),
+    };
+    let text = text_of(shared, receiver)?;
+    Ok(Some(Value::Int(i32::from(
+        text.eq_ignore_ascii_case(&other),
+    ))))
+}
+
+fn string_repeat(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let count = match args.first().copied() {
+        Some(Value::Int(value)) if value >= 0 => value as usize,
+        _ => return Err(VmError::Native("String.repeat expects a count".to_owned())),
+    };
+    let text = text_of(shared, receiver)?;
+    Ok(Some(new_string(shared, text.repeat(count))))
+}
+
+fn string_replace_sequence(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let target = match args.first().copied() {
+        Some(Value::Ref(reference)) if !reference.is_null() => text_of(shared, reference)?,
+        _ => {
+            return Err(VmError::Native(
+                "String.replace expects a CharSequence".to_owned(),
+            ));
+        }
+    };
+    let replacement = match args.get(1).copied() {
+        Some(Value::Ref(reference)) if !reference.is_null() => text_of(shared, reference)?,
+        _ => {
+            return Err(VmError::Native(
+                "String.replace expects a CharSequence".to_owned(),
+            ));
+        }
+    };
+    let text = text_of(shared, receiver)?;
+    Ok(Some(new_string(
+        shared,
+        text.replace(&target, &replacement),
+    )))
+}
+
+fn string_split(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let separator = match args.first().copied() {
+        Some(Value::Ref(reference)) if !reference.is_null() => text_of(shared, reference)?,
+        _ => return Err(VmError::Native("String.split expects a String".to_owned())),
+    };
+    let text = text_of(shared, receiver)?;
+    // M2.23 has no regular expressions; the separator is used literally.
+    let parts: Vec<&str> = if text.is_empty() {
+        vec![text.as_str()]
+    } else {
+        text.split(separator.as_str()).collect()
+    };
+    let strings: Vec<ObjRef> = parts
+        .iter()
+        .map(|part| shared.heap().allocate_string((*part).to_owned()))
+        .collect();
+    let class = shared.load_library_class("java/lang/String")?;
+    let reference = shared
+        .heap()
+        .allocate_array(crate::heap::ClassRef::Named(class), strings.len());
+    {
+        let mut heap = shared.heap();
+        let array = heap
+            .array_mut(reference)
+            .expect("a freshly allocated array");
+        for (slot, string) in array.elements.iter_mut().zip(strings) {
+            *slot = Value::Ref(string);
+        }
+    }
+    Ok(Some(Value::Ref(reference)))
+}
+
+fn string_join(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let delimiter = match args.first().copied() {
+        Some(Value::Ref(reference)) if !reference.is_null() => text_of(shared, reference)?,
+        _ => String::new(),
+    };
+    let array = match args.get(1).copied() {
+        Some(Value::Ref(reference)) if !reference.is_null() => reference,
+        _ => return Err(VmError::Native("String.join expects an array".to_owned())),
+    };
+    let elements = shared
+        .heap()
+        .array(array)
+        .map_err(|error| VmError::Native(error.to_string()))?
+        .elements
+        .to_vec();
+    let mut parts = Vec::with_capacity(elements.len());
+    for element in elements {
+        if let Value::Ref(reference) = element {
+            if !reference.is_null() {
+                parts.push(text_of(shared, reference)?);
+            } else {
+                parts.push("null".to_owned());
+            }
+        }
+    }
+    Ok(Some(new_string(shared, parts.join(&delimiter))))
+}
+
+fn string_value_of_chars(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let reference = match args.first().copied() {
+        Some(Value::Ref(reference)) if !reference.is_null() => reference,
+        _ => {
+            return Err(VmError::Native(
+                "String.valueOf expects a char array".to_owned(),
+            ));
+        }
+    };
+    let units = char_array_text(shared, reference)?;
+    let text = string_from_utf16(&units, "String.valueOf")?;
+    Ok(Some(new_string(shared, text)))
+}
+
+fn string_value_of_chars_range(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let reference = match args.first().copied() {
+        Some(Value::Ref(reference)) if !reference.is_null() => reference,
+        _ => {
+            return Err(VmError::Native(
+                "String.valueOf expects a char array".to_owned(),
+            ));
+        }
+    };
+    let units = char_array_text(shared, reference)?;
+    let start = match args.get(1).copied() {
+        Some(Value::Int(value)) if value >= 0 => value as usize,
+        _ => {
+            return Err(VmError::Native(
+                "String.valueOf has a bad offset".to_owned(),
+            ));
+        }
+    };
+    let count = match args.get(2).copied() {
+        Some(Value::Int(value)) if value >= 0 => value as usize,
+        _ => return Err(VmError::Native("String.valueOf has a bad count".to_owned())),
+    };
+    let end = start
+        .checked_add(count)
+        .ok_or_else(|| VmError::Native("String.valueOf range overflow".to_owned()))?;
+    let range = units
+        .get(start..end)
+        .ok_or_else(|| VmError::Native("String.valueOf range is outside the array".to_owned()))?;
+    let text = string_from_utf16(range, "String.valueOf")?;
+    Ok(Some(new_string(shared, text)))
 }
 
 #[cfg(test)]

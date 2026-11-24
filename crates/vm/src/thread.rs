@@ -16,6 +16,25 @@ struct FrameRoots {
     roots: Vec<ObjRef>,
 }
 
+/// Why a monitor operation could not be performed.
+///
+/// The JVM throws `NullPointerException` or `IllegalMonitorStateException`; this slice
+/// has no exception-object synthesis, so the interpreter reports a typed error instead.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MonitorError {
+    /// `monitorenter`/`monitorexit` named the null reference.
+    Null,
+    /// The executing thread does not own the monitor it tried to exit.
+    NotOwned,
+}
+
+/// One monitor the executing thread owns and its reentrancy count.
+#[derive(Debug, Clone, Copy)]
+struct MonitorEntry {
+    object: ObjRef,
+    count: usize,
+}
+
 #[derive(Debug)]
 pub struct ThreadState {
     id: u64,
@@ -24,6 +43,7 @@ pub struct ThreadState {
     polls: AtomicU64,
     next_frame: AtomicU64,
     frames: Mutex<Vec<FrameRoots>>,
+    monitors: Mutex<Vec<MonitorEntry>>,
 }
 
 impl ThreadState {
@@ -35,7 +55,63 @@ impl ThreadState {
             polls: AtomicU64::new(0),
             next_frame: AtomicU64::new(0),
             frames: Mutex::new(Vec::new()),
+            monitors: Mutex::new(Vec::new()),
         }
+    }
+
+    /// Enter `reference`'s monitor, incrementing its reentrancy count.
+    ///
+    /// M2 is single-threaded, so entering cannot block: ownership and the count are
+    /// recorded so a matching `monitorexit` and a later M5 lock implementation keep the
+    /// same observable state. A null reference is [`MonitorError::Null`].
+    pub fn monitor_enter(&self, reference: ObjRef) -> Result<(), MonitorError> {
+        if reference.is_null() {
+            return Err(MonitorError::Null);
+        }
+        let mut monitors = self.monitors.lock().expect("monitor lock poisoned");
+        if let Some(entry) = monitors.iter_mut().find(|entry| entry.object == reference) {
+            entry.count += 1;
+        } else {
+            monitors.push(MonitorEntry {
+                object: reference,
+                count: 1,
+            });
+        }
+        Ok(())
+    }
+
+    /// Leave `reference`'s monitor, decrementing its reentrancy count.
+    ///
+    /// The reference must be owned by this thread. Exiting a monitor this thread does not
+    /// own is [`MonitorError::NotOwned`], the condition the JVM reports as
+    /// `IllegalMonitorStateException`.
+    pub fn monitor_exit(&self, reference: ObjRef) -> Result<(), MonitorError> {
+        if reference.is_null() {
+            return Err(MonitorError::Null);
+        }
+        let mut monitors = self.monitors.lock().expect("monitor lock poisoned");
+        let Some(position) = monitors.iter().position(|entry| entry.object == reference) else {
+            return Err(MonitorError::NotOwned);
+        };
+        if monitors[position].count > 1 {
+            monitors[position].count -= 1;
+        } else {
+            monitors.remove(position);
+        }
+        Ok(())
+    }
+
+    /// The objects whose monitors this thread currently owns, innermost last.
+    ///
+    /// A held monitor keeps its object alive, so [`crate::Shared::roots`] enumerates these
+    /// alongside the frame roots.
+    pub fn monitor_roots(&self) -> Vec<ObjRef> {
+        self.monitors
+            .lock()
+            .expect("monitor lock poisoned")
+            .iter()
+            .map(|entry| entry.object)
+            .collect()
     }
 
     pub fn id(&self) -> u64 {

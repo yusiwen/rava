@@ -219,7 +219,14 @@ declaring class's loader: a raw type is the existing `Class` object, while
 `List<String>`, `T[]`, `? extends Number`, `? super Integer` and `Map.Entry`, a generic
 method and generic constructors) drives the APIs through `invokevirtual`/`invokeinterface`.
 `getGenericExceptionTypes`, record/sealed views, annotation changes and Spring remain
-later slices. **M2.23 is next.**
+later slices. **M2.23 is blocked (2026-11-24):** the committed `demo.SpringSmoke` fixture
+and `crates/cli/tests/spring_context.rs` start a real Spring
+`AnnotationConfigApplicationContext` and assert the `hello` bean, but the local test exits
+1 at `java/util/stream/StreamSupport.stream` because the runtime library has no
+`java.util.stream` pipeline yet. The slice fixed the first blocker
+(`LinkedHashSet.<init>(I)V`) and the startup chain up to annotation metadata, including
+monitors, the missing numeric instructions, collection/iterator/array/string/logging/
+concurrency natives, and Java exception construction. The M2 gate is not claimed.
 
 ## What this project is
 

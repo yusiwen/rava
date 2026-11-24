@@ -121,6 +121,97 @@ pub fn register_natives(shared: &Shared) {
     );
     shared.register_native(
         "java/lang/Class",
+        "forName",
+        "(Ljava/lang/String;ZLjava/lang/ClassLoader;)Ljava/lang/Class;",
+        class_for_name_initialized,
+    );
+    shared.register_native(
+        "java/lang/Class",
+        "getClassLoader",
+        "()Ljava/lang/ClassLoader;",
+        class_get_class_loader,
+    );
+    shared.register_native(
+        "java/lang/Class",
+        "isAssignableFrom",
+        "(Ljava/lang/Class;)Z",
+        class_is_assignable_from,
+    );
+    shared.register_native(
+        "java/lang/Class",
+        "isInstance",
+        "(Ljava/lang/Object;)Z",
+        class_is_instance,
+    );
+    shared.register_native(
+        "java/lang/reflect/Array",
+        "newInstance",
+        "(Ljava/lang/Class;I)Ljava/lang/Object;",
+        array_new_instance,
+    );
+    shared.register_native(
+        "java/lang/reflect/Array",
+        "getLength",
+        "(Ljava/lang/Object;)I",
+        array_get_length,
+    );
+    shared.register_native(
+        "java/lang/Class",
+        "getResource",
+        "(Ljava/lang/String;)Ljava/net/URL;",
+        class_null_resource,
+    );
+    shared.register_native(
+        "java/lang/Class",
+        "getResourceAsStream",
+        "(Ljava/lang/String;)Ljava/io/InputStream;",
+        class_null_resource,
+    );
+    register_modifier_natives(shared);
+    shared.register_native(
+        "java/lang/reflect/Proxy",
+        "isProxyClass",
+        "(Ljava/lang/Class;)Z",
+        proxy_is_proxy_class,
+    );
+    for owner in [
+        "java/lang/reflect/Field",
+        "java/lang/reflect/Method",
+        "java/lang/reflect/Constructor",
+    ] {
+        shared.register_native(owner, "hashCode", "()I", member_hash_code);
+        shared.register_native(owner, "equals", "(Ljava/lang/Object;)Z", member_equals);
+    }
+    shared.register_native(
+        "java/lang/Class",
+        "isAnnotation",
+        "()Z",
+        class_is_annotation,
+    );
+    shared.register_native("java/lang/Class", "isEnum", "()Z", class_is_enum);
+    shared.register_native("java/lang/Class", "isSynthetic", "()Z", class_is_synthetic);
+    shared.register_native("java/lang/Class", "isRecord", "()Z", class_is_false);
+    shared.register_native("java/lang/Class", "isSealed", "()Z", class_is_false);
+    shared.register_native(
+        "java/lang/Class",
+        "componentType",
+        "()Ljava/lang/Class;",
+        class_get_component_type,
+    );
+    shared.register_native(
+        "java/lang/Class",
+        "getInterfaces",
+        "()[Ljava/lang/Class;",
+        class_get_interfaces,
+    );
+    shared.register_native(
+        "java/lang/Class",
+        "getSimpleName",
+        "()Ljava/lang/String;",
+        class_get_simple_name,
+    );
+    shared.register_native(
+        "java/lang/Class",
         "getDeclaredFields",
         "()[Ljava/lang/reflect/Field;",
         class_get_declared_fields,
@@ -454,7 +545,7 @@ fn class_get_superclass(
 fn class_for_name(
     shared: &Shared,
     _thread: &ThreadState,
-    _loader: LoaderId,
+    loader: LoaderId,
     _receiver: ObjRef,
     args: &[Value],
 ) -> Result<Option<Value>, VmError> {
@@ -475,14 +566,545 @@ fn class_for_name(
         // A descriptor's object names are internal; `Class.forName` accepts the dotted
         // spelling, so a `[Ljava.lang.String;` argument becomes `[Ljava/lang/String;`.
         let descriptor = name.replace('.', "/");
-        let class_ref = shared.class_ref_for_descriptor(LoaderId::BOOTSTRAP, &descriptor)?;
+        let class_ref = shared.class_ref_for_descriptor(loader, &descriptor)?;
         let object = shared.class_object_for_ref(&class_ref)?;
         return Ok(Some(Value::Ref(object)));
     }
     let internal = name.replace('.', "/");
-    let class = shared.load_library_class(&internal)?;
+    let loader = if loader == LoaderId::BOOTSTRAP {
+        shared.application_loader()
+    } else {
+        loader
+    };
+    let class = match shared.load_class(loader, &internal) {
+        Ok(class) => class,
+        Err(VmError::ClassNotFound { .. }) => return Err(class_not_found(shared)),
+        Err(error) => return Err(error),
+    };
     let object = shared.class_object(class)?;
     Ok(Some(Value::Ref(object)))
+}
+
+/// A `ClassNotFoundException` instance as the throwable `Class.forName` raises.
+///
+/// M2.23 needs this one exception object because `Class.forName` is how libraries probe
+/// for optional dependencies and they catch the failure. The constructor is not run (the
+/// C1 stub has no `Code`); the object exists so the interpreter's handler search can
+/// match it by class. The requested name is not carried as a message yet.
+fn class_not_found(shared: &Shared) -> VmError {
+    match shared.load_library_class("java/lang/ClassNotFoundException") {
+        Ok(class) => match shared.allocate_instance(class) {
+            Ok(object) => VmError::Thrown(object),
+            Err(error) => error,
+        },
+        Err(error) => error,
+    }
+}
+
+/// `Class.forName(String, boolean, ClassLoader)`: the same resolution as
+/// `Class.forName(String)`.
+///
+/// The initialize flag is accepted and ignored: this VM initializes a class on first use,
+/// not at `forName` time, and the C1 stubs have no initializer `Code` to run. The
+/// `ClassLoader` argument is accepted for signature compatibility; the class resolves
+/// through the executing frame's loader, which is the application loader for Spring's own
+/// calls and there is no public `ClassLoader` object model yet.
+fn class_for_name_initialized(
+    shared: &Shared,
+    thread: &ThreadState,
+    loader: LoaderId,
+    receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    class_for_name(shared, thread, loader, receiver, &args[..1.min(args.len())])
+}
+
+/// `Class.getClassLoader()`: null, meaning the bootstrap loader.
+///
+/// The VM has no public `ClassLoader` object model; every class's loader is an internal
+/// `LoaderId`. Reporting null makes Spring's `ClassUtils.forName` fall back to
+/// `Class.forName`, whose native resolves through the executing frame's loader.
+fn class_get_class_loader(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    _args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let loader = match class_object_of(shared, receiver)? {
+        ClassObject::Named(class) => shared
+            .entry(class)
+            .map(|entry| entry.loader)
+            .unwrap_or(LoaderId::BOOTSTRAP),
+        ClassObject::Primitive(_) | ClassObject::Array(_) => LoaderId::BOOTSTRAP,
+    };
+    if loader == LoaderId::BOOTSTRAP {
+        Ok(Some(Value::Ref(ObjRef::NULL)))
+    } else {
+        let object = shared.class_loader_object()?;
+        Ok(Some(Value::Ref(object)))
+    }
+}
+
+/// `java.lang.reflect.Array.newInstance(Class, int)`.
+fn array_new_instance(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let Some(Value::Ref(component)) = args.first().copied() else {
+        return Err(VmError::Native(
+            "Array.newInstance expects a Class component".to_owned(),
+        ));
+    };
+    let length = match args.get(1).copied() {
+        Some(Value::Int(length)) if length >= 0 => length as usize,
+        _ => {
+            return Err(VmError::Native(
+                "Array.newInstance expects a non-negative int length".to_owned(),
+            ));
+        }
+    };
+    let class = class_object_of(shared, component)?;
+    let reference = shared.heap().allocate_array(class.class_ref(), length);
+    Ok(Some(Value::Ref(reference)))
+}
+
+/// `java.lang.reflect.Array.getLength(Object)`.
+fn array_get_length(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let Some(Value::Ref(reference)) = args.first().copied() else {
+        return Err(VmError::Native(
+            "Array.getLength expects an array argument".to_owned(),
+        ));
+    };
+    let length = shared
+        .heap()
+        .array(reference)
+        .map_err(|error| VmError::Native(error.to_string()))?
+        .elements
+        .len();
+    let length = i32::try_from(length)
+        .map_err(|_| VmError::Native("array is longer than an int can hold".to_owned()))?;
+    Ok(Some(Value::Int(length)))
+}
+
+/// `Class.isAssignableFrom(Class)`: is the argument's type this type or a subtype?
+fn class_is_assignable_from(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let target = class_object_of(shared, receiver)?;
+    let Some(Value::Ref(reference)) = args.first().copied() else {
+        return Err(VmError::Native(
+            "Class.isAssignableFrom expects a Class argument".to_owned(),
+        ));
+    };
+    if reference.is_null() {
+        return Ok(Some(Value::Int(0)));
+    }
+    let candidate = class_object_of(shared, reference)?;
+    Ok(Some(Value::Int(i32::from(class_object_assignable(
+        shared, &target, &candidate,
+    )?))))
+}
+
+/// `Class.isInstance(Object)`.
+fn class_is_instance(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let target = class_object_of(shared, receiver)?;
+    let Some(Value::Ref(reference)) = args.first().copied() else {
+        return Ok(Some(Value::Int(0)));
+    };
+    if reference.is_null() {
+        return Ok(Some(Value::Int(0)));
+    }
+    // An annotation object stores its concrete annotation type even though
+    // `get_class` reports the `java.lang.annotation.Annotation` interface (its
+    // `invokevirtual` dispatch uses the annotation type); `isInstance` asks for the
+    // concrete type, so the stored class is used here.
+    let annotation_class = {
+        let heap = shared.heap();
+        match heap
+            .get(reference)
+            .map_err(|error| VmError::Native(error.to_string()))?
+        {
+            crate::HeapObject::Annotation(annotation) => Some(annotation.class),
+            _ => None,
+        }
+    };
+    let candidate = match annotation_class {
+        Some(class) => ClassObject::Named(class),
+        None => {
+            let object_class = shared.get_class(reference)?;
+            class_object_of(shared, object_class)?
+        }
+    };
+    Ok(Some(Value::Int(i32::from(class_object_assignable(
+        shared, &target, &candidate,
+    )?))))
+}
+
+/// `Class.getResource`/`getResourceAsStream`: no resource model until M4.
+fn class_null_resource(
+    _shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    _args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    Ok(Some(Value::Ref(ObjRef::NULL)))
+}
+
+/// `Proxy.isProxyClass(Class)`: this VM creates no JDK proxy classes (M3).
+fn proxy_is_proxy_class(
+    _shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    _args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    Ok(Some(Value::Int(0)))
+}
+
+/// A reflected member's identity hash: the same tuple `equals` compares.
+fn member_hash_code(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    _args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let member = member_of(shared, receiver)?;
+    let mut hash = member.class.0 as i32;
+    hash = hash.wrapping_mul(31).wrapping_add(member.kind as i32);
+    for byte in member.name.bytes().chain(member.descriptor.bytes()) {
+        hash = hash.wrapping_mul(31).wrapping_add(i32::from(byte));
+    }
+    Ok(Some(Value::Int(hash)))
+}
+
+/// A reflected member equals another member of the same kind and declaration.
+fn member_equals(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let Some(Value::Ref(other)) = args.first().copied() else {
+        return Ok(Some(Value::Int(0)));
+    };
+    if other.is_null() {
+        return Ok(Some(Value::Int(0)));
+    }
+    let left = member_of(shared, receiver)?;
+    let right = match shared.heap().get(other) {
+        Ok(crate::HeapObject::Reflect(member)) => member.clone(),
+        _ => return Ok(Some(Value::Int(0))),
+    };
+    let equal = left.class == right.class
+        && left.kind == right.kind
+        && left.name == right.name
+        && left.descriptor == right.descriptor;
+    Ok(Some(Value::Int(i32::from(equal))))
+}
+
+/// `java.lang.reflect.Modifier` predicates over the class-file access bits.
+///
+/// Each bit gets its own function because a native is selected by `(owner, name,
+/// descriptor)` and the ABI does not pass the name to the function.
+fn register_modifier_natives(shared: &Shared) {
+    macro_rules! modifier {
+        ($name:ident, $mask:expr) => {
+            fn $name(
+                _shared: &Shared,
+                _thread: &ThreadState,
+                _loader: LoaderId,
+                _receiver: ObjRef,
+                args: &[Value],
+            ) -> Result<Option<Value>, VmError> {
+                let flags = match args.first().copied() {
+                    Some(Value::Int(flags)) => flags,
+                    _ => {
+                        return Err(VmError::Native(
+                            "Modifier predicate expects an int".to_owned(),
+                        ))
+                    }
+                };
+                Ok(Some(Value::Int(i32::from(flags & $mask != 0))))
+            }
+        };
+    }
+    modifier!(modifier_public, 0x0001);
+    modifier!(modifier_private, 0x0002);
+    modifier!(modifier_protected, 0x0004);
+    modifier!(modifier_static, 0x0008);
+    modifier!(modifier_final, 0x0010);
+    modifier!(modifier_synchronized, 0x0020);
+    modifier!(modifier_volatile, 0x0040);
+    modifier!(modifier_transient, 0x0080);
+    modifier!(modifier_native, 0x0100);
+    modifier!(modifier_interface, 0x0200);
+    modifier!(modifier_abstract, 0x0400);
+    modifier!(modifier_strict, 0x0800);
+    modifier!(modifier_synthetic, 0x1000);
+    modifier!(modifier_annotation, 0x2000);
+    modifier!(modifier_enum, 0x4000);
+    modifier!(modifier_mandated, 0x8000);
+    modifier!(modifier_bridge, 0x0040);
+    modifier!(modifier_varargs, 0x0080);
+
+    for (name, function) in [
+        ("isPublic", modifier_public as crate::NativeFn),
+        ("isPrivate", modifier_private),
+        ("isProtected", modifier_protected),
+        ("isStatic", modifier_static),
+        ("isFinal", modifier_final),
+        ("isSynchronized", modifier_synchronized),
+        ("isVolatile", modifier_volatile),
+        ("isTransient", modifier_transient),
+        ("isNative", modifier_native),
+        ("isInterface", modifier_interface),
+        ("isAbstract", modifier_abstract),
+        ("isStrict", modifier_strict),
+        ("isSynthetic", modifier_synthetic),
+        ("isAnnotation", modifier_annotation),
+        ("isEnum", modifier_enum),
+        ("isMandated", modifier_mandated),
+        ("isBridge", modifier_bridge),
+        ("isVarArgs", modifier_varargs),
+    ] {
+        shared.register_native("java/lang/reflect/Modifier", name, "(I)Z", function);
+    }
+}
+
+fn class_flags(shared: &Shared, receiver: ObjRef) -> Result<u16, VmError> {
+    match class_object_of(shared, receiver)? {
+        ClassObject::Named(class) => shared
+            .entry(class)
+            .map(|entry| entry.file.access_flags)
+            .ok_or_else(|| VmError::Loader(format!("class id {} is not loaded", class.0))),
+        ClassObject::Primitive(_) | ClassObject::Array(_) => Ok(0),
+    }
+}
+
+const ACC_ANNOTATION: u16 = 0x2000;
+const ACC_ENUM: u16 = 0x4000;
+const ACC_SYNTHETIC: u16 = 0x1000;
+
+fn class_is_annotation(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    _args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    Ok(Some(Value::Int(i32::from(
+        class_flags(shared, receiver)? & ACC_ANNOTATION != 0,
+    ))))
+}
+
+fn class_is_enum(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    _args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    Ok(Some(Value::Int(i32::from(
+        class_flags(shared, receiver)? & ACC_ENUM != 0,
+    ))))
+}
+
+fn class_is_synthetic(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    _args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    Ok(Some(Value::Int(i32::from(
+        class_flags(shared, receiver)? & ACC_SYNTHETIC != 0,
+    ))))
+}
+
+fn class_is_false(
+    _shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    _args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    Ok(Some(Value::Int(0)))
+}
+
+/// `Class.getInterfaces()`: the direct interfaces, in class-file order.
+fn class_get_interfaces(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    _args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let arrays = match class_object_of(shared, receiver)? {
+        ClassObject::Named(class) => {
+            let entry = shared
+                .entry(class)
+                .ok_or_else(|| VmError::Loader(format!("class id {} is not loaded", class.0)))?;
+            let mut objects = Vec::new();
+            for name in entry.file.interface_names()? {
+                let interface = shared.load_class(entry.loader, name)?;
+                objects.push(Value::Ref(shared.class_object(interface)?));
+            }
+            objects
+        }
+        ClassObject::Primitive(_) | ClassObject::Array(_) => Vec::new(),
+    };
+    let class = shared.load_library_class("java/lang/Class")?;
+    let array = shared
+        .heap()
+        .allocate_array(ClassRef::Named(class), arrays.len());
+    {
+        let mut heap = shared.heap();
+        let elements = heap.array_mut(array).expect("a freshly allocated array");
+        for (slot, value) in elements.elements.iter_mut().zip(arrays) {
+            *slot = value;
+        }
+    }
+    Ok(Some(Value::Ref(array)))
+}
+
+/// `Class.getSimpleName()`.
+fn class_get_simple_name(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    _args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let name = match class_object_of(shared, receiver)? {
+        ClassObject::Named(class) => simple_name(shared, class)?,
+        ClassObject::Primitive(kind) => kind.name().to_owned(),
+        ClassObject::Array(array) => {
+            let mut name = self::array_component_simple_name(shared, &array)?;
+            name.push_str("[]");
+            name
+        }
+    };
+    let text = shared.intern_string(&name);
+    Ok(Some(Value::Ref(text)))
+}
+
+/// The simple name of a loaded class: its binary name without the package and without
+/// the enclosing class's `$` prefix. An anonymous class's numeric suffix is kept, which is
+/// the same text `Class.getSimpleName` reports for it.
+fn simple_name(shared: &Shared, class: ClassId) -> Result<String, VmError> {
+    let entry = shared
+        .entry(class)
+        .ok_or_else(|| VmError::Loader(format!("class id {} is not loaded", class.0)))?;
+    let binary = entry.name.rsplit('/').next().unwrap_or(&entry.name);
+    Ok(match binary.rsplit_once('$') {
+        Some((_, simple)) => simple.to_owned(),
+        None => binary.to_owned(),
+    })
+}
+
+fn array_component_simple_name(shared: &Shared, array: &ArrayClass) -> Result<String, VmError> {
+    match &array.component {
+        ClassRef::Named(class) => simple_name(shared, *class),
+        ClassRef::Primitive(kind) => Ok(kind.name().to_owned()),
+        ClassRef::Array(inner) => {
+            let mut name = self::array_component_simple_name(shared, inner)?;
+            name.push_str("[]");
+            Ok(name)
+        }
+    }
+}
+
+/// Is `candidate` the same as `target`, a subtype of a named `target`, or an array type
+/// assignable to `target`?
+fn class_object_assignable(
+    shared: &Shared,
+    target: &ClassObject,
+    candidate: &ClassObject,
+) -> Result<bool, VmError> {
+    match (target, candidate) {
+        (ClassObject::Primitive(left), ClassObject::Primitive(right)) => Ok(left == right),
+        (ClassObject::Named(left), ClassObject::Named(right)) => {
+            named_assignable(shared, *left, *right)
+        }
+        (ClassObject::Named(target), ClassObject::Array(_)) => {
+            let name = class_name(shared, *target);
+            Ok(matches!(
+                name.as_str(),
+                "java/lang/Object" | "java/lang/Cloneable" | "java/io/Serializable"
+            ))
+        }
+        (ClassObject::Array(target), ClassObject::Array(candidate)) => {
+            array_assignable(target, candidate)
+        }
+        _ => Ok(false),
+    }
+}
+
+/// Is `candidate` a supertype (class or interface) of `from`?
+fn named_assignable(shared: &Shared, target: ClassId, from: ClassId) -> Result<bool, VmError> {
+    use std::collections::HashSet;
+    let mut stack = vec![from];
+    let mut seen = HashSet::new();
+    while let Some(current) = stack.pop() {
+        if current == target {
+            return Ok(true);
+        }
+        if !seen.insert(current) {
+            continue;
+        }
+        let entry = shared
+            .entry(current)
+            .ok_or_else(|| VmError::Loader(format!("class id {} is not loaded", current.0)))?;
+        if let Some(super_name) = entry.file.super_class_name()? {
+            stack.push(shared.load_class(entry.loader, super_name)?);
+        }
+        for interface_name in entry.file.interface_names()? {
+            match shared.load_class(entry.loader, interface_name) {
+                Ok(id) => stack.push(id),
+                Err(VmError::ClassNotFound { .. }) => {}
+                Err(error) => return Err(error),
+            }
+        }
+    }
+    Ok(false)
+}
+
+/// Array assignability: equal component types, or a reference component whose runtime
+/// class is assignable, matching the M2.21 `instanceof` rule.
+fn array_assignable(target: &ArrayClass, candidate: &ArrayClass) -> Result<bool, VmError> {
+    match (&target.component, &candidate.component) {
+        (ClassRef::Primitive(left), ClassRef::Primitive(right)) => Ok(left == right),
+        (ClassRef::Array(left), ClassRef::Array(right)) => array_assignable(left, right),
+        (ClassRef::Named(_), _) | (_, ClassRef::Named(_)) => {
+            // Without a shared `Shared` handle here, the name-level check is left to the
+            // interpreter's M2.21 path; equal references are still accepted.
+            Ok(target.component == candidate.component)
+        }
+        _ => Ok(false),
+    }
 }
 
 fn class_get_declared_fields(

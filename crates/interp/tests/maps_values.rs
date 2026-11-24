@@ -734,6 +734,13 @@ fn probe_bytes() -> Vec<u8> {
     builder.build()
 }
 
+fn hash_map_class(fixture: &Fixture) -> ClassId {
+    fixture
+        .shared
+        .load_library_class("java/util/HashMap")
+        .expect("the C1 HashMap stub loads")
+}
+
 struct Fixture {
     shared: Shared,
     probe: ClassId,
@@ -996,7 +1003,7 @@ fn null_key_and_null_value_are_stored() {
     ));
     assert!(absent.is_null());
 
-    let map = fixture.shared.heap().allocate_map();
+    let map = fixture.shared.heap().allocate_map(hash_map_class(&fixture));
     fixture
         .shared
         .heap()
@@ -1091,10 +1098,10 @@ fn map_class_and_dedicated_representation() {
         "java.util.HashMap"
     );
 
-    let map = fixture.shared.heap().allocate_map();
+    let map = fixture.shared.heap().allocate_map(hash_map_class(&fixture));
     assert!(matches!(
         fixture.shared.heap().get(map).unwrap(),
-        HeapObject::Map(entries) if entries.is_empty()
+        HeapObject::Map(map) if map.entries.is_empty()
     ));
     assert!(fixture.shared.heap().list(map).is_err());
     assert!(fixture.shared.heap().map(map).is_ok());
@@ -1125,7 +1132,7 @@ fn map_keys_and_values_are_enumerated_as_roots() {
 
     let key = heap_string_ref(&fixture, "root-key");
     let value = heap_string_ref(&fixture, "root-value");
-    let map = fixture.shared.heap().allocate_map();
+    let map = fixture.shared.heap().allocate_map(hash_map_class(&fixture));
     fixture
         .shared
         .heap()
@@ -1152,7 +1159,7 @@ fn map_keys_and_values_are_enumerated_as_roots() {
     );
 
     // A null value is stored, but null is never a root.
-    let null_map = fixture.shared.heap().allocate_map();
+    let null_map = fixture.shared.heap().allocate_map(hash_map_class(&fixture));
     fixture
         .shared
         .heap()
@@ -1386,7 +1393,7 @@ fn map_constructors_and_arguments_are_typed_errors() {
         vec![Value::Int(16)]
     )));
 
-    let map = fixture.shared.heap().allocate_map();
+    let map = fixture.shared.heap().allocate_map(hash_map_class(&fixture));
     for (name, descriptor, args) in [
         (
             "put",
@@ -1450,18 +1457,35 @@ fn map_constructors_and_arguments_are_typed_errors() {
 }
 
 #[test]
-fn unimplemented_map_methods_fail_loudly() {
+fn map_key_set_is_a_set_view_of_the_keys() {
     let fixture = fixture();
-    match call(
+    let value = ok(
         &fixture,
         "unsupportedKeySet",
         "(Ljava/lang/String;)Ljava/lang/Object;",
         vec![heap_string(&fixture, "k")],
-    ) {
-        Err(InterpError::NativeOrAbstract { name, descriptor }) => {
-            assert_eq!(name, "keySet");
-            assert_eq!(descriptor, "()Ljava/util/Set;");
-        }
-        other => panic!("expected NativeOrAbstract for keySet, found {other:?}"),
-    }
+    )
+    .expect("keySet returns a set");
+    let Value::Ref(reference) = value else {
+        panic!("keySet returned a non-reference value");
+    };
+    assert!(!reference.is_null(), "keySet returned null");
+    let elements = fixture
+        .shared
+        .heap()
+        .set(reference)
+        .expect("keySet returns the set shape")
+        .to_vec();
+    assert_eq!(elements.len(), 1);
+    let Value::Ref(key) = elements[0] else {
+        panic!("keySet contains a non-reference");
+    };
+    assert_eq!(
+        fixture
+            .shared
+            .heap()
+            .string(key)
+            .expect("the key is a String"),
+        "k"
+    );
 }

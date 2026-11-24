@@ -28,6 +28,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod callbacks;
 mod error;
 mod frame;
 mod instr;
@@ -150,6 +151,7 @@ fn run_method(
     }
     if method.is_abstract() {
         return Err(InterpError::NativeOrAbstract {
+            class: entry.name.clone(),
             name: name.to_owned(),
             descriptor: descriptor.to_owned(),
         });
@@ -157,16 +159,22 @@ fn run_method(
     let code = file
         .code(method)?
         .ok_or_else(|| InterpError::NativeOrAbstract {
+            class: entry.name.clone(),
             name: name.to_owned(),
             descriptor: descriptor.to_owned(),
         })?;
-    let decoded = decode(&file, &code.data)?;
+    let decoded = decode(&file, &code.data).map_err(|error| match error {
+        InterpError::Decode(message) => {
+            InterpError::Decode(format!("{message} (in {}.{name}{descriptor})", entry.name))
+        }
+        other => other,
+    })?;
 
     // A bytecode method's receiver must be an instance of the declaring class (or a
     // subclass). Natives keep their own receiver rules, so this runs only on the `Code`
     // path.
     if let Some(reference) = receiver {
-        let actual = shared.heap().instance(reference)?.class;
+        let actual = shared.heap().object_class(reference)?;
         if !is_assignable(shared, actual, class)? {
             let actual_name = shared
                 .entry(actual)
@@ -229,14 +237,29 @@ fn execute(
 
         match instruction {
             Instr::Iconst(value) => frame.push(Value::Int(value))?,
+            Instr::LConst(value) => frame.push(Value::Long(value))?,
+            Instr::FConst(value) => frame.push(Value::Float(value))?,
+            Instr::DConst(value) => frame.push(Value::Double(value))?,
             Instr::AconstNull => frame.push(Value::Ref(ObjRef::NULL))?,
             Instr::Pop => {
                 frame.pop()?;
+            }
+            Instr::Pop2 => {
+                let value = frame.pop()?;
+                if !is_category_two(value) {
+                    frame.pop()?;
+                }
             }
             Instr::Dup => {
                 let value = *frame.stack.last().ok_or(InterpError::StackUnderflow)?;
                 frame.push(value)?;
             }
+            Instr::DupX1 => stack_dup_x1(frame)?,
+            Instr::DupX2 => stack_dup_x2(frame)?,
+            Instr::Dup2 => stack_dup2(frame)?,
+            Instr::Dup2X1 => stack_dup2_x1(frame)?,
+            Instr::Dup2X2 => stack_dup2_x2(frame)?,
+            Instr::Swap => stack_swap(frame)?,
             Instr::New { class } => {
                 // `new` initializes the class, then allocates an instance with the
                 // layout's default field values. The JVM's "uninitialized" state until
@@ -264,7 +287,11 @@ fn execute(
                 })?;
                 frame.push(value)?;
             }
-            Instr::IStore(index) | Instr::AStore(index) => {
+            Instr::IStore(index)
+            | Instr::LStore(index)
+            | Instr::FStore(index)
+            | Instr::DStore(index)
+            | Instr::AStore(index) => {
                 let value = frame.pop()?;
                 let slot = frame.locals.get_mut(usize::from(index)).ok_or_else(|| {
                     InterpError::Decode(format!("local {index} is outside the frame"))
@@ -523,7 +550,7 @@ fn execute(
                 }
                 let receiver = pop_receiver(frame)?;
                 let slot = instance_field_slot(shared, receiver, declaring, &name, &descriptor)?;
-                let value = shared.heap().instance(receiver)?.fields[slot];
+                let value = shared.heap().object_fields(receiver)?[slot];
                 frame.push(value)?;
             }
             Instr::PutField {
@@ -544,7 +571,7 @@ fn execute(
                 let value = frame.pop()?;
                 let receiver = pop_receiver(frame)?;
                 let slot = instance_field_slot(shared, receiver, declaring, &name, &descriptor)?;
-                shared.heap().instance_mut(receiver)?.fields[slot] = value;
+                shared.heap().object_fields_mut(receiver)?[slot] = value;
             }
             Instr::InvokeVirtual {
                 class: _,
@@ -615,20 +642,57 @@ fn execute(
                 );
                 deliver_call(shared, frame, caller_pc, &descriptor, result)?;
             }
-            Instr::IAdd | Instr::ISub | Instr::IMul | Instr::IDiv => {
-                let right = int(frame.pop()?)?;
-                let left = int(frame.pop()?)?;
-                let result = match instruction {
-                    Instr::IAdd => left.wrapping_add(right),
-                    Instr::ISub => left.wrapping_sub(right),
-                    Instr::IMul => left.wrapping_mul(right),
-                    Instr::IDiv => left.checked_div(right).ok_or_else(|| {
-                        InterpError::Decode("integer division by zero".to_owned())
-                    })?,
-                    _ => unreachable!(),
-                };
-                frame.push(Value::Int(result))?;
-            }
+            Instr::IAdd
+            | Instr::ISub
+            | Instr::IMul
+            | Instr::IDiv
+            | Instr::IRem
+            | Instr::INeg
+            | Instr::IAnd
+            | Instr::IOr
+            | Instr::IXor
+            | Instr::IShl
+            | Instr::IShr
+            | Instr::IUShr
+            | Instr::LAdd
+            | Instr::LSub
+            | Instr::LMul
+            | Instr::LDiv
+            | Instr::LRem
+            | Instr::LNeg
+            | Instr::LAnd
+            | Instr::LOr
+            | Instr::LXor
+            | Instr::LShl
+            | Instr::LShr
+            | Instr::LUShr
+            | Instr::FAdd
+            | Instr::FSub
+            | Instr::FMul
+            | Instr::FDiv
+            | Instr::FRem
+            | Instr::FNeg
+            | Instr::DAdd
+            | Instr::DSub
+            | Instr::DMul
+            | Instr::DDiv
+            | Instr::DRem
+            | Instr::DNeg
+            | Instr::I2L
+            | Instr::I2F
+            | Instr::I2D
+            | Instr::L2I
+            | Instr::L2F
+            | Instr::L2D
+            | Instr::F2I
+            | Instr::F2L
+            | Instr::F2D
+            | Instr::D2I
+            | Instr::D2L
+            | Instr::D2F
+            | Instr::I2B
+            | Instr::I2C
+            | Instr::I2S => execute_numeric(frame, &instruction)?,
             Instr::LCmp => {
                 let right = long(frame.pop()?)?;
                 let left = long(frame.pop()?)?;
@@ -688,6 +752,14 @@ fn execute(
                     )?
                 };
                 frame.push(Value::Ref(reference))?;
+            }
+            Instr::MonitorEnter => {
+                let reference = pop_reference(frame)?;
+                thread.monitor_enter(reference)?;
+            }
+            Instr::MonitorExit => {
+                let reference = pop_reference(frame)?;
+                thread.monitor_exit(reference)?;
             }
             Instr::Athrow => {
                 let throwable = throw_reference(frame)?;
@@ -968,7 +1040,33 @@ fn invoke_instance(
             return Ok(Some(value));
         }
     }
-    let (entry, is_native) = resolve_virtual(shared, start, name, descriptor)?;
+    let (entry, is_native) = match resolve_virtual(shared, start, name, descriptor) {
+        Ok(found) => found,
+        Err(InterpError::MethodNotFound { .. }) => {
+            // A default method declared on a superinterface is part of method resolution
+            // for a class and is the whole resolution for an interface receiver (the
+            // `invokespecial AnnotationMetadata.getAnnotationAttributes` form Spring uses).
+            let Some(interface) = find_interface_method(shared, start, name, descriptor)? else {
+                return Err(InterpError::MethodNotFound {
+                    class: class_name(shared, start),
+                    name: name.to_owned(),
+                    descriptor: descriptor.to_owned(),
+                });
+            };
+            let entry = shared
+                .entry(interface)
+                .ok_or_else(|| InterpError::Decode("interface vanished".to_owned()))?;
+            let method = entry.file.find_method(name, descriptor)?.ok_or_else(|| {
+                InterpError::MethodNotFound {
+                    class: entry.name.clone(),
+                    name: name.to_owned(),
+                    descriptor: descriptor.to_owned(),
+                }
+            })?;
+            (Arc::clone(&entry), method.is_native())
+        }
+        Err(error) => return Err(error),
+    };
     shared.check_no_locks_held()?;
     let mut call_roots = args.clone();
     call_roots.push(Value::Ref(receiver));
@@ -1087,7 +1185,7 @@ fn instance_field_slot(
     name: &str,
     descriptor: &str,
 ) -> Result<usize, InterpError> {
-    let actual = shared.heap().instance(receiver)?.class;
+    let actual = shared.heap().object_class(receiver)?;
     if !is_assignable(shared, actual, declaring)? {
         return Err(InterpError::NotAssignable {
             expected: class_name(shared, declaring),
@@ -1144,6 +1242,339 @@ fn class_name(shared: &Shared, class: ClassId) -> String {
         .entry(class)
         .map(|entry| entry.name.clone())
         .unwrap_or_else(|| format!("class {}", class.0))
+}
+
+/// Does `value` occupy two JVM operand-stack slots?
+///
+/// This interpreter stores one [`Value`] per argument and local (the M2.18 deviation), but
+/// the `dup2`/`pop2` family is defined in terms of JVM categories, so the value's kind is
+/// still what selects the form.
+fn is_category_two(value: Value) -> bool {
+    matches!(value, Value::Long(_) | Value::Double(_))
+}
+
+fn stack_dup_x1(frame: &mut Frame) -> Result<(), InterpError> {
+    let stack = &mut frame.stack;
+    let length = stack.len();
+    if length < 2 {
+        return Err(InterpError::StackUnderflow);
+    }
+    let value1 = stack[length - 1];
+    let value2 = stack[length - 2];
+    stack.truncate(length - 2);
+    stack.push(value1);
+    stack.push(value2);
+    stack.push(value1);
+    Ok(())
+}
+
+fn stack_dup_x2(frame: &mut Frame) -> Result<(), InterpError> {
+    let stack = &mut frame.stack;
+    let length = stack.len();
+    if length < 2 {
+        return Err(InterpError::StackUnderflow);
+    }
+    let value1 = stack[length - 1];
+    let value2 = stack[length - 2];
+    if is_category_two(value2) {
+        stack.truncate(length - 2);
+        stack.push(value1);
+        stack.push(value2);
+        stack.push(value1);
+        return Ok(());
+    }
+    if length < 3 {
+        return Err(InterpError::StackUnderflow);
+    }
+    let value3 = stack[length - 3];
+    stack.truncate(length - 3);
+    stack.push(value1);
+    stack.push(value3);
+    stack.push(value2);
+    stack.push(value1);
+    Ok(())
+}
+
+fn stack_dup2(frame: &mut Frame) -> Result<(), InterpError> {
+    let stack = &mut frame.stack;
+    let length = stack.len();
+    if length < 1 {
+        return Err(InterpError::StackUnderflow);
+    }
+    let value1 = stack[length - 1];
+    if is_category_two(value1) {
+        stack.push(value1);
+        return Ok(());
+    }
+    if length < 2 {
+        return Err(InterpError::StackUnderflow);
+    }
+    let value2 = stack[length - 2];
+    stack.push(value2);
+    stack.push(value1);
+    Ok(())
+}
+
+fn stack_dup2_x1(frame: &mut Frame) -> Result<(), InterpError> {
+    let stack = &mut frame.stack;
+    let length = stack.len();
+    if length < 2 {
+        return Err(InterpError::StackUnderflow);
+    }
+    let value1 = stack[length - 1];
+    let value2 = stack[length - 2];
+    if is_category_two(value2) {
+        stack.truncate(length - 2);
+        stack.push(value1);
+        stack.push(value2);
+        stack.push(value1);
+        return Ok(());
+    }
+    if length < 3 {
+        return Err(InterpError::StackUnderflow);
+    }
+    let value3 = stack[length - 3];
+    stack.truncate(length - 3);
+    stack.push(value2);
+    stack.push(value1);
+    stack.push(value3);
+    stack.push(value2);
+    stack.push(value1);
+    Ok(())
+}
+
+fn stack_dup2_x2(frame: &mut Frame) -> Result<(), InterpError> {
+    let stack = &mut frame.stack;
+    let length = stack.len();
+    if length < 2 {
+        return Err(InterpError::StackUnderflow);
+    }
+    let value1 = stack[length - 1];
+    let value2 = stack[length - 2];
+    if is_category_two(value1) {
+        if is_category_two(value2) {
+            // Form 4: value2 (cat2), value1 (cat2).
+            stack.truncate(length - 2);
+            stack.push(value1);
+            stack.push(value2);
+            stack.push(value1);
+            return Ok(());
+        }
+        if length < 3 {
+            return Err(InterpError::StackUnderflow);
+        }
+        // Form 3: value3, value2, value1 (cat2).
+        let value3 = stack[length - 3];
+        stack.truncate(length - 3);
+        stack.push(value1);
+        stack.push(value3);
+        stack.push(value2);
+        stack.push(value1);
+        return Ok(());
+    }
+    if is_category_two(value2) {
+        if length < 3 {
+            return Err(InterpError::StackUnderflow);
+        }
+        // Form 2: value3, value2 (cat2), value1.
+        let value3 = stack[length - 3];
+        stack.truncate(length - 3);
+        stack.push(value1);
+        stack.push(value3);
+        stack.push(value2);
+        stack.push(value1);
+        return Ok(());
+    }
+    if length < 4 {
+        return Err(InterpError::StackUnderflow);
+    }
+    // Form 1: value4, value3, value2, value1.
+    let value3 = stack[length - 3];
+    let value4 = stack[length - 4];
+    stack.truncate(length - 4);
+    stack.push(value2);
+    stack.push(value1);
+    stack.push(value4);
+    stack.push(value3);
+    stack.push(value2);
+    stack.push(value1);
+    Ok(())
+}
+
+fn stack_swap(frame: &mut Frame) -> Result<(), InterpError> {
+    let stack = &mut frame.stack;
+    let length = stack.len();
+    if length < 2 {
+        return Err(InterpError::StackUnderflow);
+    }
+    if is_category_two(stack[length - 1]) || is_category_two(stack[length - 2]) {
+        return Err(InterpError::Decode(
+            "swap requires two category-1 values".to_owned(),
+        ));
+    }
+    stack.swap(length - 1, length - 2);
+    Ok(())
+}
+
+/// Execute one arithmetic, bitwise or conversion instruction.
+fn execute_numeric(frame: &mut Frame, instruction: &Instr) -> Result<(), InterpError> {
+    use Instr::*;
+    match instruction {
+        IAdd | ISub | IMul | IDiv | IRem | IAnd | IOr | IXor | IShl | IShr | IUShr => {
+            let right = int(frame.pop()?)?;
+            let left = int(frame.pop()?)?;
+            let result = match instruction {
+                IAdd => left.wrapping_add(right),
+                ISub => left.wrapping_sub(right),
+                IMul => left.wrapping_mul(right),
+                IDiv => left
+                    .checked_div(right)
+                    .ok_or_else(|| InterpError::Decode("integer division by zero".to_owned()))?,
+                IRem => left
+                    .checked_rem(right)
+                    .ok_or_else(|| InterpError::Decode("integer division by zero".to_owned()))?,
+                IAnd => left & right,
+                IOr => left | right,
+                IXor => left ^ right,
+                IShl => left.wrapping_shl((right as u32) & 0x1f),
+                IShr => left.wrapping_shr((right as u32) & 0x1f),
+                IUShr => ((left as u32) >> ((right as u32) & 0x1f)) as i32,
+                _ => unreachable!(),
+            };
+            frame.push(Value::Int(result))?;
+        }
+        INeg => {
+            let value = int(frame.pop()?)?;
+            frame.push(Value::Int(value.wrapping_neg()))?;
+        }
+        LAdd | LSub | LMul | LDiv | LRem | LAnd | LOr | LXor | LShl | LShr | LUShr => {
+            let right = long(frame.pop()?)?;
+            let left = long(frame.pop()?)?;
+            let result = match instruction {
+                LAdd => left.wrapping_add(right),
+                LSub => left.wrapping_sub(right),
+                LMul => left.wrapping_mul(right),
+                LDiv => left
+                    .checked_div(right)
+                    .ok_or_else(|| InterpError::Decode("long division by zero".to_owned()))?,
+                LRem => left
+                    .checked_rem(right)
+                    .ok_or_else(|| InterpError::Decode("long division by zero".to_owned()))?,
+                LAnd => left & right,
+                LOr => left | right,
+                LXor => left ^ right,
+                LShl => left.wrapping_shl((right as u32) & 0x3f),
+                LShr => left.wrapping_shr((right as u32) & 0x3f),
+                LUShr => ((left as u64) >> ((right as u32) & 0x3f)) as i64,
+                _ => unreachable!(),
+            };
+            frame.push(Value::Long(result))?;
+        }
+        LNeg => {
+            let value = long(frame.pop()?)?;
+            frame.push(Value::Long(value.wrapping_neg()))?;
+        }
+        FAdd | FSub | FMul | FDiv | FRem => {
+            let right = float(frame.pop()?)?;
+            let left = float(frame.pop()?)?;
+            let result = match instruction {
+                FAdd => left + right,
+                FSub => left - right,
+                FMul => left * right,
+                FDiv => left / right,
+                FRem => left % right,
+                _ => unreachable!(),
+            };
+            frame.push(Value::Float(result))?;
+        }
+        FNeg => {
+            let value = float(frame.pop()?)?;
+            frame.push(Value::Float(-value))?;
+        }
+        DAdd | DSub | DMul | DDiv | DRem => {
+            let right = double(frame.pop()?)?;
+            let left = double(frame.pop()?)?;
+            let result = match instruction {
+                DAdd => left + right,
+                DSub => left - right,
+                DMul => left * right,
+                DDiv => left / right,
+                DRem => left % right,
+                _ => unreachable!(),
+            };
+            frame.push(Value::Double(result))?;
+        }
+        DNeg => {
+            let value = double(frame.pop()?)?;
+            frame.push(Value::Double(-value))?;
+        }
+        I2L => {
+            let value = int(frame.pop()?)?;
+            frame.push(Value::Long(i64::from(value)))?;
+        }
+        I2F => {
+            let value = int(frame.pop()?)?;
+            frame.push(Value::Float(value as f32))?;
+        }
+        I2D => {
+            let value = int(frame.pop()?)?;
+            frame.push(Value::Double(f64::from(value)))?;
+        }
+        L2I => {
+            let value = long(frame.pop()?)?;
+            frame.push(Value::Int(value as i32))?;
+        }
+        L2F => {
+            let value = long(frame.pop()?)?;
+            frame.push(Value::Float(value as f32))?;
+        }
+        L2D => {
+            let value = long(frame.pop()?)?;
+            frame.push(Value::Double(value as f64))?;
+        }
+        F2I => {
+            let value = float(frame.pop()?)?;
+            frame.push(Value::Int(value as i32))?;
+        }
+        F2L => {
+            let value = float(frame.pop()?)?;
+            frame.push(Value::Long(value as i64))?;
+        }
+        F2D => {
+            let value = float(frame.pop()?)?;
+            frame.push(Value::Double(f64::from(value)))?;
+        }
+        D2I => {
+            let value = double(frame.pop()?)?;
+            frame.push(Value::Int(value as i32))?;
+        }
+        D2L => {
+            let value = double(frame.pop()?)?;
+            frame.push(Value::Long(value as i64))?;
+        }
+        D2F => {
+            let value = double(frame.pop()?)?;
+            frame.push(Value::Float(value as f32))?;
+        }
+        I2B => {
+            let value = int(frame.pop()?)?;
+            frame.push(Value::Int(i32::from(value as i8)))?;
+        }
+        I2C => {
+            let value = int(frame.pop()?)?;
+            frame.push(Value::Int(i32::from(value as u16)))?;
+        }
+        I2S => {
+            let value = int(frame.pop()?)?;
+            frame.push(Value::Int(i32::from(value as i16)))?;
+        }
+        _ => {
+            return Err(InterpError::Decode(format!(
+                "numeric dispatch does not handle {instruction:?}"
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn int(value: Value) -> Result<i32, InterpError> {
@@ -1387,8 +1818,18 @@ fn runtime_class_ref(shared: &Shared, reference: ObjRef) -> Result<ClassRef, Int
             HeapObject::StringBuilder(_) => {
                 RuntimeKind::Library(rava_vm::collections::STRING_BUILDER_CLASS)
             }
-            HeapObject::List(_) => RuntimeKind::Library(rava_vm::collections::ARRAY_LIST_CLASS),
-            HeapObject::Map(_) => RuntimeKind::Library(rava_vm::maps::HASH_MAP_CLASS),
+            HeapObject::List(list) => RuntimeKind::Named(list.class),
+            HeapObject::Set(set) => RuntimeKind::Named(set.class),
+            HeapObject::Map(map) => RuntimeKind::Named(map.class),
+            HeapObject::Iterator(iterator) => RuntimeKind::Named(iterator.class),
+            HeapObject::MapEntry(_) => RuntimeKind::Library(rava_vm::maps::MAP_ENTRY_CLASS),
+            HeapObject::LogLevel(_) => RuntimeKind::Library("java/util/logging/Level"),
+            HeapObject::Atomic(cell) => RuntimeKind::Library(cell.class_name()),
+            HeapObject::Lock(_) => RuntimeKind::Library(rava_vm::locks::REENTRANT_LOCK_CLASS),
+            HeapObject::Condition(_) => RuntimeKind::Library(rava_vm::locks::CONDITION_CLASS),
+            HeapObject::Pattern(_) => RuntimeKind::Library("java/util/regex/Pattern"),
+            HeapObject::Matcher(_) => RuntimeKind::Library("java/util/regex/Matcher"),
+            HeapObject::Enumeration(_) => RuntimeKind::Library("java/util/Enumeration"),
             HeapObject::Array(array) => {
                 RuntimeKind::Array(ClassRef::array(array.component.clone()))
             }
@@ -1557,8 +1998,7 @@ fn dispatch_class(
         Annotation(ClassId),
         Enum(ClassId),
         StringBuilder,
-        List,
-        Map,
+        Named(ClassId),
         Array,
         Lambda(ClassId),
         Type(&'static str),
@@ -1577,8 +2017,34 @@ fn dispatch_class(
             HeapObject::Annotation(annotation) => ReceiverKind::Annotation(annotation.class),
             HeapObject::Enum(constant) => ReceiverKind::Enum(constant.class),
             HeapObject::StringBuilder(_) => ReceiverKind::StringBuilder,
-            HeapObject::List(_) => ReceiverKind::List,
-            HeapObject::Map(_) => ReceiverKind::Map,
+            HeapObject::List(list) => ReceiverKind::Named(list.class),
+            HeapObject::Set(set) => ReceiverKind::Named(set.class),
+            HeapObject::Map(map) => ReceiverKind::Named(map.class),
+            HeapObject::Iterator(iterator) => ReceiverKind::Named(iterator.class),
+            HeapObject::MapEntry(_) => {
+                ReceiverKind::Named(shared.load_library_class(rava_vm::maps::MAP_ENTRY_CLASS)?)
+            }
+            HeapObject::LogLevel(_) => {
+                ReceiverKind::Named(shared.load_library_class("java/util/logging/Level")?)
+            }
+            HeapObject::Atomic(cell) => {
+                ReceiverKind::Named(shared.load_library_class(cell.class_name())?)
+            }
+            HeapObject::Lock(_) => ReceiverKind::Named(
+                shared.load_library_class(rava_vm::locks::REENTRANT_LOCK_CLASS)?,
+            ),
+            HeapObject::Condition(_) => {
+                ReceiverKind::Named(shared.load_library_class(rava_vm::locks::CONDITION_CLASS)?)
+            }
+            HeapObject::Pattern(_) => {
+                ReceiverKind::Named(shared.load_library_class("java/util/regex/Pattern")?)
+            }
+            HeapObject::Matcher(_) => {
+                ReceiverKind::Named(shared.load_library_class("java/util/regex/Matcher")?)
+            }
+            HeapObject::Enumeration(_) => {
+                ReceiverKind::Named(shared.load_library_class("java/util/Enumeration")?)
+            }
             HeapObject::Array(_) => ReceiverKind::Array,
             HeapObject::Lambda(lambda) => ReceiverKind::Lambda(lambda.interface),
             HeapObject::Type(ty) => ReceiverKind::Type(ty.class_name()),
@@ -1587,6 +2053,7 @@ fn dispatch_class(
 
     match kind {
         ReceiverKind::Instance(class) => Ok(class),
+        ReceiverKind::Named(class) => Ok(class),
         ReceiverKind::Lambda(interface) => Ok(interface),
         ReceiverKind::Str => resolve_from(shared, current, "java/lang/String"),
         ReceiverKind::Class => resolve_from(shared, current, "java/lang/Class"),
@@ -1596,8 +2063,6 @@ fn dispatch_class(
         ReceiverKind::StringBuilder => {
             resolve_from(shared, current, rava_vm::collections::STRING_BUILDER_CLASS)
         }
-        ReceiverKind::List => resolve_from(shared, current, rava_vm::collections::ARRAY_LIST_CLASS),
-        ReceiverKind::Map => resolve_from(shared, current, rava_vm::maps::HASH_MAP_CLASS),
         ReceiverKind::Array => resolve_from(shared, current, "java/lang/Object"),
         ReceiverKind::Type(name) => resolve_from(shared, current, name),
     }

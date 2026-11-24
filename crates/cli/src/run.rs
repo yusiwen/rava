@@ -77,6 +77,7 @@ fn execute(options: &Options) -> Result<(), String> {
     // `Method.invoke`/`Constructor.newInstance` live in the interpreter because they
     // re-enter it; a runner that wants reflection must install them explicitly.
     rava_interp::reflect_invoke::register_natives(&shared);
+    rava_interp::callbacks::register_natives(&shared);
 
     let main_class = match shared.load_class(loader, &options.main_class) {
         Ok(class) => class,
@@ -146,17 +147,45 @@ fn execute(options: &Options) -> Result<(), String> {
     );
 
     // Flush what the program printed even when it failed: a Java program that prints and
-    // then throws has still printed.
+    // then throws has still printed. Diagnostics captured by `java.util.logging` go to
+    // stderr, so they never disturb the program's `System.out`.
+    use std::io::Write;
     let output = shared.stdout();
     if !output.is_empty() {
-        use std::io::Write;
         std::io::stdout()
             .write_all(output.as_bytes())
             .map_err(|error| format!("cannot write stdout: {error}"))?;
     }
+    let diagnostics = shared.stderr();
+    if !diagnostics.is_empty() {
+        std::io::stderr()
+            .write_all(diagnostics.as_bytes())
+            .map_err(|error| format!("cannot write stderr: {error}"))?;
+    }
 
-    result.map_err(|error| error.to_string())?;
+    result.map_err(|error| describe_error(&shared, error))?;
     Ok(())
+}
+
+/// Render an execution error, naming an uncaught Java exception by class and message.
+fn describe_error(shared: &Shared, error: rava_interp::InterpError) -> String {
+    if let rava_interp::InterpError::Thrown(throwable) = error {
+        let class = shared
+            .get_class(throwable)
+            .ok()
+            .and_then(|object| shared.heap().class(object).ok())
+            .and_then(|class| {
+                shared
+                    .entry(class)
+                    .map(|entry| entry.name.replace('/', "."))
+            })
+            .unwrap_or_else(|| "<unknown>".to_owned());
+        return match shared.throwable_message(throwable) {
+            Some(message) => format!("uncaught {class}: {message}"),
+            None => format!("uncaught {class}"),
+        };
+    }
+    error.to_string()
 }
 
 fn parse(args: &[String]) -> Result<Parsed, String> {

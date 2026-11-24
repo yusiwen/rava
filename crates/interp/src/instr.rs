@@ -105,8 +105,16 @@ const CONDITIONS: [IntCondition; 6] = [
 #[derive(Debug, Clone, PartialEq)]
 pub enum Instr {
     Iconst(i32),
+    /// `lconst_0`/`lconst_1`.
+    LConst(i64),
+    /// `fconst_0`/`fconst_1`/`fconst_2`.
+    FConst(f32),
+    /// `dconst_0`/`dconst_1`.
+    DConst(f64),
     /// `pop`: discard the top operand-stack value.
     Pop,
+    /// `pop2`: discard one category-2 value or two category-1 values.
+    Pop2,
     ILoad(u8),
     /// `lload`/`lload_<n>`.
     LLoad(u8),
@@ -116,6 +124,9 @@ pub enum Instr {
     DLoad(u8),
     ALoad(u8),
     IStore(u8),
+    LStore(u8),
+    FStore(u8),
+    DStore(u8),
     AStore(u8),
     Iinc(u8, i8),
     AconstNull,
@@ -123,10 +134,63 @@ pub enum Instr {
         class: String,
     },
     Dup,
+    DupX1,
+    DupX2,
+    Dup2,
+    Dup2X1,
+    Dup2X2,
+    Swap,
     IAdd,
     ISub,
     IMul,
     IDiv,
+    IRem,
+    INeg,
+    IAnd,
+    IOr,
+    IXor,
+    IShl,
+    IShr,
+    IUShr,
+    LAdd,
+    LSub,
+    LMul,
+    LDiv,
+    LRem,
+    LNeg,
+    LAnd,
+    LOr,
+    LXor,
+    LShl,
+    LShr,
+    LUShr,
+    FAdd,
+    FSub,
+    FMul,
+    FDiv,
+    FRem,
+    FNeg,
+    DAdd,
+    DSub,
+    DMul,
+    DDiv,
+    DRem,
+    DNeg,
+    I2L,
+    I2F,
+    I2D,
+    L2I,
+    L2F,
+    L2D,
+    F2I,
+    F2L,
+    F2D,
+    D2I,
+    D2L,
+    D2F,
+    I2B,
+    I2C,
+    I2S,
     LdcString(String),
     /// `ldc`/`ldc_w` of a `CONSTANT_Class`: the class name or descriptor, resolved
     /// through the executing frame's loader when the instruction runs.
@@ -259,6 +323,17 @@ pub enum Instr {
     DCmpG,
     /// `athrow`: pop a reference and throw it; `0xbf`.
     Athrow,
+    /// `monitorenter`: enter the monitor of the popped reference; `0xc2`.
+    ///
+    /// The VM is single-threaded until M5, so this records ownership and reentrancy on
+    /// the executing [`rava_vm::ThreadState`] instead of blocking. A null reference is a
+    /// typed error (the JVM throws `NullPointerException`).
+    MonitorEnter,
+    /// `monitorexit`: leave the monitor of the popped reference; `0xc3`.
+    ///
+    /// The reference must be owned by the executing thread; an unlocked object is a typed
+    /// error (the JVM throws `IllegalMonitorStateException`).
+    MonitorExit,
     IReturn,
     /// `lreturn`: return a `long` value.
     LReturn,
@@ -338,6 +413,13 @@ pub fn decode(file: &ClassFile, attribute_data: &[u8]) -> Result<DecodedMethod, 
         let instr = match opcode {
             0x01 => Instr::AconstNull,
             0x02..=0x08 => Instr::Iconst(i32::from(opcode) - 3),
+            0x09 => Instr::LConst(0),
+            0x0a => Instr::LConst(1),
+            0x0b => Instr::FConst(0.0),
+            0x0c => Instr::FConst(1.0),
+            0x0d => Instr::FConst(2.0),
+            0x0e => Instr::DConst(0.0),
+            0x0f => Instr::DConst(1.0),
             0x10 => {
                 let value = i8::from_be_bytes([byte(code, pc)?]);
                 pc += 1;
@@ -383,19 +465,91 @@ pub fn decode(file: &ClassFile, attribute_data: &[u8]) -> Result<DecodedMethod, 
                 pc += 1;
                 Instr::IStore(index)
             }
+            0x37 => {
+                let index = byte(code, pc)?;
+                pc += 1;
+                Instr::LStore(index)
+            }
+            0x38 => {
+                let index = byte(code, pc)?;
+                pc += 1;
+                Instr::FStore(index)
+            }
+            0x39 => {
+                let index = byte(code, pc)?;
+                pc += 1;
+                Instr::DStore(index)
+            }
             0x3a => {
                 let index = byte(code, pc)?;
                 pc += 1;
                 Instr::AStore(index)
             }
             0x3b..=0x3e => Instr::IStore(opcode - 0x3b),
+            0x3f..=0x42 => Instr::LStore(opcode - 0x3f),
+            0x43..=0x46 => Instr::FStore(opcode - 0x43),
+            0x47..=0x4a => Instr::DStore(opcode - 0x47),
             0x4b..=0x4e => Instr::AStore(opcode - 0x4b),
             0x57 => Instr::Pop,
+            0x58 => Instr::Pop2,
             0x59 => Instr::Dup,
+            0x5a => Instr::DupX1,
+            0x5b => Instr::DupX2,
+            0x5c => Instr::Dup2,
+            0x5d => Instr::Dup2X1,
+            0x5e => Instr::Dup2X2,
+            0x5f => Instr::Swap,
             0x60 => Instr::IAdd,
+            0x61 => Instr::LAdd,
+            0x62 => Instr::FAdd,
+            0x63 => Instr::DAdd,
             0x64 => Instr::ISub,
+            0x65 => Instr::LSub,
+            0x66 => Instr::FSub,
+            0x67 => Instr::DSub,
             0x68 => Instr::IMul,
+            0x69 => Instr::LMul,
+            0x6a => Instr::FMul,
+            0x6b => Instr::DMul,
             0x6c => Instr::IDiv,
+            0x6d => Instr::LDiv,
+            0x6e => Instr::FDiv,
+            0x6f => Instr::DDiv,
+            0x70 => Instr::IRem,
+            0x71 => Instr::LRem,
+            0x72 => Instr::FRem,
+            0x73 => Instr::DRem,
+            0x74 => Instr::INeg,
+            0x75 => Instr::LNeg,
+            0x76 => Instr::FNeg,
+            0x77 => Instr::DNeg,
+            0x78 => Instr::IShl,
+            0x79 => Instr::LShl,
+            0x7a => Instr::IShr,
+            0x7b => Instr::LShr,
+            0x7c => Instr::IUShr,
+            0x7d => Instr::LUShr,
+            0x7e => Instr::IAnd,
+            0x7f => Instr::LAnd,
+            0x80 => Instr::IOr,
+            0x81 => Instr::LOr,
+            0x82 => Instr::IXor,
+            0x83 => Instr::LXor,
+            0x85 => Instr::I2L,
+            0x86 => Instr::I2F,
+            0x87 => Instr::I2D,
+            0x88 => Instr::L2I,
+            0x89 => Instr::L2F,
+            0x8a => Instr::L2D,
+            0x8b => Instr::F2I,
+            0x8c => Instr::F2L,
+            0x8d => Instr::F2D,
+            0x8e => Instr::D2I,
+            0x8f => Instr::D2L,
+            0x90 => Instr::D2F,
+            0x91 => Instr::I2B,
+            0x92 => Instr::I2C,
+            0x93 => Instr::I2S,
             0x84 => {
                 let index = byte(code, pc)?;
                 let increment = i8::from_be_bytes([byte(code, pc + 1)?]);
@@ -569,6 +723,8 @@ pub fn decode(file: &ClassFile, attribute_data: &[u8]) -> Result<DecodedMethod, 
             0xb0 => Instr::AReturn,
             0xb1 => Instr::Return,
             0xbf => Instr::Athrow,
+            0xc2 => Instr::MonitorEnter,
+            0xc3 => Instr::MonitorExit,
             0x12 => {
                 let index = u16::from(byte(code, pc)?);
                 pc += 1;
@@ -1215,7 +1371,7 @@ fn resolve_invoke_dynamic(
 fn resolve_method(
     file: &ClassFile,
     index: u16,
-    virtual_call: bool,
+    _virtual_call: bool,
 ) -> Result<(String, String, String), InterpError> {
     let constant = file.constant_pool.get(index)?;
     let (class_index, name_and_type_index) = match constant {
@@ -1223,10 +1379,14 @@ fn resolve_method(
             class_index,
             name_and_type_index,
         } => (*class_index, *name_and_type_index),
+        // `invokestatic` and `invokespecial` may name an interface method (a static
+        // interface method or a default/super call), and `invokeinterface` always does,
+        // so an interface reference is accepted for every invoke form. The opcode, not
+        // the constant's tag, decides the dispatch.
         Constant::InterfaceMethodRef {
             class_index,
             name_and_type_index,
-        } if virtual_call => (*class_index, *name_and_type_index),
+        } => (*class_index, *name_and_type_index),
         _ => {
             return Err(InterpError::Decode(format!(
                 "constant {index} is not a method reference"

@@ -28,6 +28,12 @@ pub fn register_natives(shared: &Shared) {
     shared.register_native("java/lang/Object", "hashCode", "()I", object_hash_code);
     shared.register_native(
         "java/lang/Object",
+        "clone",
+        "()Ljava/lang/Object;",
+        object_clone,
+    );
+    shared.register_native(
+        "java/lang/Object",
         "toString",
         "()Ljava/lang/String;",
         object_to_string,
@@ -127,11 +133,17 @@ pub(crate) fn runtime_binary_name(shared: &Shared, receiver: ObjRef) -> Result<S
         Annotation,
         Enum(ClassId),
         StringBuilder,
-        List,
-        Map,
+        Named(ClassId),
         Array(ClassRef),
         Lambda(ClassId),
         Type(&'static str),
+        LogLevel,
+        Atomic(&'static str),
+        Lock,
+        Condition,
+        Pattern,
+        Matcher,
+        Enumeration,
     }
 
     let kind = {
@@ -150,8 +162,22 @@ pub(crate) fn runtime_binary_name(shared: &Shared, receiver: ObjRef) -> Result<S
             HeapObject::Annotation(_) => Kind::Annotation,
             HeapObject::Enum(constant) => Kind::Enum(constant.class),
             HeapObject::StringBuilder(_) => Kind::StringBuilder,
-            HeapObject::List(_) => Kind::List,
-            HeapObject::Map(_) => Kind::Map,
+            HeapObject::List(list) => Kind::Named(list.class),
+            HeapObject::Set(set) => Kind::Named(set.class),
+            HeapObject::Map(map) => Kind::Named(map.class),
+            HeapObject::Iterator(iterator) => Kind::Named(iterator.class),
+            HeapObject::MapEntry(_) => Kind::Named(
+                shared
+                    .load_library_class(crate::maps::MAP_ENTRY_CLASS)
+                    .map_err(|error| VmError::Native(error.to_string()))?,
+            ),
+            HeapObject::LogLevel(_) => Kind::LogLevel,
+            HeapObject::Atomic(cell) => Kind::Atomic(cell.class_name()),
+            HeapObject::Lock(_) => Kind::Lock,
+            HeapObject::Condition(_) => Kind::Condition,
+            HeapObject::Pattern(_) => Kind::Pattern,
+            HeapObject::Matcher(_) => Kind::Matcher,
+            HeapObject::Enumeration(_) => Kind::Enumeration,
             HeapObject::Array(array) => Kind::Array(array.component.clone()),
             HeapObject::Lambda(lambda) => Kind::Lambda(lambda.interface),
             HeapObject::Type(ty) => Kind::Type(ty.class_name()),
@@ -183,9 +209,87 @@ pub(crate) fn runtime_binary_name(shared: &Shared, receiver: ObjRef) -> Result<S
             Ok(entry.name.replace('/', "."))
         }
         Kind::StringBuilder => Ok("java.lang.StringBuilder".to_owned()),
-        Kind::List => Ok("java.util.ArrayList".to_owned()),
-        Kind::Map => Ok("java.util.HashMap".to_owned()),
+        Kind::Named(class) => {
+            let entry = shared
+                .entry(class)
+                .ok_or_else(|| VmError::Loader(format!("class id {} is not loaded", class.0)))?;
+            Ok(entry.name.replace('/', "."))
+        }
         Kind::Array(component) => shared.class_ref_name(&ClassRef::array(component)),
         Kind::Type(name) => Ok(name.replace('/', ".")),
+        Kind::LogLevel => Ok("java.util.logging.Level".to_owned()),
+        Kind::Atomic(name) => Ok(name.replace('/', ".")),
+        Kind::Lock => Ok("java.util.concurrent.locks.ReentrantLock".to_owned()),
+        Kind::Condition => Ok("java.util.concurrent.locks.Condition".to_owned()),
+        Kind::Pattern => Ok("java.util.regex.Pattern".to_owned()),
+        Kind::Matcher => Ok("java.util.regex.Matcher".to_owned()),
+        Kind::Enumeration => Ok("java.util.Enumeration".to_owned()),
+    }
+}
+
+/// `Object.clone()`: a shallow copy of an instance or an array.
+///
+/// The JDK's `CloneNotSupportedException` for a class that does not implement
+/// `Cloneable` is not synthesized; a receiver that is neither an instance nor an array is
+/// a typed error instead.
+fn object_clone(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    _args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    if receiver.is_null() {
+        return Err(VmError::Native(
+            "Object.clone called with a null receiver".to_owned(),
+        ));
+    }
+    enum Shape {
+        Instance(crate::ClassId, Vec<Value>),
+        Array(crate::ClassRef, Vec<Value>),
+        Other,
+    }
+    let shape = {
+        let heap = shared.heap();
+        match heap
+            .get(receiver)
+            .map_err(|error| VmError::Native(error.to_string()))?
+        {
+            crate::HeapObject::Instance(instance) => {
+                Shape::Instance(instance.class, instance.fields.clone())
+            }
+            crate::HeapObject::Array(array) => {
+                Shape::Array(array.component.clone(), array.elements.clone())
+            }
+            _ => Shape::Other,
+        }
+    };
+    match shape {
+        Shape::Instance(class, fields) => {
+            let copy = shared.allocate_instance(class)?;
+            {
+                let mut heap = shared.heap();
+                let slots = heap
+                    .object_fields_mut(copy)
+                    .map_err(|error| VmError::Native(error.to_string()))?;
+                slots.clone_from(&fields);
+            }
+            Ok(Some(Value::Ref(copy)))
+        }
+        Shape::Array(component, elements) => {
+            let copy = shared.heap().allocate_array(component, elements.len());
+            {
+                let mut heap = shared.heap();
+                let slots = &mut heap
+                    .array_mut(copy)
+                    .map_err(|error| VmError::Native(error.to_string()))?
+                    .elements;
+                slots.clone_from(&elements);
+            }
+            Ok(Some(Value::Ref(copy)))
+        }
+        Shape::Other => Err(VmError::Native(
+            "Object.clone receiver is not an instance or an array".to_owned(),
+        )),
     }
 }

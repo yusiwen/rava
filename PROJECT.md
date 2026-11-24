@@ -7,8 +7,8 @@
 
 > Ledger. P0 and P1 were accepted on 2026-11-23. M1 is complete; M2 is in progress
 > (M2.1, M2.2, M2.3, M2.4, M2.5, M2.6, M2.7, M2.8, M2.9, M2.10, M2.11, M2.12,
-> M2.13, M2.14, M2.15, M2.16, M2.17, M2.18, M2.19, M2.20, M2.21 and M2.22 done). Keep
-> this file honest and terse.
+> M2.13, M2.14, M2.15, M2.16, M2.17, M2.18, M2.19, M2.20, M2.21 and M2.22 done;
+> M2.23 is blocked on `java.util.stream`). Keep this file honest and terse.
 
 ## Phase status
 
@@ -82,12 +82,14 @@ release process, if wanted, becomes its own phase.
 | M2.20 | Classpath runner (`rava run`) | R3 | `cargo test -p rava-cli --test classpath_run` exits 0 | done |
 | M2.21 | Static fields, casts, switches and numeric constants | R3 | `cargo test -p rava-interp --test bytecode_surface` exits 0 | done |
 | M2.22 | Generic `Type` graph and generic reflection | R3 | `cargo test -p rava-interp --test generic_types` exits 0 | done |
-| M2.23 | Spring `AnnotationConfigApplicationContext` bean graph | R3 | `cargo test -p rava-cli --test spring_context` exits 0 | todo |
+| M2.23 | Spring `AnnotationConfigApplicationContext` bean graph | R3 | `RAVA_SPRING_ACCEPTANCE=1 cargo test -p rava-cli --test spring_context` exits 0 | blocked |
+| M2.24 | `java.util.stream` pipeline for Spring's annotation metadata | R3 | `cargo test -p rava-interp --test streams` exits 0 | todo |
 
 P0 and P1 are accepted; P2 is done because the M2 increments are sliced. All M0 and
 M1 slices are done, and both gate reviews passed. M2.1, M2.2, M2.3, M2.4, M2.5,
 M2.6, M2.7, M2.8, M2.9, M2.10, M2.11, M2.12, M2.13, M2.14, M2.15, M2.16, M2.17,
-M2.18, M2.19, M2.20, M2.21 and M2.22 are done; M2.23 is next.
+M2.18, M2.19, M2.20, M2.21 and M2.22 are done; M2.23 is blocked on the
+`java.util.stream` pipeline (see the M2.23 boundary). The M2 gate is not claimed.
 
 ## Slice log
 
@@ -738,6 +740,36 @@ M2.21 boundary: `putstatic` resolves the owner through the executing class's loa
 
 M2.22 boundary: generic reflection reads the `Signature` attribute only. A class or member without one reports raw `Class` objects (a primitive, an array class or a named class), exactly as the JDK does; a malformed signature is `VmError::Signature`, never a silent fallback to the raw type. The exposed surface is `Class.getGenericSuperclass`/`getGenericInterfaces`/`getTypeParameters`, `Field.getGenericType`, `Method.getGenericReturnType`/`getGenericParameterTypes`/`getTypeParameters`, `Constructor.getGenericParameterTypes`/`getTypeParameters` and the four `java.lang.reflect` interface accessors; `getGenericExceptionTypes`, record-component generic types and `AnnotatedType` are not exposed. A Type object's class identity is the public interface it implements (`ParameterizedType`, `TypeVariable`, `WildcardType`, `GenericArrayType`) rather than the JDK's private `sun.reflect.generics.reflectiveObjects` class, and `getTypeName`/`toString` use the VM's deterministic formatter (`raw<arg, arg>`, `? extends X`, `? super X`, `X[]`), not the JDK's exact text. A type-variable occurrence is resolved against the executable's own parameters and then its declaring class's; an occurrence inherited from an enclosing class is kept by name with `Object` as its only bound and a null `getGenericDeclaration`, and an owner is derived from `InnerClasses` only when the outer class is loadable. `ParameterizedType.getOwnerType` reports a raw declaring class for a `$`-encoded member type and the explicit owner type when the signature spells `.Outer<...>`. No annotations changes, record or sealed views, or Spring behavior are added.
 
+M2.23 boundary: the committed `crates/cli/tests/fixtures/spring/` fixture
+(`demo.SpringSmoke`, `javac --release 17`, `proxyBeanMethods = false`) and
+`crates/cli/tests/spring_context.rs` run a real Spring
+`AnnotationConfigApplicationContext` through `rava run` and assert exactly `hello\n`; the
+test skips with a clear message only when `compat/jars` is absent, so a jar-less CI checkout
+stays green. The local acceptance currently **fails**: Spring's
+`AnnotatedElementUtils.getMergedAnnotationAttributes` reaches
+`java/util/stream/StreamSupport.stream(Ljava/util/Spliterator;Z)Ljava/util/stream/Stream;`,
+and the runtime library has no `java.util.stream` pipeline (`Stream`/`Spliterator`/
+`Collector`), so the context never reaches `refresh()`. The first blocker fixed in this
+slice was `java/util/LinkedHashSet.<init>(I)V`; the chain then exposed, and this slice
+fixes, `monitorenter`/`monitorexit`, `invokedynamic`'s interface-method references,
+float/long/double constants, arithmetic, conversions and the `dup`/`pop` family, and the
+missing library surface Spring's startup path touches: `LinkedHashSet`/`HashSet`/`EnumSet`/
+`CopyOnWriteArraySet`, `LinkedHashMap`/`Hashtable`/`Properties`/`ConcurrentHashMap`/
+`IdentityHashMap`, iterators, `Collections`, `Arrays`, `ArrayDeque`, `Enumeration`,
+`Optional`-free factories, `String` search/case/trim/split/join, `Character`/`Boolean`
+boxing and classification, `Integer` radix strings, `Math`, `java.util.regex` over the Rust
+`regex` crate, `java.util.concurrent.atomic`, `ReentrantLock`/`Condition`, `ThreadLocal`,
+`Thread`/`ClassLoader`, `java.lang.ref`, `Throwable` construction, `System` properties and
+`arraycopy`, `java.util.logging` (Spring's JCL falls back to it because the acceptance
+classpath omits the optional SLF4J/Log4j/Logback adapters), reflective `Array`, member
+`hashCode`/`equals`, `Method.getDefaultValue`, `Class.getInterfaces`/`isInstance`/
+`isAnnotation`, `Object.clone`, and a `ClassNotFoundException` from
+`Class.forName`. Container subclasses keep their own fields and class identity, and a
+missing C1 annotation type (`java.lang.annotation.Documented`) is skipped rather than
+failing annotation reflection. The remaining work is the eager stream pipeline plus the
+`Spliterator`/`Collector` callbacks; the test and fixture are committed and must not be
+weakened.
+
 ## Decision log
 
 | ADR | Decision | Status |
@@ -849,7 +881,12 @@ A fresh session should:
     queries on `Class`, `Field`, `Method` and `Constructor`, the accessors on
     `ParameterizedType`, `TypeVariable`, `WildcardType` and `GenericArrayType`, and the
     committed release-17 `Box`/`StringBox`/`Nest`/`GenericProbe` fixture
-    (`cargo test -p rava-interp --test generic_types`). M2.23 is next.
+    (`cargo test -p rava-interp --test generic_types`). M2.23 is **blocked**: the
+    fixture and acceptance test are committed, the Spring startup path now runs through
+    class loading, logging, annotation reflection and concurrent collections, and the
+    first remaining blocker is `java.util.stream.StreamSupport.stream` in Spring's
+    `AnnotatedElementUtils`. `cargo test -p rava-cli --test spring_context` exits 1 with
+    that message; the M2 gate is not claimed.
 4. Do not write runtime code outside a defined slice.
 
 ## Open decisions

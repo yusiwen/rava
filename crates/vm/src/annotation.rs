@@ -103,11 +103,24 @@ pub fn register_natives(shared: &Shared) {
             format!("(Ljava/lang/Class;){}", &ANNOTATION_ARRAY[1..]),
             get_annotation,
         );
+        shared.register_native(
+            owner,
+            "isAnnotationPresent",
+            "(Ljava/lang/Class;)Z",
+            is_annotation_present,
+        );
     }
 
     // `Field`, `Method` and `Constructor` do not redeclare `getAnnotations`: their stub
     // inherits it from `java.lang.reflect.AccessibleObject`, which is where virtual
     // resolution finds the declaration.
+    shared.register_native(
+        "java/lang/reflect/Method",
+        "getDefaultValue",
+        "()Ljava/lang/Object;",
+        method_get_default_value,
+    );
+
     shared.register_native(
         "java/lang/reflect/AccessibleObject",
         "getAnnotations",
@@ -117,7 +130,20 @@ pub fn register_natives(shared: &Shared) {
 
     // `Enum.name` is what makes an `e` element value observable: the object stores the
     // constant's name, not the enum's static field value.
+    shared.register_native(
+        "java/lang/Enum",
+        "<init>",
+        "(Ljava/lang/String;I)V",
+        enum_init,
+    );
     shared.register_native("java/lang/Enum", "name", "()Ljava/lang/String;", enum_name);
+    shared.register_native("java/lang/Enum", "ordinal", "()I", enum_ordinal);
+    shared.register_native(
+        "java/lang/Enum",
+        "compareTo",
+        "(Ljava/lang/Enum;)I",
+        enum_compare_to,
+    );
     shared.register_native(
         "java/lang/Enum",
         "toString",
@@ -298,7 +324,14 @@ fn annotation_objects(
 ) -> Result<Vec<ObjRef>, VmError> {
     let mut objects = Vec::with_capacity(annotations.len());
     for annotation in annotations {
-        let class = load_descriptor_class(shared, loader, &annotation.type_descriptor)?;
+        // A meta-annotation whose type the C1 tree omits is skipped rather than failing
+        // the whole query: `java.lang.annotation.Documented` is absent from the
+        // ct.sym-derived tree even though `@Component` names it.
+        let class = match load_descriptor_class(shared, loader, &annotation.type_descriptor) {
+            Ok(class) => class,
+            Err(VmError::ClassNotFound { .. }) => continue,
+            Err(error) => return Err(error),
+        };
         let object = shared.annotation_object(class, annotation.values.clone())?;
         objects.push(object);
     }
@@ -367,7 +400,11 @@ fn get_annotation(
     let include_inherited = matches!(element, AnnotatedElement::Class(_));
     let annotations = visible_annotations(shared, &element, include_inherited)?;
     for annotation in &annotations {
-        let class = load_descriptor_class(shared, loader, &annotation.type_descriptor)?;
+        let class = match load_descriptor_class(shared, loader, &annotation.type_descriptor) {
+            Ok(class) => class,
+            Err(VmError::ClassNotFound { .. }) => continue,
+            Err(error) => return Err(error),
+        };
         if class != wanted {
             continue;
         }
@@ -375,6 +412,78 @@ fn get_annotation(
         return Ok(Some(Value::Ref(object)));
     }
     Ok(Some(Value::Ref(ObjRef::NULL)))
+}
+
+/// `Method.getDefaultValue()`: the element's `AnnotationDefault`, or null.
+fn method_get_default_value(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    _args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let member = {
+        let heap = shared.heap();
+        match heap.get(receiver).map_err(heap_error)? {
+            crate::HeapObject::Reflect(member) if member.kind == crate::MemberKind::Method => {
+                member.clone()
+            }
+            _ => {
+                return Err(VmError::Native(
+                    "Method.getDefaultValue receiver is not a Method".to_owned(),
+                ));
+            }
+        }
+    };
+    let entry = shared
+        .entry(member.class)
+        .ok_or_else(|| VmError::Loader(format!("class id {} is not loaded", member.class.0)))?;
+    let metadata = entry.metadata()?;
+    let Some(method) = metadata
+        .methods
+        .iter()
+        .find(|method| method.name == member.name && method.descriptor == member.descriptor)
+    else {
+        return Err(VmError::Native(format!(
+            "Method.getDefaultValue could not find {}{}",
+            member.name, member.descriptor
+        )));
+    };
+    let Some(default) = method.annotation_default.as_ref() else {
+        return Ok(Some(Value::Ref(ObjRef::NULL)));
+    };
+    let return_descriptor = method
+        .descriptor
+        .rsplit_once(')')
+        .map(|(_, return_type)| return_type)
+        .unwrap_or("Ljava/lang/Object;");
+    let value = element_to_value(shared, entry.loader, return_descriptor, default)?;
+    // `Method.getDefaultValue` returns `Object`, so a primitive default is boxed exactly
+    // as the JDK boxes it. `long`/`float`/`double` have no box representation in this
+    // slice yet and are returned as their unboxed value.
+    let value = match (return_descriptor, value) {
+        ("Z", Value::Int(raw)) => Value::Ref(shared.heap().allocate_boxed_boolean(raw != 0)),
+        ("C", Value::Int(raw)) => {
+            let character = char::from_u32(raw as u32).unwrap_or('\0');
+            Value::Ref(shared.heap().allocate_boxed_char(character))
+        }
+        ("B" | "S" | "I", Value::Int(raw)) => Value::Ref(shared.box_int(raw)),
+        (_, value) => value,
+    };
+    Ok(Some(value))
+}
+
+/// `AnnotatedElement.isAnnotationPresent(Class)`: whether `getAnnotation` finds it.
+fn is_annotation_present(
+    shared: &Shared,
+    thread: &ThreadState,
+    loader: LoaderId,
+    receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let found = get_annotation(shared, thread, loader, receiver, args)?;
+    let present = matches!(found, Some(Value::Ref(reference)) if !reference.is_null());
+    Ok(Some(Value::Int(i32::from(present))))
 }
 
 /// Answer one annotation instance's member, or `None` when the name is not an annotation
@@ -857,11 +966,91 @@ fn enum_name(
     receiver: ObjRef,
     _args: &[Value],
 ) -> Result<Option<Value>, VmError> {
-    let constant = {
+    let name = {
         let heap = shared.heap();
-        heap.enum_constant(receiver).map_err(heap_error)?.clone()
+        match heap.get(receiver).map_err(heap_error)? {
+            crate::HeapObject::Enum(constant) => constant.name.clone(),
+            crate::HeapObject::Instance(_) => shared.enum_name(receiver).ok_or_else(|| {
+                VmError::Native("Enum.name before the enum constructor ran".to_owned())
+            })?,
+            _ => {
+                return Err(VmError::Native(
+                    "Enum.name receiver is not an enum".to_owned(),
+                ));
+            }
+        }
     };
-    Ok(Some(Value::Ref(shared.intern_string(&constant.name))))
+    Ok(Some(Value::Ref(shared.intern_string(&name))))
+}
+
+/// `Enum.<init>(String, int)`: record the constant name and ordinal on the instance.
+///
+/// The C1 `Enum` stub has no constructor `Code` and its `name`/`ordinal` fields are not
+/// part of the projected metadata, so the pair lives in [`Shared`]'s enum table.
+fn enum_init(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let Some(Value::Ref(name)) = args.first().copied() else {
+        return Err(VmError::Native(
+            "Enum.<init> expects a String name".to_owned(),
+        ));
+    };
+    let name = if name.is_null() {
+        "null".to_owned()
+    } else {
+        shared.heap().string(name).map_err(heap_error)?.to_owned()
+    };
+    let ordinal = match args.get(1).copied() {
+        Some(Value::Int(value)) => value,
+        _ => {
+            return Err(VmError::Native(
+                "Enum.<init> expects an int ordinal".to_owned(),
+            ));
+        }
+    };
+    shared.set_enum(receiver, name, ordinal);
+    Ok(None)
+}
+
+/// `Enum.ordinal()`.
+fn enum_ordinal(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    _args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let ordinal = shared.enum_ordinal(receiver).ok_or_else(|| {
+        VmError::Native("Enum.ordinal before the enum constructor ran".to_owned())
+    })?;
+    Ok(Some(Value::Int(ordinal)))
+}
+
+/// `Enum.compareTo(Enum)`: ordinal difference.
+fn enum_compare_to(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let other = match args.first().copied() {
+        Some(Value::Ref(other)) if !other.is_null() => shared.enum_ordinal(other),
+        _ => None,
+    };
+    let Some(other) = other else {
+        return Err(VmError::Native(
+            "Enum.compareTo expects an enum argument".to_owned(),
+        ));
+    };
+    let mine = shared.enum_ordinal(receiver).ok_or_else(|| {
+        VmError::Native("Enum.compareTo before the enum constructor ran".to_owned())
+    })?;
+    Ok(Some(Value::Int(mine - other)))
 }
 
 #[cfg(test)]

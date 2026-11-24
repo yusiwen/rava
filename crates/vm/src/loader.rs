@@ -112,6 +112,11 @@ impl ClassTable {
         Ok(id)
     }
 
+    /// The most recently added loader, which is the application loader the runner added.
+    pub(crate) fn last_loader(&self) -> LoaderId {
+        LoaderId((self.loaders.len() - 1) as u32)
+    }
+
     pub(crate) fn lookup(&self, loader: LoaderId, name: &str) -> Option<ClassId> {
         self.classes
             .get(&ClassKey {

@@ -22,7 +22,10 @@ use crate::loader::LoaderId;
 use crate::shared::Shared;
 use crate::thread::ThreadState;
 use crate::value::Value;
-use crate::{annotation, boxed, collections, generic, instance, maps, object, reflection, string};
+use crate::{
+    annotation, arrays, atomic, boxed, collections, exceptions, generic, instance, jul, locks,
+    maps, math, object, references, reflection, regex, string, system, thread_natives,
+};
 
 /// `java.lang.System`'s binary-stable internal name.
 const SYSTEM_CLASS: &str = "java/lang/System";
@@ -49,8 +52,21 @@ pub fn register_all(shared: &Shared) -> Result<(), VmError> {
     reflection::register_natives(shared);
     generic::register_natives(shared);
     annotation::register_natives(shared);
+    jul::register_natives(shared);
+    system::register_natives(shared);
+    atomic::register_natives(shared);
+    math::register_natives(shared);
+    arrays::register_natives(shared);
+    locks::register_natives(shared);
+    references::register_natives(shared);
+    exceptions::register_natives(shared);
+    regex::register_natives(shared);
+    thread_natives::register_natives(shared);
     register_print_stream(shared);
-    install_system_streams(shared)
+    install_system_streams(shared)?;
+    jul::install_levels(shared)?;
+    boxed::install_booleans(shared)?;
+    thread_natives::install_thread_states(shared)
 }
 
 /// Register the minimal `java.io.PrintStream` output surface.

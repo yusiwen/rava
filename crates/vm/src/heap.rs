@@ -437,6 +437,8 @@ impl MemberKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BoxedPrimitive {
     Integer(i32),
+    Character(char),
+    Boolean(bool),
 }
 
 impl BoxedPrimitive {
@@ -444,6 +446,8 @@ impl BoxedPrimitive {
     pub fn class_name(self) -> &'static str {
         match self {
             Self::Integer(_) => "java/lang/Integer",
+            Self::Character(_) => "java/lang/Character",
+            Self::Boolean(_) => "java/lang/Boolean",
         }
     }
 
@@ -451,6 +455,8 @@ impl BoxedPrimitive {
     pub fn binary_name(self) -> &'static str {
         match self {
             Self::Integer(_) => "java.lang.Integer",
+            Self::Character(_) => "java.lang.Character",
+            Self::Boolean(_) => "java.lang.Boolean",
         }
     }
 
@@ -458,6 +464,8 @@ impl BoxedPrimitive {
     pub fn as_int(self) -> Option<i32> {
         match self {
             Self::Integer(value) => Some(value),
+            Self::Character(_) => None,
+            Self::Boolean(_) => None,
         }
     }
 }
@@ -677,6 +685,192 @@ pub struct LambdaObject {
     pub captured: Vec<Value>,
 }
 
+/// A `java.util.List`-family VM object: its runtime class and its elements in index
+/// order.
+///
+/// The class is stored rather than derived from the shape, so `ArrayList`,
+/// `LinkedList` and `CopyOnWriteArrayList` keep their own identity while sharing one
+/// representation. [`crate::Shared::allocate_instance`] is the only creation entry.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ListObject {
+    pub class: ClassId,
+    pub elements: Vec<Value>,
+    /// The subclass's instance fields, in layout order. An exact `ArrayList` has none; a
+    /// Spring subclass that adds `this$0` or a cache field keeps them here.
+    pub fields: Vec<Value>,
+}
+
+/// A `java.util.Set`-family VM object: its runtime class and its elements in insertion
+/// order.
+///
+/// A set stores each element once; the insertion order is what makes `LinkedHashSet`
+/// observable. The class keeps `HashSet`, `LinkedHashSet` and `TreeSet` distinct.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SetObject {
+    pub class: ClassId,
+    pub elements: Vec<Value>,
+    /// The subclass's instance fields, in layout order.
+    pub fields: Vec<Value>,
+}
+
+/// A `java.util.Map`-family VM object: its runtime class and its `(key, value)` entries
+/// in insertion order.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MapObject {
+    pub class: ClassId,
+    pub entries: Vec<(Value, Value)>,
+    /// The subclass's instance fields, in layout order.
+    pub fields: Vec<Value>,
+}
+
+/// A `java.util.Iterator` over a snapshot of values.
+///
+/// The iterator holds its own copy of the elements, so mutating the source collection
+/// does not reorder an iteration in progress. `position` is the next index `next`
+/// returns.
+#[derive(Debug, Clone, PartialEq)]
+pub struct IteratorObject {
+    pub class: ClassId,
+    pub items: Vec<Value>,
+    pub position: usize,
+}
+
+/// One `java.util.Map.Entry`: a key and a value copied out of a map.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MapEntry {
+    pub key: Value,
+    pub value: Value,
+}
+
+/// One `java.util.Enumeration`: a snapshot and a cursor.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EnumerationObject {
+    pub items: Vec<Value>,
+    pub position: usize,
+}
+
+/// One `java.util.regex.Pattern`: its Java source text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PatternObject {
+    pub source: String,
+}
+
+/// One `java.util.regex.Matcher`: the pattern source, the input, the search position and
+/// the groups of the most recent match.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MatcherObject {
+    pub pattern: String,
+    pub input: String,
+    pub search_from: usize,
+    pub matched: bool,
+    pub start: usize,
+    pub end: usize,
+    pub groups: Vec<Option<(usize, usize)>>,
+}
+
+/// One `java.util.concurrent.locks.ReentrantLock`.
+///
+/// Single-threaded until M5: the state records ownership and reentrancy so `isLocked`,
+/// `isHeldByCurrentThread` and `getHoldCount` have the JDK's answers, while `lock` and
+/// `unlock` never block because there is only one thread.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct LockState {
+    pub held: bool,
+    pub count: usize,
+}
+
+/// One `java.util.concurrent.locks.Condition` created by `ReentrantLock.newCondition`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ConditionState {
+    pub lock: ObjRef,
+}
+
+/// One `java.util.concurrent.atomic` value.
+///
+/// The VM is single-threaded until M5, so a plain cell is enough; the read-modify-write
+/// operations are still atomic with respect to instruction dispatch, and the cell is the
+/// state a later lock implementation will guard.
+#[derive(Debug, Clone, PartialEq)]
+pub enum AtomicCell {
+    Boolean(bool),
+    Integer(i32),
+    Long(i64),
+    Reference(Value),
+}
+
+impl AtomicCell {
+    /// The internal name of the class this cell reports.
+    pub fn class_name(&self) -> &'static str {
+        match self {
+            Self::Boolean(_) => "java/util/concurrent/atomic/AtomicBoolean",
+            Self::Integer(_) => "java/util/concurrent/atomic/AtomicInteger",
+            Self::Long(_) => "java/util/concurrent/atomic/AtomicLong",
+            Self::Reference(_) => "java/util/concurrent/atomic/AtomicReference",
+        }
+    }
+}
+
+/// The nine `java.util.logging.Level` constants.
+///
+/// A level is a tiny immutable value, not an `Instance`, because the C1 `Level` stub has
+/// no constructor `Code` to initialize one. The integer values match the JDK's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum LevelKind {
+    All,
+    Finest,
+    Finer,
+    Fine,
+    Config,
+    Info,
+    Warning,
+    Severe,
+    Off,
+}
+
+impl LevelKind {
+    pub const ALL: [LevelKind; 9] = [
+        LevelKind::All,
+        LevelKind::Finest,
+        LevelKind::Finer,
+        LevelKind::Fine,
+        LevelKind::Config,
+        LevelKind::Info,
+        LevelKind::Warning,
+        LevelKind::Severe,
+        LevelKind::Off,
+    ];
+
+    /// The JDK constant name (`SEVERE`, `WARNING`, ...).
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::All => "ALL",
+            Self::Finest => "FINEST",
+            Self::Finer => "FINER",
+            Self::Fine => "FINE",
+            Self::Config => "CONFIG",
+            Self::Info => "INFO",
+            Self::Warning => "WARNING",
+            Self::Severe => "SEVERE",
+            Self::Off => "OFF",
+        }
+    }
+
+    /// The JDK numeric level.
+    pub fn value(self) -> i32 {
+        match self {
+            Self::All => i32::MIN,
+            Self::Finest => 300,
+            Self::Finer => 400,
+            Self::Fine => 500,
+            Self::Config => 700,
+            Self::Info => 800,
+            Self::Warning => 900,
+            Self::Severe => 1000,
+            Self::Off => i32::MAX,
+        }
+    }
+}
+
 #[derive(Debug)]
 pub enum HeapObject {
     Instance(Instance),
@@ -737,19 +931,39 @@ pub enum HeapObject {
     /// count and index units, and an operation that would leave a lone surrogate is a
     /// typed error, exactly as for a string.
     StringBuilder(String),
-    /// A `java.util.ArrayList`: its elements in index order.
+    /// A `java.util.List`-family object: its runtime class and elements in index order.
     ///
     /// An element is a [`Value`], so the list can hold a reference (including null) and
     /// that reference must be enumerated by [`crate::Shared::roots`]. Lists are ordinary
     /// heap objects, not permanent roots.
-    List(Vec<Value>),
-    /// A `java.util.HashMap`: its `(key, value)` entries in insertion order.
+    List(ListObject),
+    /// A `java.util.Set`-family object: its runtime class and insertion-ordered elements.
+    Set(SetObject),
+    /// A `java.util.Map`-family object: its runtime class and insertion-ordered entries.
     ///
     /// A `Vec` of pairs is the whole representation: this slice has no hashing, tree
     /// bins or resizing, and insertion order is stable. Keys and values are [`Value`]s, so
     /// both can be references (null included) and [`crate::Shared::roots`] enumerates the
     /// non-null ones. Maps are ordinary heap objects, not permanent roots.
-    Map(Vec<(Value, Value)>),
+    Map(MapObject),
+    /// A `java.util.Iterator` over a snapshot of values.
+    Iterator(IteratorObject),
+    /// One `java.util.Map.Entry`.
+    MapEntry(MapEntry),
+    /// One `java.util.logging.Level` constant.
+    LogLevel(LevelKind),
+    /// One `java.util.concurrent.atomic` cell.
+    Atomic(AtomicCell),
+    /// One `ReentrantLock`.
+    Lock(LockState),
+    /// One `Condition` bound to a lock.
+    Condition(ConditionState),
+    /// One `java.util.regex.Pattern`.
+    Pattern(PatternObject),
+    /// One `java.util.regex.Matcher`.
+    Matcher(MatcherObject),
+    /// One `java.util.Enumeration`.
+    Enumeration(EnumerationObject),
     /// A lambda object created by a `LambdaMetafactory` bootstrap.
     ///
     /// The object stores the functional interface, the implementation method and the
@@ -892,6 +1106,16 @@ impl Heap {
         self.allocate(HeapObject::Boxed(BoxedPrimitive::Integer(value)))
     }
 
+    /// Allocate a boxed `char`.
+    pub fn allocate_boxed_char(&mut self, value: char) -> ObjRef {
+        self.allocate(HeapObject::Boxed(BoxedPrimitive::Character(value)))
+    }
+
+    /// Allocate a boxed `boolean`.
+    pub fn allocate_boxed_boolean(&mut self, value: bool) -> ObjRef {
+        self.allocate(HeapObject::Boxed(BoxedPrimitive::Boolean(value)))
+    }
+
     /// Allocate an annotation instance. Callers go through
     /// [`crate::Shared::annotation_object`].
     pub fn allocate_annotation(&mut self, class: ClassId, values: Vec<AnnotationValue>) -> ObjRef {
@@ -914,17 +1138,197 @@ impl Heap {
         self.allocate(HeapObject::StringBuilder(String::new()))
     }
 
-    /// Allocate an empty `java.util.ArrayList`. The list's class is named by
-    /// [`crate::collections::ARRAY_LIST_CLASS`].
-    pub fn allocate_list(&mut self) -> ObjRef {
-        self.allocate(HeapObject::List(Vec::new()))
+    /// Allocate an empty list of the given runtime class.
+    pub fn allocate_list(&mut self, class: ClassId) -> ObjRef {
+        self.allocate_list_with_fields(class, Vec::new())
     }
 
-    /// Allocate an empty `java.util.HashMap`. The map's class is named by
-    /// [`crate::maps::HASH_MAP_CLASS`]; [`crate::Shared::allocate_instance`] is the entry
-    /// point that creates one for `new` and reflection.
-    pub fn allocate_map(&mut self) -> ObjRef {
-        self.allocate(HeapObject::Map(Vec::new()))
+    /// Allocate a list whose subclass fields start at their default values.
+    pub fn allocate_list_with_fields(&mut self, class: ClassId, fields: Vec<Value>) -> ObjRef {
+        self.allocate(HeapObject::List(ListObject {
+            class,
+            elements: Vec::new(),
+            fields,
+        }))
+    }
+
+    /// Allocate an empty set of the given runtime class.
+    pub fn allocate_set(&mut self, class: ClassId) -> ObjRef {
+        self.allocate_set_with_fields(class, Vec::new())
+    }
+
+    /// Allocate a set whose subclass fields start at their default values.
+    pub fn allocate_set_with_fields(&mut self, class: ClassId, fields: Vec<Value>) -> ObjRef {
+        self.allocate(HeapObject::Set(SetObject {
+            class,
+            elements: Vec::new(),
+            fields,
+        }))
+    }
+
+    /// Allocate an empty map of the given runtime class.
+    pub fn allocate_map(&mut self, class: ClassId) -> ObjRef {
+        self.allocate_map_with_fields(class, Vec::new())
+    }
+
+    /// Allocate a map whose subclass fields start at their default values.
+    pub fn allocate_map_with_fields(&mut self, class: ClassId, fields: Vec<Value>) -> ObjRef {
+        self.allocate(HeapObject::Map(MapObject {
+            class,
+            entries: Vec::new(),
+            fields,
+        }))
+    }
+
+    /// Allocate an iterator over a snapshot of `items`.
+    pub fn allocate_iterator(&mut self, class: ClassId, items: Vec<Value>) -> ObjRef {
+        self.allocate(HeapObject::Iterator(IteratorObject {
+            class,
+            items,
+            position: 0,
+        }))
+    }
+
+    /// Allocate a `Map.Entry` holding one pair.
+    pub fn allocate_map_entry(&mut self, key: Value, value: Value) -> ObjRef {
+        self.allocate(HeapObject::MapEntry(MapEntry { key, value }))
+    }
+
+    /// Allocate one `java.util.logging.Level` constant.
+    pub fn allocate_log_level(&mut self, kind: LevelKind) -> ObjRef {
+        self.allocate(HeapObject::LogLevel(kind))
+    }
+
+    /// Allocate one atomic cell.
+    pub fn allocate_atomic(&mut self, cell: AtomicCell) -> ObjRef {
+        self.allocate(HeapObject::Atomic(cell))
+    }
+
+    /// Allocate one unlocked reentrant lock.
+    pub fn allocate_lock(&mut self) -> ObjRef {
+        self.allocate(HeapObject::Lock(LockState::default()))
+    }
+
+    /// Allocate one condition bound to `lock`.
+    pub fn allocate_condition(&mut self, lock: ObjRef) -> ObjRef {
+        self.allocate(HeapObject::Condition(ConditionState { lock }))
+    }
+
+    /// Allocate an enumeration over a snapshot of values.
+    pub fn allocate_enumeration(&mut self, items: Vec<Value>) -> ObjRef {
+        self.allocate(HeapObject::Enumeration(EnumerationObject {
+            items,
+            position: 0,
+        }))
+    }
+
+    /// The mutable state behind an enumeration reference.
+    pub fn enumeration_mut(
+        &mut self,
+        reference: ObjRef,
+    ) -> Result<&mut EnumerationObject, HeapError> {
+        match self.get_mut(reference)? {
+            HeapObject::Enumeration(enumeration) => Ok(enumeration),
+            _ => Err(HeapError::WrongObjectKind {
+                reference,
+                expected: "an Enumeration",
+            }),
+        }
+    }
+
+    /// Allocate one compiled-pattern object.
+    pub fn allocate_pattern(&mut self, source: String) -> ObjRef {
+        self.allocate(HeapObject::Pattern(PatternObject { source }))
+    }
+
+    /// Allocate one matcher over `input`.
+    pub fn allocate_matcher(&mut self, pattern: String, input: String) -> ObjRef {
+        self.allocate(HeapObject::Matcher(MatcherObject {
+            pattern,
+            input,
+            search_from: 0,
+            matched: false,
+            start: 0,
+            end: 0,
+            groups: Vec::new(),
+        }))
+    }
+
+    /// The state behind a matcher reference.
+    pub fn matcher(&self, reference: ObjRef) -> Result<&MatcherObject, HeapError> {
+        match self.get(reference)? {
+            HeapObject::Matcher(matcher) => Ok(matcher),
+            _ => Err(HeapError::WrongObjectKind {
+                reference,
+                expected: "a Matcher",
+            }),
+        }
+    }
+
+    /// The mutable state behind a matcher reference.
+    pub fn matcher_mut(&mut self, reference: ObjRef) -> Result<&mut MatcherObject, HeapError> {
+        match self.get_mut(reference)? {
+            HeapObject::Matcher(matcher) => Ok(matcher),
+            _ => Err(HeapError::WrongObjectKind {
+                reference,
+                expected: "a Matcher",
+            }),
+        }
+    }
+
+    /// The source text behind a pattern reference.
+    pub fn pattern(&self, reference: ObjRef) -> Result<&str, HeapError> {
+        match self.get(reference)? {
+            HeapObject::Pattern(pattern) => Ok(&pattern.source),
+            _ => Err(HeapError::WrongObjectKind {
+                reference,
+                expected: "a Pattern",
+            }),
+        }
+    }
+
+    /// The state behind a lock reference.
+    pub fn lock_state(&self, reference: ObjRef) -> Result<&LockState, HeapError> {
+        match self.get(reference)? {
+            HeapObject::Lock(state) => Ok(state),
+            _ => Err(HeapError::WrongObjectKind {
+                reference,
+                expected: "a ReentrantLock",
+            }),
+        }
+    }
+
+    /// The mutable state behind a lock reference.
+    pub fn lock_state_mut(&mut self, reference: ObjRef) -> Result<&mut LockState, HeapError> {
+        match self.get_mut(reference)? {
+            HeapObject::Lock(state) => Ok(state),
+            _ => Err(HeapError::WrongObjectKind {
+                reference,
+                expected: "a ReentrantLock",
+            }),
+        }
+    }
+
+    /// The cell behind an atomic reference.
+    pub fn atomic(&self, reference: ObjRef) -> Result<&AtomicCell, HeapError> {
+        match self.get(reference)? {
+            HeapObject::Atomic(cell) => Ok(cell),
+            _ => Err(HeapError::WrongObjectKind {
+                reference,
+                expected: "an atomic cell",
+            }),
+        }
+    }
+
+    /// The mutable cell behind an atomic reference.
+    pub fn atomic_mut(&mut self, reference: ObjRef) -> Result<&mut AtomicCell, HeapError> {
+        match self.get_mut(reference)? {
+            HeapObject::Atomic(cell) => Ok(cell),
+            _ => Err(HeapError::WrongObjectKind {
+                reference,
+                expected: "an atomic cell",
+            }),
+        }
     }
 
     /// Allocate a lambda object. Callers go through [`crate::Shared::allocate_lambda`],
@@ -963,10 +1367,52 @@ impl Heap {
         }
     }
 
-    /// The elements behind a `java.util.ArrayList` reference.
+    /// The runtime class of an instance or VM container.
+    pub fn object_class(&self, reference: ObjRef) -> Result<ClassId, HeapError> {
+        match self.get(reference)? {
+            HeapObject::Instance(instance) => Ok(instance.class),
+            HeapObject::List(list) => Ok(list.class),
+            HeapObject::Set(set) => Ok(set.class),
+            HeapObject::Map(map) => Ok(map.class),
+            _ => Err(HeapError::WrongObjectKind {
+                reference,
+                expected: "an instance or container",
+            }),
+        }
+    }
+
+    /// The instance fields behind an instance or VM container.
+    pub fn object_fields(&self, reference: ObjRef) -> Result<&[Value], HeapError> {
+        match self.get(reference)? {
+            HeapObject::Instance(instance) => Ok(&instance.fields),
+            HeapObject::List(list) => Ok(&list.fields),
+            HeapObject::Set(set) => Ok(&set.fields),
+            HeapObject::Map(map) => Ok(&map.fields),
+            _ => Err(HeapError::WrongObjectKind {
+                reference,
+                expected: "an instance or container",
+            }),
+        }
+    }
+
+    /// The mutable instance fields behind an instance or VM container.
+    pub fn object_fields_mut(&mut self, reference: ObjRef) -> Result<&mut Vec<Value>, HeapError> {
+        match self.get_mut(reference)? {
+            HeapObject::Instance(instance) => Ok(&mut instance.fields),
+            HeapObject::List(list) => Ok(&mut list.fields),
+            HeapObject::Set(set) => Ok(&mut set.fields),
+            HeapObject::Map(map) => Ok(&mut map.fields),
+            _ => Err(HeapError::WrongObjectKind {
+                reference,
+                expected: "an instance or container",
+            }),
+        }
+    }
+
+    /// The elements behind a list reference.
     pub fn list(&self, reference: ObjRef) -> Result<&[Value], HeapError> {
         match self.get(reference)? {
-            HeapObject::List(elements) => Ok(elements),
+            HeapObject::List(list) => Ok(&list.elements),
             _ => Err(HeapError::WrongObjectKind {
                 reference,
                 expected: "a list",
@@ -974,10 +1420,10 @@ impl Heap {
         }
     }
 
-    /// The mutable elements behind a `java.util.ArrayList` reference.
+    /// The mutable elements behind a list reference.
     pub fn list_mut(&mut self, reference: ObjRef) -> Result<&mut Vec<Value>, HeapError> {
         match self.get_mut(reference)? {
-            HeapObject::List(elements) => Ok(elements),
+            HeapObject::List(list) => Ok(&mut list.elements),
             _ => Err(HeapError::WrongObjectKind {
                 reference,
                 expected: "a list",
@@ -985,10 +1431,32 @@ impl Heap {
         }
     }
 
-    /// The `(key, value)` entries behind a `java.util.HashMap` reference.
+    /// The elements behind a set reference.
+    pub fn set(&self, reference: ObjRef) -> Result<&[Value], HeapError> {
+        match self.get(reference)? {
+            HeapObject::Set(set) => Ok(&set.elements),
+            _ => Err(HeapError::WrongObjectKind {
+                reference,
+                expected: "a set",
+            }),
+        }
+    }
+
+    /// The mutable elements behind a set reference.
+    pub fn set_mut(&mut self, reference: ObjRef) -> Result<&mut Vec<Value>, HeapError> {
+        match self.get_mut(reference)? {
+            HeapObject::Set(set) => Ok(&mut set.elements),
+            _ => Err(HeapError::WrongObjectKind {
+                reference,
+                expected: "a set",
+            }),
+        }
+    }
+
+    /// The `(key, value)` entries behind a map reference.
     pub fn map(&self, reference: ObjRef) -> Result<&[(Value, Value)], HeapError> {
         match self.get(reference)? {
-            HeapObject::Map(entries) => Ok(entries),
+            HeapObject::Map(map) => Ok(&map.entries),
             _ => Err(HeapError::WrongObjectKind {
                 reference,
                 expected: "a map",
@@ -996,13 +1464,48 @@ impl Heap {
         }
     }
 
-    /// The mutable `(key, value)` entries behind a `java.util.HashMap` reference.
+    /// The runtime class of a VM container, if `reference` is one.
+    pub fn container_class(&self, reference: ObjRef) -> Result<ClassId, HeapError> {
+        match self.get(reference)? {
+            HeapObject::List(list) => Ok(list.class),
+            HeapObject::Set(set) => Ok(set.class),
+            HeapObject::Map(map) => Ok(map.class),
+            _ => Err(HeapError::WrongObjectKind {
+                reference,
+                expected: "a list, set or map",
+            }),
+        }
+    }
+
+    /// The mutable `(key, value)` entries behind a map reference.
     pub fn map_mut(&mut self, reference: ObjRef) -> Result<&mut Vec<(Value, Value)>, HeapError> {
         match self.get_mut(reference)? {
-            HeapObject::Map(entries) => Ok(entries),
+            HeapObject::Map(map) => Ok(&mut map.entries),
             _ => Err(HeapError::WrongObjectKind {
                 reference,
                 expected: "a map",
+            }),
+        }
+    }
+
+    /// The mutable iterator state behind an iterator reference.
+    pub fn iterator_mut(&mut self, reference: ObjRef) -> Result<&mut IteratorObject, HeapError> {
+        match self.get_mut(reference)? {
+            HeapObject::Iterator(iterator) => Ok(iterator),
+            _ => Err(HeapError::WrongObjectKind {
+                reference,
+                expected: "an iterator",
+            }),
+        }
+    }
+
+    /// The two values behind a `Map.Entry` reference.
+    pub fn map_entry(&self, reference: ObjRef) -> Result<&MapEntry, HeapError> {
+        match self.get(reference)? {
+            HeapObject::MapEntry(entry) => Ok(entry),
+            _ => Err(HeapError::WrongObjectKind {
+                reference,
+                expected: "a map entry",
             }),
         }
     }
@@ -1047,6 +1550,16 @@ impl Heap {
             _ => Err(HeapError::WrongObjectKind {
                 reference,
                 expected: "a lambda",
+            }),
+        }
+    }
+
+    pub fn string_mut(&mut self, reference: ObjRef) -> Result<&mut String, HeapError> {
+        match self.get_mut(reference)? {
+            HeapObject::Str(text) => Ok(text),
+            _ => Err(HeapError::WrongObjectKind {
+                reference,
+                expected: "a String",
             }),
         }
     }

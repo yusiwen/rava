@@ -60,6 +60,92 @@ pub fn register_natives(shared: &Shared) {
         "(Ljava/lang/Integer;)I",
         integer_compare_to,
     );
+    register_character_natives(shared);
+    shared.register_native(
+        "java/lang/Boolean",
+        "valueOf",
+        "(Z)Ljava/lang/Boolean;",
+        boolean_value_of,
+    );
+    shared.register_native(
+        "java/lang/Boolean",
+        "booleanValue",
+        "()Z",
+        boolean_boolean_value,
+    );
+    shared.register_native(
+        "java/lang/Boolean",
+        "parseBoolean",
+        "(Ljava/lang/String;)Z",
+        boolean_parse,
+    );
+    shared.register_native(
+        "java/lang/Boolean",
+        "toString",
+        "(Z)Ljava/lang/String;",
+        boolean_to_string_of,
+    );
+    shared.register_native(
+        "java/lang/Boolean",
+        "toString",
+        "()Ljava/lang/String;",
+        boolean_to_string,
+    );
+    shared.register_native("java/lang/Boolean", "hashCode", "()I", boolean_hash_code);
+    shared.register_native(
+        "java/lang/Boolean",
+        "equals",
+        "(Ljava/lang/Object;)Z",
+        boolean_equals,
+    );
+    shared.register_native(
+        "java/lang/Character",
+        "valueOf",
+        "(C)Ljava/lang/Character;",
+        character_value_of,
+    );
+    shared.register_native(
+        "java/lang/Character",
+        "charValue",
+        "()C",
+        character_char_value,
+    );
+    shared.register_native(
+        "java/lang/Character",
+        "toString",
+        "()Ljava/lang/String;",
+        character_box_to_string,
+    );
+    shared.register_native(
+        "java/lang/Character",
+        "hashCode",
+        "()I",
+        character_hash_code,
+    );
+    shared.register_native(
+        "java/lang/Character",
+        "equals",
+        "(Ljava/lang/Object;)Z",
+        character_equals,
+    );
+    shared.register_native(
+        "java/lang/Integer",
+        "toHexString",
+        "(I)Ljava/lang/String;",
+        integer_to_hex_string,
+    );
+    shared.register_native(
+        "java/lang/Integer",
+        "toBinaryString",
+        "(I)Ljava/lang/String;",
+        integer_to_binary_string,
+    );
+    shared.register_native(
+        "java/lang/Integer",
+        "toOctalString",
+        "(I)Ljava/lang/String;",
+        integer_to_octal_string,
+    );
     shared.register_native(
         "java/lang/Integer",
         "parseInt",
@@ -310,4 +396,594 @@ fn integer_parse_int(
         .parse::<i32>()
         .map_err(|_| VmError::Native(format!("Integer.parseInt: {text:?} is not a decimal int")))?;
     Ok(Some(Value::Int(value)))
+}
+
+/// `Integer.toHexString(int)`: the unsigned hexadecimal text of the two's-complement bits.
+fn integer_to_hex_string(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let value = int_argument(args, 0, "Integer.toHexString")?;
+    let text = shared.intern_string(&format!("{:x}", value as u32));
+    Ok(Some(Value::Ref(text)))
+}
+
+/// `Integer.toBinaryString(int)`.
+fn integer_to_binary_string(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let value = int_argument(args, 0, "Integer.toBinaryString")?;
+    let text = shared.intern_string(&format!("{:b}", value as u32));
+    Ok(Some(Value::Ref(text)))
+}
+
+/// `Integer.toOctalString(int)`.
+fn integer_to_octal_string(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let value = int_argument(args, 0, "Integer.toOctalString")?;
+    let text = shared.intern_string(&format!("{:o}", value as u32));
+    Ok(Some(Value::Ref(text)))
+}
+
+/// Register the `java.lang.Character` classification surface Spring's string utilities use.
+fn register_character_natives(shared: &Shared) {
+    let class = "java/lang/Character";
+    for (name, function) in [
+        ("isUpperCase", character_is_upper as crate::NativeFn),
+        ("isLowerCase", character_is_lower),
+        ("isDigit", character_is_digit),
+        ("isLetter", character_is_letter),
+        ("isLetterOrDigit", character_is_letter_or_digit),
+        ("isWhitespace", character_is_whitespace),
+        ("isSpaceChar", character_is_space_char),
+        ("isAlphabetic", character_is_alphabetic),
+        ("isJavaIdentifierStart", character_is_java_identifier_start),
+        ("isJavaIdentifierPart", character_is_java_identifier_part),
+        ("isSurrogate", character_is_surrogate),
+    ] {
+        shared.register_native(class, name, "(C)Z", function);
+    }
+    shared.register_native(class, "toLowerCase", "(C)C", character_to_lower);
+    shared.register_native(class, "toUpperCase", "(C)C", character_to_upper);
+    shared.register_native(
+        class,
+        "toString",
+        "(C)Ljava/lang/String;",
+        character_to_string,
+    );
+    shared.register_native(class, "digit", "(CI)I", character_digit);
+    shared.register_native(class, "forDigit", "(II)C", character_for_digit);
+}
+
+fn character_unit(args: &[Value], position: usize, method: &'static str) -> Result<u16, VmError> {
+    match args.get(position).copied() {
+        Some(Value::Int(value)) if (0..=0xffff).contains(&value) => Ok(value as u16),
+        _ => Err(VmError::Native(format!("{method} expects a char argument"))),
+    }
+}
+
+fn character_predicate(
+    args: &[Value],
+    method: &'static str,
+    predicate: impl FnOnce(char) -> bool,
+) -> Result<Option<Value>, VmError> {
+    let unit = character_unit(args, 0, method)?;
+    let result = char::from_u32(u32::from(unit))
+        .map(predicate)
+        .unwrap_or(false);
+    Ok(Some(Value::Int(i32::from(result))))
+}
+
+fn character_is_upper(
+    _shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    character_predicate(args, "Character.isUpperCase", char::is_uppercase)
+}
+
+fn character_is_lower(
+    _shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    character_predicate(args, "Character.isLowerCase", char::is_lowercase)
+}
+
+fn character_is_digit(
+    _shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    character_predicate(args, "Character.isDigit", |character| {
+        character.is_ascii_digit()
+    })
+}
+
+fn character_is_letter(
+    _shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    character_predicate(args, "Character.isLetter", char::is_alphabetic)
+}
+
+fn character_is_letter_or_digit(
+    _shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    character_predicate(args, "Character.isLetterOrDigit", char::is_alphanumeric)
+}
+
+fn character_is_whitespace(
+    _shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    character_predicate(args, "Character.isWhitespace", char::is_whitespace)
+}
+
+fn character_is_space_char(
+    _shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    character_predicate(args, "Character.isSpaceChar", char::is_whitespace)
+}
+
+fn character_is_alphabetic(
+    _shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    character_predicate(args, "Character.isAlphabetic", char::is_alphabetic)
+}
+
+fn character_is_java_identifier_start(
+    _shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    character_predicate(args, "Character.isJavaIdentifierStart", |character| {
+        character == '$' || character == '_' || character.is_alphabetic()
+    })
+}
+
+fn character_is_java_identifier_part(
+    _shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    character_predicate(args, "Character.isJavaIdentifierPart", |character| {
+        character == '$' || character == '_' || character.is_alphanumeric()
+    })
+}
+
+fn character_is_surrogate(
+    _shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let unit = character_unit(args, 0, "Character.isSurrogate")?;
+    Ok(Some(Value::Int(i32::from(
+        (0xd800..=0xdfff).contains(&unit),
+    ))))
+}
+
+fn character_to_lower(
+    _shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let unit = character_unit(args, 0, "Character.toLowerCase")?;
+    let converted = char::from_u32(u32::from(unit))
+        .and_then(|character| character.to_lowercase().next())
+        .unwrap_or_else(|| char::from_u32(u32::from(unit)).unwrap_or('\0'));
+    Ok(Some(Value::Int(i32::from(converted as u16))))
+}
+
+fn character_to_upper(
+    _shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let unit = character_unit(args, 0, "Character.toUpperCase")?;
+    let converted = char::from_u32(u32::from(unit))
+        .and_then(|character| character.to_uppercase().next())
+        .unwrap_or_else(|| char::from_u32(u32::from(unit)).unwrap_or('\0'));
+    Ok(Some(Value::Int(i32::from(converted as u16))))
+}
+
+fn character_to_string(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let unit = character_unit(args, 0, "Character.toString")?;
+    let text = String::from_utf16_lossy(&[unit]);
+    let text = shared.intern_string(&text);
+    Ok(Some(Value::Ref(text)))
+}
+
+fn character_digit(
+    _shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let unit = character_unit(args, 0, "Character.digit")?;
+    let radix = match args.get(1).copied() {
+        Some(Value::Int(value)) => value,
+        _ => {
+            return Err(VmError::Native(
+                "Character.digit expects a radix".to_owned(),
+            ));
+        }
+    };
+    let digit = char::from_u32(u32::from(unit))
+        .and_then(|character| character.to_digit(radix as u32))
+        .map(|digit| digit as i32)
+        .unwrap_or(-1);
+    Ok(Some(Value::Int(digit)))
+}
+
+fn character_for_digit(
+    _shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let digit = match args.first().copied() {
+        Some(Value::Int(value)) => value,
+        _ => {
+            return Err(VmError::Native(
+                "Character.forDigit expects a digit".to_owned(),
+            ));
+        }
+    };
+    let radix = match args.get(1).copied() {
+        Some(Value::Int(value)) => value,
+        _ => {
+            return Err(VmError::Native(
+                "Character.forDigit expects a radix".to_owned(),
+            ));
+        }
+    };
+    let character = char::from_digit(digit as u32, radix as u32).unwrap_or('\0');
+    Ok(Some(Value::Int(i32::from(character as u16))))
+}
+
+fn character_value_of(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let unit = character_unit(args, 0, "Character.valueOf")?;
+    let character = char::from_u32(u32::from(unit)).unwrap_or('\0');
+    let boxed = shared.heap().allocate_boxed_char(character);
+    Ok(Some(Value::Ref(boxed)))
+}
+
+fn character_char_value(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    _args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let character = {
+        let heap = shared.heap();
+        match heap
+            .get(receiver)
+            .map_err(|error| VmError::Native(error.to_string()))?
+        {
+            crate::heap::HeapObject::Boxed(crate::heap::BoxedPrimitive::Character(value)) => *value,
+            _ => {
+                return Err(VmError::Native(
+                    "Character.charValue receiver is not a Character".to_owned(),
+                ));
+            }
+        }
+    };
+    Ok(Some(Value::Int(i32::from(character as u16))))
+}
+
+fn character_box_to_string(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    _args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let character = {
+        let heap = shared.heap();
+        match heap
+            .get(receiver)
+            .map_err(|error| VmError::Native(error.to_string()))?
+        {
+            crate::heap::HeapObject::Boxed(crate::heap::BoxedPrimitive::Character(value)) => *value,
+            _ => {
+                return Err(VmError::Native(
+                    "Character.toString receiver is not a Character".to_owned(),
+                ));
+            }
+        }
+    };
+    let text = shared.intern_string(&character.to_string());
+    Ok(Some(Value::Ref(text)))
+}
+
+fn character_hash_code(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    _args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let character = {
+        let heap = shared.heap();
+        match heap
+            .get(receiver)
+            .map_err(|error| VmError::Native(error.to_string()))?
+        {
+            crate::heap::HeapObject::Boxed(crate::heap::BoxedPrimitive::Character(value)) => *value,
+            _ => {
+                return Err(VmError::Native(
+                    "Character.hashCode receiver is not a Character".to_owned(),
+                ));
+            }
+        }
+    };
+    Ok(Some(Value::Int(i32::from(character as u16))))
+}
+
+fn character_equals(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let other = match args.first().copied() {
+        Some(Value::Ref(reference)) if !reference.is_null() => reference,
+        _ => return Ok(Some(Value::Int(0))),
+    };
+    let equal = {
+        let heap = shared.heap();
+        match (
+            heap.get(receiver)
+                .map_err(|error| VmError::Native(error.to_string()))?,
+            heap.get(other)
+                .map_err(|error| VmError::Native(error.to_string()))?,
+        ) {
+            (
+                crate::heap::HeapObject::Boxed(crate::heap::BoxedPrimitive::Character(left)),
+                crate::heap::HeapObject::Boxed(crate::heap::BoxedPrimitive::Character(right)),
+            ) => left == right,
+            _ => false,
+        }
+    };
+    Ok(Some(Value::Int(i32::from(equal))))
+}
+
+fn bool_argument(args: &[Value], position: usize, method: &'static str) -> Result<bool, VmError> {
+    match args.get(position).copied() {
+        Some(Value::Int(value)) => Ok(value != 0),
+        _ => Err(VmError::Native(format!(
+            "{method} expects a boolean argument"
+        ))),
+    }
+}
+
+fn boolean_value_of(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let value = bool_argument(args, 0, "Boolean.valueOf")?;
+    let boxed = shared.heap().allocate_boxed_boolean(value);
+    Ok(Some(Value::Ref(boxed)))
+}
+
+fn boolean_boolean_value(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    _args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let value = {
+        let heap = shared.heap();
+        match heap
+            .get(receiver)
+            .map_err(|error| VmError::Native(error.to_string()))?
+        {
+            crate::heap::HeapObject::Boxed(crate::heap::BoxedPrimitive::Boolean(value)) => *value,
+            _ => {
+                return Err(VmError::Native(
+                    "Boolean.booleanValue receiver is not a Boolean".to_owned(),
+                ));
+            }
+        }
+    };
+    Ok(Some(Value::Int(i32::from(value))))
+}
+
+fn boolean_parse(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let text = match args.first().copied() {
+        Some(Value::Ref(reference)) if !reference.is_null() => shared
+            .heap()
+            .string(reference)
+            .map_err(|error| VmError::Native(error.to_string()))?
+            .to_owned(),
+        _ => String::new(),
+    };
+    Ok(Some(Value::Int(i32::from(
+        text.eq_ignore_ascii_case("true"),
+    ))))
+}
+
+fn boolean_to_string_of(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let value = bool_argument(args, 0, "Boolean.toString")?;
+    let text = shared.intern_string(if value { "true" } else { "false" });
+    Ok(Some(Value::Ref(text)))
+}
+
+fn boolean_to_string(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    _args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let value = {
+        let heap = shared.heap();
+        match heap
+            .get(receiver)
+            .map_err(|error| VmError::Native(error.to_string()))?
+        {
+            crate::heap::HeapObject::Boxed(crate::heap::BoxedPrimitive::Boolean(value)) => *value,
+            _ => {
+                return Err(VmError::Native(
+                    "Boolean.toString receiver is not a Boolean".to_owned(),
+                ));
+            }
+        }
+    };
+    let text = shared.intern_string(if value { "true" } else { "false" });
+    Ok(Some(Value::Ref(text)))
+}
+
+fn boolean_hash_code(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    _args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let value = {
+        let heap = shared.heap();
+        match heap
+            .get(receiver)
+            .map_err(|error| VmError::Native(error.to_string()))?
+        {
+            crate::heap::HeapObject::Boxed(crate::heap::BoxedPrimitive::Boolean(value)) => *value,
+            _ => {
+                return Err(VmError::Native(
+                    "Boolean.hashCode receiver is not a Boolean".to_owned(),
+                ));
+            }
+        }
+    };
+    Ok(Some(Value::Int(if value { 1231 } else { 1237 })))
+}
+
+fn boolean_equals(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let other = match args.first().copied() {
+        Some(Value::Ref(reference)) if !reference.is_null() => reference,
+        _ => return Ok(Some(Value::Int(0))),
+    };
+    let equal = {
+        let heap = shared.heap();
+        match (
+            heap.get(receiver)
+                .map_err(|error| VmError::Native(error.to_string()))?,
+            heap.get(other)
+                .map_err(|error| VmError::Native(error.to_string()))?,
+        ) {
+            (
+                crate::heap::HeapObject::Boxed(crate::heap::BoxedPrimitive::Boolean(left)),
+                crate::heap::HeapObject::Boxed(crate::heap::BoxedPrimitive::Boolean(right)),
+            ) => left == right,
+            _ => false,
+        }
+    };
+    Ok(Some(Value::Int(i32::from(equal))))
+}
+
+/// Install `Boolean.TRUE`/`Boolean.FALSE`, which the C1 stub cannot initialize itself.
+pub fn install_booleans(shared: &Shared) -> Result<(), VmError> {
+    let class = shared.load_library_class("java/lang/Boolean")?;
+    let mut values = Vec::new();
+    for value in [true, false] {
+        let object = shared.heap().allocate_boxed_boolean(value);
+        values.push((
+            if value { "TRUE" } else { "FALSE" }.to_owned(),
+            "Ljava/lang/Boolean;".to_owned(),
+            Value::Ref(object),
+        ));
+    }
+    let entry = shared
+        .entry(class)
+        .ok_or_else(|| VmError::Loader(format!("class id {} is not loaded", class.0)))?;
+    let mut statics = entry.statics.lock().expect("static field lock poisoned");
+    for (name, descriptor, value) in values {
+        statics.insert((name, descriptor), value);
+    }
+    Ok(())
 }
