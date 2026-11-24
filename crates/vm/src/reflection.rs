@@ -1,13 +1,16 @@
-//! `Object`/`Class` reflection natives (M2.4) and reflected members (M2.8).
+//! `Object`/`Class` reflection natives (M2.4), reflected members (M2.8) and field
+//! access (M2.10).
 //!
 //! The surface here is deliberately small. M2.4 supplies the six class-object methods
 //! plus `Object.getClass`: names, modifiers, interface/array flags, the superclass and
 //! bootstrap `Class.forName`. M2.8 adds the declared-member queries and read-only
 //! `Field`, `Method` and `Constructor` objects: the declaring class, name, modifiers,
-//! field type, return type, parameter types and parameter count. Reflective invocation
-//! (`Field.get/set`, `Method.invoke`, `Constructor.newInstance`), annotations, generic
-//! types and inherited-member lookup are later slices; nothing in this module performs
-//! them.
+//! field type, return type, parameter types and parameter count. M2.10 adds `Field.get`
+//! and `Field.set` for `int` and reference fields, boxing an `int` on read and unboxing
+//! a boxed `Integer` on write. `Method.invoke` and `Constructor.newInstance` need the
+//! interpreter's execution machinery, so they live in `rava-interp` instead of this
+//! crate; annotations, generic types, inherited-member lookup and access checks remain
+//! later slices.
 //!
 //! The natives read the class table rather than caching a second copy of the metadata:
 //! a class object is only a [`crate::ClassId`], and every answer comes from that
@@ -18,6 +21,7 @@
 //! have no observable `<clinit>`.
 
 use crate::VmError;
+use crate::boxed;
 use crate::heap::{ArrayKind, HeapError, MemberKind, ObjRef, ReflectMember};
 use crate::loader::{ClassId, LoaderId};
 use crate::shared::Shared;
@@ -126,6 +130,18 @@ pub fn register_natives(shared: &Shared) {
         "getType",
         "()Ljava/lang/Class;",
         field_get_type,
+    );
+    shared.register_native(
+        "java/lang/reflect/Field",
+        "get",
+        "(Ljava/lang/Object;)Ljava/lang/Object;",
+        field_get,
+    );
+    shared.register_native(
+        "java/lang/reflect/Field",
+        "set",
+        "(Ljava/lang/Object;Ljava/lang/Object;)V",
+        field_set,
     );
     shared.register_native(
         "java/lang/reflect/Method",
@@ -484,6 +500,211 @@ fn field_get_type(
     Ok(Some(Value::Ref(object)))
 }
 
+/// The typed metadata of one field, with the descriptor the member object claims.
+struct FieldView {
+    descriptor: String,
+    is_static: bool,
+}
+
+/// Read a reflected field's metadata and check it still matches the member identity.
+fn field_view(shared: &Shared, member: &ReflectMember) -> Result<FieldView, VmError> {
+    let entry = shared
+        .entry(member.class)
+        .ok_or_else(|| VmError::Loader(format!("class id {} is not loaded", member.class.0)))?;
+    let metadata = entry.metadata()?;
+    let field = metadata
+        .field(&member.name)
+        .filter(|field| field.descriptor == member.descriptor)
+        .ok_or_else(|| {
+            VmError::Native(format!(
+                "class {} has no field {}:{}",
+                entry.name, member.name, member.descriptor
+            ))
+        })?;
+    Ok(FieldView {
+        descriptor: field.descriptor.clone(),
+        is_static: field.is_static(),
+    })
+}
+
+/// `Field.get(Object)`: read an instance field and box an `int` result.
+///
+/// M2.10 supports instance fields only: a static field is a typed mismatch rather than a
+/// silent read with an ignored receiver. The receiver must be an instance assignable to
+/// the declaring class, and the value is converted with [`boxed::box_result`], so an
+/// `int` becomes a `java.lang.Integer` box and a reference keeps its handle. There is no
+/// access check, so a private field reads like a public one.
+fn field_get(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let member = member_of(shared, receiver)?;
+    require_field(&member, "Field.get")?;
+    let view = field_view(shared, &member)?;
+    require_instance_field(shared, &view, &member, "Field.get")?;
+    let (target, actual) = field_receiver(shared, &member, args, 0, "Field.get")?;
+    let slot = field_slot(shared, actual, &member)?;
+    let value = {
+        let heap = shared.heap();
+        heap.instance(target)
+            .map_err(heap_error)?
+            .fields
+            .get(slot)
+            .copied()
+            .ok_or_else(|| {
+                VmError::Native(format!("Field.get: slot {slot} is outside the instance"))
+            })?
+    };
+    let result = boxed::box_result(shared, &view.descriptor, Some(value))?;
+    Ok(Some(result))
+}
+
+/// `Field.set(Object, Object)`: write an instance field, unboxing an `int` value.
+///
+/// The descriptor decides the conversion: `I` requires a boxed `Integer`, a reference
+/// descriptor passes the handle through (null included), and any other primitive
+/// descriptor is a typed error. A static field and a non-assignable receiver are
+/// rejected exactly as in [`field_get`].
+fn field_set(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let member = member_of(shared, receiver)?;
+    require_field(&member, "Field.set")?;
+    let view = field_view(shared, &member)?;
+    require_instance_field(shared, &view, &member, "Field.set")?;
+    let (target, actual) = field_receiver(shared, &member, args, 0, "Field.set")?;
+    let Some(value) = args.get(1).copied() else {
+        return Err(VmError::Native(
+            "Field.set is missing its value argument".to_owned(),
+        ));
+    };
+    let value = boxed::unbox_argument(shared, &view.descriptor, value)?;
+    let slot = field_slot(shared, actual, &member)?;
+    {
+        let mut heap = shared.heap();
+        let instance = heap.instance_mut(target).map_err(heap_error)?;
+        let slot_value = instance.fields.get_mut(slot).ok_or_else(|| {
+            VmError::Native(format!("Field.set: slot {slot} is outside the instance"))
+        })?;
+        *slot_value = value;
+    }
+    Ok(None)
+}
+
+fn require_field(member: &ReflectMember, operation: &str) -> Result<(), VmError> {
+    if member.kind == MemberKind::Field {
+        Ok(())
+    } else {
+        Err(VmError::Native(format!(
+            "{operation} requires a Field receiver, found a {}",
+            member.kind.binary_name()
+        )))
+    }
+}
+
+fn require_instance_field(
+    shared: &Shared,
+    view: &FieldView,
+    member: &ReflectMember,
+    operation: &str,
+) -> Result<(), VmError> {
+    if view.is_static {
+        return Err(VmError::Native(format!(
+            "{operation} does not support static field {}.{}:{} (M2.10)",
+            class_name(shared, member.class),
+            member.name,
+            member.descriptor
+        )));
+    }
+    Ok(())
+}
+
+/// Resolve the receiver argument and require an instance assignable to the declaring
+/// class. Returns the handle and its runtime class.
+fn field_receiver(
+    shared: &Shared,
+    member: &ReflectMember,
+    args: &[Value],
+    position: usize,
+    operation: &str,
+) -> Result<(ObjRef, ClassId), VmError> {
+    let Some(Value::Ref(receiver)) = args.get(position).copied() else {
+        return Err(VmError::Native(format!(
+            "{operation} expects an Object receiver"
+        )));
+    };
+    if receiver.is_null() {
+        return Err(VmError::Native(format!(
+            "{operation} received a null receiver"
+        )));
+    }
+    let actual = {
+        let heap = shared.heap();
+        match heap.instance(receiver) {
+            Ok(instance) => instance.class,
+            Err(error) => {
+                return Err(VmError::Native(format!(
+                    "{operation} receiver is not an instance: {error}"
+                )));
+            }
+        }
+    };
+    if !is_assignable(shared, actual, member.class)? {
+        return Err(VmError::Native(format!(
+            "{operation} receiver of class {} is not assignable to {}",
+            class_name(shared, actual),
+            class_name(shared, member.class)
+        )));
+    }
+    Ok((receiver, actual))
+}
+
+/// The layout slot of the reflected field on the receiver's runtime class.
+fn field_slot(shared: &Shared, actual: ClassId, member: &ReflectMember) -> Result<usize, VmError> {
+    shared
+        .field_layout(actual)?
+        .slot(&member.name, &member.descriptor)
+        .ok_or_else(|| {
+            VmError::Native(format!(
+                "class {} has no slot for field {}:{}",
+                class_name(shared, actual),
+                member.name,
+                member.descriptor
+            ))
+        })
+}
+
+/// Is `from` the same class as `to`, or a subclass of it?
+fn is_assignable(shared: &Shared, mut from: ClassId, to: ClassId) -> Result<bool, VmError> {
+    loop {
+        if from == to {
+            return Ok(true);
+        }
+        let entry = shared
+            .entry(from)
+            .ok_or_else(|| VmError::Loader(format!("class id {} is not loaded", from.0)))?;
+        let Some(super_name) = entry.file.super_class_name()? else {
+            return Ok(false);
+        };
+        let super_name = super_name.to_owned();
+        from = shared.load_class(entry.loader, &super_name)?;
+    }
+}
+
+fn class_name(shared: &Shared, class: ClassId) -> String {
+    shared
+        .entry(class)
+        .map(|entry| entry.name.clone())
+        .unwrap_or_else(|| format!("class {}", class.0))
+}
+
 fn method_get_return_type(
     shared: &Shared,
     _thread: &ThreadState,
@@ -492,7 +713,7 @@ fn method_get_return_type(
     _args: &[Value],
 ) -> Result<Option<Value>, VmError> {
     let member = member_of(shared, receiver)?;
-    let return_type = method_return_type(&member.descriptor)?;
+    let return_type = return_descriptor(&member.descriptor)?;
     let loader = declaring_loader(shared, &member)?;
     let object = class_for_descriptor(shared, loader, return_type)?;
     Ok(Some(Value::Ref(object)))
@@ -506,7 +727,7 @@ fn executable_get_parameter_types(
     _args: &[Value],
 ) -> Result<Option<Value>, VmError> {
     let member = member_of(shared, receiver)?;
-    let descriptors = method_parameter_descriptors(&member.descriptor)?;
+    let descriptors = parameter_descriptors(&member.descriptor)?;
     let loader = declaring_loader(shared, &member)?;
     let mut classes = Vec::with_capacity(descriptors.len());
     for descriptor in descriptors {
@@ -524,7 +745,7 @@ fn executable_get_parameter_count(
     _args: &[Value],
 ) -> Result<Option<Value>, VmError> {
     let member = member_of(shared, receiver)?;
-    let count = method_parameter_descriptors(&member.descriptor)?.len();
+    let count = parameter_descriptors(&member.descriptor)?.len();
     let count = i32::try_from(count)
         .map_err(|_| VmError::Native("parameter count does not fit an int".to_owned()))?;
     Ok(Some(Value::Int(count)))
@@ -597,7 +818,7 @@ fn class_for_descriptor(
 }
 
 /// Split a method descriptor's parameter list into its parameter descriptors.
-fn method_parameter_descriptors(descriptor: &str) -> Result<Vec<&str>, VmError> {
+pub fn parameter_descriptors(descriptor: &str) -> Result<Vec<&str>, VmError> {
     let rest = descriptor
         .strip_prefix('(')
         .ok_or_else(|| bad_descriptor(descriptor))?;
@@ -640,7 +861,7 @@ fn method_parameter_descriptors(descriptor: &str) -> Result<Vec<&str>, VmError> 
 }
 
 /// The return descriptor of a method descriptor (`V` included).
-fn method_return_type(descriptor: &str) -> Result<&str, VmError> {
+pub fn return_descriptor(descriptor: &str) -> Result<&str, VmError> {
     let (_, return_type) = descriptor
         .strip_prefix('(')
         .and_then(|rest| rest.split_once(')'))

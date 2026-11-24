@@ -6,8 +6,8 @@
 **Started:** 2026-11-22
 
 > Ledger. P0 and P1 were accepted on 2026-11-23. M1 is complete; M2 is in progress
-> (M2.1, M2.2, M2.3, M2.4, M2.5, M2.6, M2.7, M2.8 and M2.9 done). Keep this file
-> honest and terse.
+> (M2.1, M2.2, M2.3, M2.4, M2.5, M2.6, M2.7, M2.8, M2.9 and M2.10 done). Keep this
+> file honest and terse.
 
 ## Phase status
 
@@ -27,7 +27,7 @@ release process, if wanted, becomes its own phase.
 
 > Gates are defined in `docs/requirements.md` § Milestones. P0 and P1 are accepted;
 > M0 and M1 are complete, and both gate reviews have passed. M2 is in progress, with
-> M2.1, M2.2, M2.3, M2.4, M2.5, M2.6, M2.7, M2.8 and M2.9 done.
+> M2.1, M2.2, M2.3, M2.4, M2.5, M2.6, M2.7, M2.8, M2.9 and M2.10 done.
 
 | Milestone | Delivers | Gate | Status |
 | :--- | :--- | :--- | :--- |
@@ -67,11 +67,11 @@ release process, if wanted, becomes its own phase.
 | M2.7 | Exceptions, `athrow` and exception tables | R3 | `cargo test -p rava-interp --test exceptions` exits 0 | done |
 | M2.8 | Reflection member objects (`Field`/`Method`/`Constructor`) | R3 | `cargo test -p rava-interp --test reflection_members` exits 0 | done |
 | M2.9 | Core `Object`/`String` behavior | R3 | `cargo test -p rava-interp --test string_object` exits 0 | done |
-| M2.10 | Boxed values and reflection invocation | R3 | `cargo test -p rava-interp --test reflection_invoke` exits 0 | todo |
+| M2.10 | Boxed values and reflection invocation | R3 | `cargo test -p rava-interp --test reflection_invoke` exits 0 | done |
 
 P0 and P1 are accepted; P2 is done because the M2 increments are sliced. All M0 and
 M1 slices are done, and both gate reviews passed. M2.1, M2.2, M2.3, M2.4, M2.5,
-M2.6, M2.7, M2.8 and M2.9 are done; M2.10 is next.
+M2.6, M2.7, M2.8, M2.9 and M2.10 are done; M2.11 is next.
 
 ## Slice log
 
@@ -98,6 +98,7 @@ M2.6, M2.7, M2.8 and M2.9 are done; M2.10 is next.
 | M2.7 | `cargo test -p rava-interp --test exceptions` | 0 | 2026-11-24 | The `Code` exception table is decoded after the code array and its `start_pc`/`end_pc`/`handler_pc` become instruction indices through the existing two-pass boundary map (a non-boundary, out-of-range, empty or reversed entry and a non-`Class` `catch_type` are decode errors); `athrow` and a callee's `Thrown` result search the current frame's table in class-file order for an entry whose range contains the throwing instruction and whose catch type is assignable from the throwable's runtime class through the superclass chain, clearing the stack and jumping to the handler on a match and otherwise re-raising the same `ObjRef`; `catch_type = 0` is a catch-all; `InterpError::Thrown(ObjRef)`, `NullThrow` and `NonReferenceThrow` are new; the `Boom`/`Catcher` fixture covers a direct catch returning 5, a catch-all, a superclass catch, a wrong catch type, a throw crossing two calls into the outer frame, an uncaught throw that still carries the object, null and non-reference `athrow`, and three malformed tables; 9 tests; `cargo test -p rava-interp` 45, `cargo test -p rava-vm` 42 and `cargo test -p rava-cli` 67 pass, workspace 204; `cargo xtask ci` exits 0 |
 | M2.8 | `cargo test -p rava-interp --test reflection_members` | 0 | 2026-11-24 | `HeapObject::Reflect(ReflectMember)` with a `MemberKind` of `Field`/`Method`/`Constructor`, the declaring `ClassId`, name and descriptor; `Shared::reflect_member` caches one object per `(class, kind, name, descriptor)` and `Shared::roots` enumerates those roots, while `Shared::get_class` and `invokevirtual` dispatch a member to `java/lang/reflect/{Field,Method,Constructor}`; `Class.getDeclaredFields/getDeclaredMethods/getDeclaredConstructors` return real heap reference arrays built from the typed C1 metadata model, and the read-only member natives cover `getName`/`getModifiers`/`getDeclaringClass`, `Field.getType`, `Method.getReturnType/getParameterTypes/getParameterCount` and `Constructor.getParameterTypes/getParameterCount/getName`; the `ReflectMembersProbe` fixture exercises them through the C1 bootstrap library; 7 tests; `cargo test -p rava-interp` 52, `cargo test -p rava-vm` 42 and `cargo test -p rava-cli` 67 pass, workspace 211; `cargo xtask ci` exits 0 |
 | M2.9 | `cargo test -p rava-interp --test string_object` | 0 | 2026-11-24 | `HeapObject::Str` stays the only string representation; the `java/lang/String` registry covers `length`, `isEmpty`, `charAt`, `equals`, `hashCode`, `compareTo`, `concat`, both `substring` overloads, `startsWith`, `endsWith`, `indexOf`, `replace(CC)`, `toCharArray`, `toString` and `intern`, and every operation reads UTF-16 code units from the stored text through `utf16_units`/`string_from_utf16`, so a supplementary character is two units; `java/lang/Object` gains `equals` (reference identity), `hashCode` (a deterministic mix of the `ObjRef` index and generation, documented as the identity hash and cached by nothing because the handle never changes) and `toString` (`ClassName@hexHashCode` with the dotted runtime binary name); `Shared::intern_string` keeps one canonical object per text as a permanent root, and `ldc` goes through it so repeated execution of a string constant reuses one object; `StringProbe` with 50+ `ldc` and argument helpers plus 8 tests; `cargo test -p rava-interp` 60, `cargo test -p rava-vm` 45 and `cargo test -p rava-cli` 67 pass, workspace 222; `cargo xtask ci` exits 0 |
+| M2.10 | `cargo test -p rava-interp --test reflection_invoke` | 0 | 2026-11-24 | `HeapObject::Boxed(BoxedPrimitive::Integer)` is a heap object, not a second `Value` variant; `Shared::get_class` and `invokevirtual` dispatch it to `java/lang/Integer`, so `getClass` reports the boxed class; `Shared::box_int`/`unbox_int` and the `boxed::{unbox_argument,box_result}` helpers convert `int` boxes and pass reference handles through; the `java/lang/Integer` registry overrides `valueOf(I)`, `intValue`, `toString()`, `toString(I)`, `equals`, `hashCode`, `compareTo(Integer)` and `parseInt(String)`; `Field.get`/`set` cover `int` and reference instance fields, reject a static field and a null or non-assignable receiver, and preserve reference identity; `Method.invoke` runs static and instance methods by the reflected name and descriptor with no overload lookup, unboxes `int` arguments, boxes an `int` result and ignores the receiver for a static method; `Constructor.newInstance` allocates the declaring class, unboxes its arguments and runs `<init>` through `run_instance_method`; a Java throwable from an invoked method crosses the native ABI as `VmError::Thrown` and becomes `InterpError::Thrown`, so it is not swallowed (`InvocationTargetException` wrapping is deferred); the `Bean`/`BoxProbe` fixture covers boxed virtual calls, `(I)V` and `()V` construction, int/reference field access, getters/setters and static `sum`, plus wrong receivers, a static field, wrong arity and type, a missing-descriptor method and the no-`getDeclaredMethod` boundary; 9 tests; `cargo test -p rava-interp` 70, `cargo test -p rava-vm` 45 and `cargo test -p rava-cli` 67 pass, workspace 232; `cargo xtask ci` exits 0 |
 
 M0.6 boundary: the reference and class-unloading hooks are registration points only.
 M0 has no collector, so no weak/soft/phantom reference is cleared and no class is
@@ -351,6 +352,34 @@ supplementary-character constant, so `ClassBuilder::utf8` now writes modified UT
 (CESU-8 for supplementary characters) instead of standard UTF-8; a four-byte UTF-8
 sequence was never a valid class-file constant.
 
+M2.10 boundary: a boxed primitive is `HeapObject::Boxed(BoxedPrimitive::Integer)`, a
+heap object rather than a second `Value` variant, so it can live in an `Object` slot.
+Only `java.lang.Integer` exists; `Boolean` and `Long` boxes, the small-value cache and
+the `String`-taking `valueOf`/`parseInt` overloads are later slices, and every `valueOf`
+allocates a new object, so `==` on two equal boxes is false where the JDK caches small
+values. `Shared::get_class`, `invokevirtual` dispatch and `Object.toString`'s runtime
+name treat a box as its boxed class; the box is an ordinary allocation, not a permanent
+root. The `Integer` natives are `valueOf(I)`, `intValue`, `toString()`, `toString(I)`,
+`equals`, `hashCode`, `compareTo(Integer)` and `parseInt(String)`; a malformed
+`parseInt` is a typed `VmError::Native`, not a synthesized `NumberFormatException`.
+`Field.get`/`set` cover instance `int` and reference fields only: a static field through
+either method is rejected, the receiver must be a non-null instance assignable to the
+declaring class, `int` is boxed or unboxed and a reference passes its handle through
+unchanged (null included). There are no `getInt`/`setInt`, volatile or final semantics,
+access checks or `setAccessible`. `Method.invoke` uses the reflected name and descriptor
+exactly, so there is no overload resolution; it runs a static method with the receiver
+ignored or an instance method on its declaring class (not a virtual override), unboxes
+`int` arguments, boxes an `int` return, passes references through and returns null for
+`void`. `Constructor.newInstance` allocates the declaring class, unboxes its arguments
+and runs `<init>` through `run_instance_method`; it performs no `InstantiationException`
+or access check and does not support varargs.
+`java.lang.reflect.InvocationTargetException` is deferred: a Java throwable raised by
+the invoked method crosses the native ABI as `VmError::Thrown` and re-enters the
+interpreter as `InterpError::Thrown`, so a caller's exception table can catch the
+original object instead of the throwable being swallowed. `Class.getDeclaredMethod` and
+`getMethod` and inherited-member lookup remain absent, and annotations, generics,
+collections and Spring stay later slices.
+
 ## Decision log
 
 | ADR | Decision | Status |
@@ -393,8 +422,11 @@ A fresh session should:
    `Field`/`Method`/`Constructor` natives (`cargo test -p rava-interp --test
    reflection_members`). M2.9 landed core `Object`/`String` behavior: reference-identity
    `Object.equals`/`hashCode`/`toString`, the UTF-16 `String` methods and `intern` on the
-   existing `HeapObject::Str` (`cargo test -p rava-interp --test string_object`). M2.10 is
-   next.
+   existing `HeapObject::Str` (`cargo test -p rava-interp --test string_object`). M2.10
+   landed boxed `Integer` values and reflective invocation: `Field.get`/`set` for `int`
+   and reference fields, `Method.invoke` for static and instance methods, and
+   `Constructor.newInstance`, all over the existing instance/static machinery
+   (`cargo test -p rava-interp --test reflection_invoke`). M2.11 is next.
 4. Do not write runtime code outside a defined slice.
 
 ## Open decisions

@@ -4,6 +4,7 @@ use std::fmt;
 use std::io;
 use std::path::PathBuf;
 
+use crate::heap::ObjRef;
 use crate::loader::LoaderId;
 
 #[derive(Debug)]
@@ -43,6 +44,15 @@ pub enum VmError {
         /// The Java method whose result would hold the lone surrogate.
         method: &'static str,
     },
+    /// A reflective invocation (`Method.invoke` or `Constructor.newInstance`)
+    /// propagated a Java throwable raised by the invoked method.
+    ///
+    /// The JDK would wrap the throwable in
+    /// `java.lang.reflect.InvocationTargetException`; this slice does not synthesize
+    /// exception objects (M2.7), so the original throwable crosses the native boundary
+    /// unchanged and the interpreter turns it back into `InterpError::Thrown`. The
+    /// caller's exception table can therefore catch it.
+    Thrown(ObjRef),
     /// The same `(loader, name)` was defined twice.
     DuplicateClass { loader: LoaderId, name: String },
     /// No loader in the delegation chain supplied the class.
@@ -68,6 +78,7 @@ impl fmt::Display for VmError {
                 f,
                 "{method} would produce an unpaired UTF-16 surrogate, which the heap's String storage cannot represent"
             ),
+            Self::Thrown(throwable) => write!(f, "reflective invocation threw {throwable}"),
             Self::DuplicateClass { loader, name } => {
                 write!(f, "class {name} is already defined in loader {}", loader.0)
             }

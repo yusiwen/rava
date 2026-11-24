@@ -4,17 +4,19 @@
 //! through the receiver-carrying ABI, M2.5 adds instance allocation, constructors,
 //! instance fields and instance method calls, M2.6 adds primitive/reference arrays and
 //! the integer control-flow instructions, M2.7 adds `athrow` and the decoded exception
-//! table, and M2.8 dispatches a reflected `Field`/`Method`/`Constructor` receiver to its
-//! `java.lang.reflect` class. M2.9 adds the `java.lang.Object` and `java.lang.String`
-//! natives in `rava-vm`; the interpreter needed no new instruction or dispatch path for
-//! them. The decoded form and the frame are the contracts a later JIT consumes; there is
-//! no second frame model.
+//! table, M2.8 dispatches a reflected `Field`/`Method`/`Constructor` receiver to its
+//! `java.lang.reflect` class, and M2.9 adds the `java.lang.Object` and `java.lang.String`
+//! natives in `rava-vm`. M2.10 adds boxed `Integer` dispatch and the reflective-invocation
+//! natives (`Method.invoke`, `Constructor.newInstance`) in [`reflect_invoke`], which
+//! re-enter this crate's existing instance/static machinery. The decoded form and the
+//! frame are the contracts a later JIT consumes; there is no second frame model.
 
 #![forbid(unsafe_code)]
 
 mod error;
 mod frame;
 mod instr;
+pub mod reflect_invoke;
 
 pub use error::InterpError;
 pub use frame::Frame;
@@ -24,8 +26,8 @@ use std::sync::Arc;
 
 use rava_classfile::model::ACC_STATIC;
 use rava_vm::{
-    ArrayKind, ClassEntry, ClassId, ClassState, FrameRootsGuard, HeapObject, MemberKind, ObjRef,
-    Shared, ThreadState, Value,
+    ArrayKind, BoxedPrimitive, ClassEntry, ClassId, ClassState, FrameRootsGuard, HeapObject,
+    MemberKind, ObjRef, Shared, ThreadState, Value,
 };
 
 /// Run a static method with `args` and return its result (`None` for `void`).
@@ -108,7 +110,7 @@ fn run_method(
             receiver.unwrap_or(ObjRef::NULL),
             &args,
         )
-        .map_err(InterpError::Vm);
+        .map_err(InterpError::from);
     }
     if method.is_native() {
         return Err(InterpError::Decode(format!(
@@ -631,7 +633,7 @@ fn invoke_instance(
     // Registry first: a C1 stub method has no `Code` and no `ACC_NATIVE` flag, and the
     // native is still the implementation.
     if let Some(native) = shared.native(&entry.name, name, descriptor) {
-        return native(shared, thread, entry.loader, receiver, &args).map_err(InterpError::Vm);
+        return native(shared, thread, entry.loader, receiver, &args).map_err(InterpError::from);
     }
     if is_native {
         return Err(InterpError::Decode(format!(
@@ -915,11 +917,12 @@ fn resolve_from(shared: &Shared, current: ClassId, name: &str) -> Result<ClassId
 
 /// The class a virtual call starts resolution from.
 ///
-/// An instance dispatches from its defining class. A string or a class object has no
-/// `ClassId` of its own in the heap, so it dispatches from `java/lang/String` or
-/// `java/lang/Class`, resolved through the caller's loader. An array has no class
-/// identity yet; `Object` methods (including `getClass`, which reports a typed error)
-/// still dispatch, and any other method fails resolution normally.
+/// An instance dispatches from its defining class. A string, a class object or a box has
+/// no `ClassId` of its own in the heap, so it dispatches from `java/lang/String`,
+/// `java/lang/Class` or its boxed class (`java/lang/Integer`), resolved through the
+/// caller's loader. An array has no class identity yet; `Object` methods (including
+/// `getClass`, which reports a typed error) still dispatch, and any other method fails
+/// resolution normally.
 fn dispatch_class(
     shared: &Shared,
     current: ClassId,
@@ -930,6 +933,7 @@ fn dispatch_class(
         Str,
         Class,
         Reflect(MemberKind),
+        Boxed(BoxedPrimitive),
         Array,
     }
 
@@ -940,6 +944,7 @@ fn dispatch_class(
             HeapObject::Str(_) => ReceiverKind::Str,
             HeapObject::Class(_) => ReceiverKind::Class,
             HeapObject::Reflect(member) => ReceiverKind::Reflect(member.kind),
+            HeapObject::Boxed(boxed) => ReceiverKind::Boxed(*boxed),
             HeapObject::Array(_) => ReceiverKind::Array,
         }
     };
@@ -949,6 +954,7 @@ fn dispatch_class(
         ReceiverKind::Str => resolve_from(shared, current, "java/lang/String"),
         ReceiverKind::Class => resolve_from(shared, current, "java/lang/Class"),
         ReceiverKind::Reflect(kind) => resolve_from(shared, current, kind.class_name()),
+        ReceiverKind::Boxed(boxed) => resolve_from(shared, current, boxed.class_name()),
         ReceiverKind::Array => resolve_from(shared, current, "java/lang/Object"),
     }
 }

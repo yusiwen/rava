@@ -12,7 +12,9 @@ use std::sync::Arc;
 use std::sync::{Mutex, MutexGuard, RwLock};
 
 use crate::VmError;
-use crate::heap::{FieldLayout, Heap, HeapObject, MemberKind, ObjRef, ReflectMember};
+use crate::heap::{
+    BoxedPrimitive, FieldLayout, Heap, HeapObject, MemberKind, ObjRef, ReflectMember,
+};
 use crate::hooks::Hooks;
 use crate::loader::{ClassEntry, ClassId, ClassTable, LoaderId};
 use crate::source::{ClassSource, DirectorySource};
@@ -254,20 +256,59 @@ impl Shared {
         reference
     }
 
+    /// Box an `int` as a fresh `java.lang.Integer` heap object.
+    ///
+    /// There is no small-value cache in M2.10: two calls with the same value return two
+    /// distinct objects, so `==` on boxes is not the JDK's small-integer identity. The
+    /// box is an ordinary heap object, not a permanent root.
+    pub fn box_int(&self, value: i32) -> ObjRef {
+        self.heap().allocate_boxed_int(value)
+    }
+
+    /// The `int` inside a boxed `Integer`.
+    ///
+    /// A null reference, a non-boxed object and a box of another primitive kind are typed
+    /// errors, so a caller never silently treats an unrelated reference as an `int`.
+    pub fn unbox_int(&self, reference: ObjRef) -> Result<i32, VmError> {
+        if reference.is_null() {
+            return Err(VmError::Native(
+                "cannot unbox a null reference as an int".to_owned(),
+            ));
+        }
+        let boxed = {
+            let heap = self.heap();
+            match heap.get(reference) {
+                Ok(HeapObject::Boxed(boxed)) => Some(*boxed),
+                Ok(_) => None,
+                Err(error) => return Err(VmError::Native(error.to_string())),
+            }
+        };
+        let boxed =
+            boxed.ok_or_else(|| VmError::Native(format!("{reference} is not a boxed Integer")))?;
+        boxed.as_int().ok_or_else(|| {
+            VmError::Native(format!(
+                "{reference} is a boxed {}, not a boxed Integer",
+                boxed.binary_name()
+            ))
+        })
+    }
+
     /// The class object of a heap object: `Object.getClass` without the dispatch.
     ///
     /// An instance reports its defining class, a string reports `java.lang.String`, a
-    /// class object reports `java.lang.Class` and a reflected member reports
-    /// `java.lang.reflect.Field`, `Method` or `Constructor`; the latter three are VM-level
-    /// objects with the bootstrap class library as their identity. Array class identity
-    /// (`[I`, `[Ljava/lang/String;`) is not modeled in M2.4, so an array returns a
-    /// typed error instead of a wrong class object.
+    /// class object reports `java.lang.Class`, a reflected member reports
+    /// `java.lang.reflect.Field`, `Method` or `Constructor`, and a box reports its boxed
+    /// class (`java.lang.Integer`); the latter four are VM-level objects with the
+    /// bootstrap class library as their identity. Array class identity (`[I`,
+    /// `[Ljava/lang/String;`) is not modeled in M2.4, so an array returns a typed error
+    /// instead of a wrong class object.
     pub fn get_class(&self, reference: ObjRef) -> Result<ObjRef, VmError> {
         enum Kind {
             Instance(ClassId),
             Str,
             Class,
             Reflect(MemberKind),
+            Boxed(BoxedPrimitive),
         }
 
         let kind = {
@@ -280,6 +321,7 @@ impl Shared {
                 HeapObject::Str(_) => Kind::Str,
                 HeapObject::Class(_) => Kind::Class,
                 HeapObject::Reflect(member) => Kind::Reflect(member.kind),
+                HeapObject::Boxed(boxed) => Kind::Boxed(*boxed),
                 HeapObject::Array(_) => {
                     return Err(VmError::Native(
                         "array class objects are not supported yet (M2.4)".to_owned(),
@@ -300,6 +342,10 @@ impl Shared {
             }
             Kind::Reflect(kind) => {
                 let class = self.load_library_class(kind.class_name())?;
+                self.class_object(class)
+            }
+            Kind::Boxed(boxed) => {
+                let class = self.load_library_class(boxed.class_name())?;
                 self.class_object(class)
             }
         }

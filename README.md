@@ -63,9 +63,17 @@ reference-identity `equals`, a stable identity `hashCode` and a `ClassName@hash`
 `toString`; and interned strings, including `ldc` constants, are permanent roots of a
 content-keyed table. A lone
 surrogate, a null argument and an out-of-range index are typed errors because exception
-objects are not synthesized yet. `String.valueOf`, `StringBuilder`, `Integer`,
-collections, reflection invocation, annotations and generics remain later slices.
-**M2.10 is next.**
+objects are not synthesized yet. `String.valueOf`, `StringBuilder`, collections,
+annotations and generics remain later slices. **M2.10 is done (2026-11-24):** a boxed
+`Integer` is `HeapObject::Boxed(BoxedPrimitive::Integer)`, so `getClass` reports
+`java.lang.Integer` and `Integer.valueOf`, `intValue`, `toString`, `equals`, `hashCode`,
+`compareTo` and `parseInt` have real value semantics; `Field.get`/`set` read and write
+`int` and reference instance fields with boxing and identity-preserving references; and
+`Method.invoke`/`Constructor.newInstance` run static and instance methods and
+constructors through the existing interpreter, using the reflected name and descriptor
+with no overload resolution. A Java throwable from an invoked method propagates as a
+`Thrown` rather than being swallowed; `InvocationTargetException` wrapping, varargs,
+access checks and `setAccessible` remain later slices. **M2.11 is next.**
 
 ## What this project is
 

@@ -210,6 +210,41 @@ impl MemberKind {
     }
 }
 
+/// A boxed primitive value (`java.lang.Integer.valueOf(int)`).
+///
+/// M2.10 models one box: `java.lang.Integer` holding its primitive `int`. A box is an
+/// ordinary heap object rather than a second [`crate::Value`] variant, so it can live in
+/// an `Object`-typed slot and `getClass` reports `java.lang.Integer`. There is no
+/// `Boolean` or `Long` box yet and no small-value cache: every `valueOf` allocates a new
+/// object.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BoxedPrimitive {
+    Integer(i32),
+}
+
+impl BoxedPrimitive {
+    /// The internal class name of the box's runtime class.
+    pub fn class_name(self) -> &'static str {
+        match self {
+            Self::Integer(_) => "java/lang/Integer",
+        }
+    }
+
+    /// The dotted binary name of the box's runtime class.
+    pub fn binary_name(self) -> &'static str {
+        match self {
+            Self::Integer(_) => "java.lang.Integer",
+        }
+    }
+
+    /// The primitive `int` this box holds.
+    pub fn as_int(self) -> Option<i32> {
+        match self {
+            Self::Integer(value) => Some(value),
+        }
+    }
+}
+
 /// A reflected field, method or constructor (`java.lang.reflect.Member`).
 ///
 /// The object stores identity only: the declaring class, the member's name and its
@@ -247,6 +282,9 @@ pub enum HeapObject {
     /// read from the class table on demand. Cached by
     /// [`crate::Shared::reflect_member`], never allocated by a caller directly.
     Reflect(ReflectMember),
+    /// A boxed primitive value (`java.lang.Integer.valueOf(int)`). The client class is
+    /// named by [`BoxedPrimitive::class_name`]; the object holds no `ClassId` of its own.
+    Boxed(BoxedPrimitive),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -351,6 +389,23 @@ impl Heap {
         self.allocate(HeapObject::Reflect(member))
     }
 
+    /// Allocate a boxed `int`. Callers go through [`crate::Shared::box_int`], which is
+    /// the one boxing entry point the reflection natives use.
+    pub fn allocate_boxed_int(&mut self, value: i32) -> ObjRef {
+        self.allocate(HeapObject::Boxed(BoxedPrimitive::Integer(value)))
+    }
+
+    /// The boxed value behind a reference.
+    pub fn boxed(&self, reference: ObjRef) -> Result<BoxedPrimitive, HeapError> {
+        match self.get(reference)? {
+            HeapObject::Boxed(boxed) => Ok(*boxed),
+            _ => Err(HeapError::WrongObjectKind {
+                reference,
+                expected: "a boxed primitive",
+            }),
+        }
+    }
+
     pub fn string(&self, reference: ObjRef) -> Result<&str, HeapError> {
         match self.get(reference)? {
             HeapObject::Str(text) => Ok(text),
@@ -429,7 +484,8 @@ impl Heap {
             HeapObject::Array(_)
             | HeapObject::Str(_)
             | HeapObject::Class(_)
-            | HeapObject::Reflect(_) => Err(HeapError::WrongObjectKind {
+            | HeapObject::Reflect(_)
+            | HeapObject::Boxed(_) => Err(HeapError::WrongObjectKind {
                 reference,
                 expected: "an instance",
             }),
@@ -442,7 +498,8 @@ impl Heap {
             HeapObject::Array(_)
             | HeapObject::Str(_)
             | HeapObject::Class(_)
-            | HeapObject::Reflect(_) => Err(HeapError::WrongObjectKind {
+            | HeapObject::Reflect(_)
+            | HeapObject::Boxed(_) => Err(HeapError::WrongObjectKind {
                 reference,
                 expected: "an instance",
             }),
@@ -455,7 +512,8 @@ impl Heap {
             HeapObject::Instance(_)
             | HeapObject::Str(_)
             | HeapObject::Class(_)
-            | HeapObject::Reflect(_) => Err(HeapError::WrongObjectKind {
+            | HeapObject::Reflect(_)
+            | HeapObject::Boxed(_) => Err(HeapError::WrongObjectKind {
                 reference,
                 expected: "an array",
             }),
@@ -468,7 +526,8 @@ impl Heap {
             HeapObject::Instance(_)
             | HeapObject::Str(_)
             | HeapObject::Class(_)
-            | HeapObject::Reflect(_) => Err(HeapError::WrongObjectKind {
+            | HeapObject::Reflect(_)
+            | HeapObject::Boxed(_) => Err(HeapError::WrongObjectKind {
                 reference,
                 expected: "an array",
             }),

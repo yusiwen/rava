@@ -17,7 +17,6 @@ use crate::loader::{ClassId, LoaderId};
 use crate::shared::Shared;
 use crate::thread::ThreadState;
 use crate::value::Value;
-
 /// Registers the M2.9 `java.lang.Object` natives.
 pub fn register_natives(shared: &Shared) {
     shared.register_native(
@@ -102,15 +101,17 @@ fn object_to_string(
 /// The dotted binary name of a receiver's runtime class.
 ///
 /// An instance reports its defining class, a string `java.lang.String`, a class object
-/// `java.lang.Class` and a reflected member its `java.lang.reflect` class. An array has no
-/// class identity in this slice, so it returns a typed error instead of a wrong name, the
-/// same choice `Shared::get_class` makes.
+/// `java.lang.Class`, a reflected member its `java.lang.reflect` class and a box its boxed
+/// class (`java.lang.Integer`). An array has no class identity in this slice, so it
+/// returns a typed error instead of a wrong name, the same choice `Shared::get_class`
+/// makes.
 fn runtime_binary_name(shared: &Shared, receiver: ObjRef) -> Result<String, VmError> {
     enum Kind {
         Instance(ClassId),
         Str,
         Class,
         Reflect(MemberKind),
+        Boxed(&'static str),
         Array,
     }
 
@@ -124,6 +125,7 @@ fn runtime_binary_name(shared: &Shared, receiver: ObjRef) -> Result<String, VmEr
             HeapObject::Str(_) => Kind::Str,
             HeapObject::Class(_) => Kind::Class,
             HeapObject::Reflect(member) => Kind::Reflect(member.kind),
+            HeapObject::Boxed(boxed) => Kind::Boxed(boxed.binary_name()),
             HeapObject::Array(_) => Kind::Array,
         }
     };
@@ -138,6 +140,7 @@ fn runtime_binary_name(shared: &Shared, receiver: ObjRef) -> Result<String, VmEr
         Kind::Str => Ok("java.lang.String".to_owned()),
         Kind::Class => Ok("java.lang.Class".to_owned()),
         Kind::Reflect(kind) => Ok(kind.binary_name().to_owned()),
+        Kind::Boxed(name) => Ok(name.to_owned()),
         Kind::Array => Err(VmError::Native(
             "array class names are not supported yet (M2.9)".to_owned(),
         )),

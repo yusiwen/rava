@@ -148,7 +148,13 @@ impl From<rava_classfile::Error> for InterpError {
 
 impl From<VmError> for InterpError {
     fn from(error: VmError) -> Self {
-        Self::Vm(error)
+        match error {
+            // A reflective invocation carries a Java throwable across the native ABI as
+            // `VmError::Thrown`; at the interpreter boundary it becomes the same
+            // `Thrown` the caller's exception table already understands.
+            VmError::Thrown(throwable) => Self::Thrown(throwable),
+            other => Self::Vm(other),
+        }
     }
 }
 
