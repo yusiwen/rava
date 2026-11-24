@@ -20,14 +20,20 @@
 //!   order is semantically irrelevant (nest members, permitted subclasses, inner classes)
 //!   are sorted, and only by the dump.
 //!
-//! Generic signatures are retained as the `Signature` string. Turning that string into a
-//! `Type` graph, and the reflection API that reads this model, land with the metadata gate
-//! (M2.2) rather than here.
+//! Generic signatures are retained as the `Signature` string and parsed by
+//! [`mod@signature`] into a typed graph; resolving that graph to loaded classes and the
+//! reflective `java.lang.reflect.Type` objects is the VM's generic-reflection module.
 
 mod decode;
 mod dump;
+mod signature;
 
 pub use dump::dump;
+pub use signature::{
+    ClassSignature, ClassTypeSignature, MAX_TYPE_DEPTH, MethodSignature, PrimitiveSignature,
+    SignatureError, TypeArgument, TypeParameter, TypeSignature, parse_class_signature,
+    parse_field_signature, parse_method_signature,
+};
 
 use crate::error::Error;
 use crate::model::ClassFile;
@@ -285,7 +291,29 @@ pub struct ClassMetadata {
     pub attributes: Vec<RawAttribute>,
 }
 
+impl RecordComponent {
+    /// Parse this record component's `Signature`, or `None` when its type is not generic.
+    pub fn generic_type(&self) -> Result<Option<TypeSignature>, SignatureError> {
+        self.signature
+            .as_deref()
+            .map(parse_field_signature)
+            .transpose()
+    }
+}
+
 impl ClassMetadata {
+    /// Parse this class's `Signature`, or `None` when it is not generic.
+    ///
+    /// A malformed signature is a typed [`SignatureError`]; the string is not silently
+    /// ignored, because a reflection client would otherwise see raw types where the class
+    /// file declares generic ones.
+    pub fn class_signature(&self) -> Result<Option<ClassSignature>, SignatureError> {
+        self.signature
+            .as_deref()
+            .map(parse_class_signature)
+            .transpose()
+    }
+
     /// `Class.getName()`: package separators as `.`, nested classes still `$`-separated.
     pub fn java_name(&self) -> String {
         self.binary_name.replace('/', ".")
@@ -366,6 +394,14 @@ pub struct FieldMetadata {
 }
 
 impl FieldMetadata {
+    /// Parse this field's `Signature`, or `None` when its type is not generic.
+    pub fn generic_type(&self) -> Result<Option<TypeSignature>, SignatureError> {
+        self.signature
+            .as_deref()
+            .map(parse_field_signature)
+            .transpose()
+    }
+
     /// `java.lang.reflect.Modifier.isStatic`.
     pub fn is_static(&self) -> bool {
         self.access_flags & 0x0008 != 0
@@ -406,6 +442,14 @@ pub struct MethodMetadata {
 }
 
 impl MethodMetadata {
+    /// Parse this method's or constructor's `Signature`, or `None` when it is not generic.
+    pub fn method_signature(&self) -> Result<Option<MethodSignature>, SignatureError> {
+        self.signature
+            .as_deref()
+            .map(parse_method_signature)
+            .transpose()
+    }
+
     pub fn is_constructor(&self) -> bool {
         self.name == "<init>"
     }

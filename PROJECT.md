@@ -7,7 +7,7 @@
 
 > Ledger. P0 and P1 were accepted on 2026-11-23. M1 is complete; M2 is in progress
 > (M2.1, M2.2, M2.3, M2.4, M2.5, M2.6, M2.7, M2.8, M2.9, M2.10, M2.11, M2.12,
-> M2.13, M2.14, M2.15, M2.16, M2.17, M2.18, M2.19, M2.20 and M2.21 done). Keep
+> M2.13, M2.14, M2.15, M2.16, M2.17, M2.18, M2.19, M2.20, M2.21 and M2.22 done). Keep
 > this file honest and terse.
 
 ## Phase status
@@ -29,7 +29,7 @@ release process, if wanted, becomes its own phase.
 > Gates are defined in `docs/requirements.md` § Milestones. P0 and P1 are accepted;
 > M0 and M1 are complete, and both gate reviews have passed. M2 is in progress, with
 > M2.1, M2.2, M2.3, M2.4, M2.5, M2.6, M2.7, M2.8, M2.9, M2.10, M2.11, M2.12, M2.13,
-> M2.14, M2.15, M2.16, M2.17, M2.18, M2.19, M2.20 and M2.21 done.
+> M2.14, M2.15, M2.16, M2.17, M2.18, M2.19, M2.20, M2.21 and M2.22 done.
 
 | Milestone | Delivers | Gate | Status |
 | :--- | :--- | :--- | :--- |
@@ -81,12 +81,12 @@ release process, if wanted, becomes its own phase.
 | M2.19 | Lambda metafactory and `invokeinterface` | R3 | `cargo test -p rava-interp --test lambdas` exits 0 | done |
 | M2.20 | Classpath runner (`rava run`) | R3 | `cargo test -p rava-cli --test classpath_run` exits 0 | done |
 | M2.21 | Static fields, casts, switches and numeric constants | R3 | `cargo test -p rava-interp --test bytecode_surface` exits 0 | done |
-| M2.22 | Generic `Type` graph and generic reflection | R3 | `cargo test -p rava-interp --test generic_types` exits 0 | todo |
+| M2.22 | Generic `Type` graph and generic reflection | R3 | `cargo test -p rava-interp --test generic_types` exits 0 | done |
 
 P0 and P1 are accepted; P2 is done because the M2 increments are sliced. All M0 and
 M1 slices are done, and both gate reviews passed. M2.1, M2.2, M2.3, M2.4, M2.5,
 M2.6, M2.7, M2.8, M2.9, M2.10, M2.11, M2.12, M2.13, M2.14, M2.15, M2.16, M2.17,
-M2.18, M2.19, M2.20 and M2.21 are done; M2.22 is next.
+M2.18, M2.19, M2.20, M2.21 and M2.22 are done; M2.23 is next.
 
 ## Slice log
 
@@ -125,6 +125,7 @@ M2.18, M2.19, M2.20 and M2.21 are done; M2.22 is next.
 | M2.19 | `cargo test -p rava-interp --test lambdas` | 0 | 2026-11-24 | `invokeinterface` (`0xb9`) decodes its u2 interface-method reference, u1 argument count and u1 reserved zero byte (a non-zero byte is a decode error) and executes: the interface method is resolved on the receiver's runtime class first, then as a default method in the instruction's interface hierarchy, and the ordinary native-registry-before-`Code` path runs it; a class chain without the method falls back to a declaration in the interface hierarchy, an interface-assignability check rejects a wrong receiver with a typed `NotAssignable`, and a missing transitive interface in the C1 tree is skipped instead of masking the result. `HeapObject::Lambda` carries the functional-interface `ClassId`, the SAM name and `samMethodType` descriptor, the `instantiatedMethodType`, a target (owner `ClassId`, name, descriptor and static/instance/constructor kind) and the captured `Value`s; the lambda's class identity is the interface (there is no synthetic class file), `Shared::get_class`/`Object.toString` report that interface and `Shared::roots` enumerates the captured references. `LambdaMetafactory.metafactory` and `altMetafactory` parse their `MethodType`/`MethodHandle` static arguments (the class-file `BootstrapMethods` view now types both), capture the call-site arguments and create the lambda; the SAM call concatenates captured and call arguments, uses the first value as the receiver for an instance target, allocates for a constructor target, and runs through the existing `run_static_method`/`run_instance_method`; `altMetafactory` rejects `FLAG_SERIALIZABLE` and skips marker/bridge tables. The committed release-17 fixture (`demo/IntFn`, `demo/Sink`, `demo/IntFnImpl`, `demo/SinkFactory`, `demo/LambdaProbe`) covers a capturing static lambda, a no-argument void `Runnable`, static/unbound/bound/constructor method references and ordinary/String/ArrayList receivers through `invokeinterface`; assembled probes cover `altMetafactory`, a wrong receiver, a wrong SAM name, an unsupported bootstrap owner, a serializable flag and missing metafactory arguments; 13 tests; `cargo test -p rava-interp` 156, `rava-vm` 47, `rava-classfile` 50 and `rava-cli` 67 pass, workspace 320; `cargo xtask ci` exits 0; |
 | M2.20 | `cargo test -p rava-cli --test classpath_run` | 0 | 2026-11-24 | `ClassPathSource` searches directories and jars in classpath order through the existing `ClassSource`/`DirectorySource`/`JarSource` and reports a missing class as `ClassNotFound`; the CLI adds one application loader parented to the bootstrap loader (no second class table, `(loader, name)` identity) and `rava run` loads `MainClass`, requires a static `main([Ljava/lang/String;)V`, allocates a `String[]` through the heap's `ClassRef` machinery and invokes it; `rava-vm::library::register_all` installs the existing Object/String/builder/list/map/Integer/annotation/reflection/instance natives plus a minimal `PrintStream` and initializes `System.out`/`System.err`, and the runner also registers the interpreter's reflective-invocation natives; a committed `javac --release 17` `demo/HelloRun` class and its stored jar, 10 CLI tests (directory, jar, classpath order through a colon list, repeated `--cp`, missing class, missing main, non-static main, usage exit codes, the default stdlib and program arguments) plus 3 `ClassPathSource` tests; `cargo test -p rava-cli` passes 77, `rava-vm` 50, `rava-interp` 156, `rava-classfile` 50, workspace 333; `cargo xtask ci` exits 0 |
 | M2.21 | `cargo test -p rava-interp --test bytecode_surface` | 0 | 2026-11-24 | `putstatic` writes `ClassEntry.statics` keyed by `(name, descriptor)` after resolving the declaring class through the executing loader, with typed static/instance, missing-field, descriptor and value-kind errors; `checkcast`/`instanceof` resolve named/primitive/array operands and cover superclass, interface, array-covariance and `Object`/`Cloneable`/`Serializable` assignability, with a typed `ClassCast` on failure; `tableswitch`/`lookupswitch` map default and case targets through the two-pass boundary map and reject non-zero padding, non-boundary targets, inverted/truncated tables and unsorted/duplicate lookup keys; `ldc`/`ldc_w` decode Integer/Float and `ldc2_w` Long/Double, with `lcmp`/`fcmp<op>`/`dcmp<op>` and `lreturn`/`freturn`/`dreturn`; assembler helpers cover each new form; 15 tests; `cargo test -p rava-interp` 171, `rava-vm` 50, `rava-classfile` 50 and `rava-cli` 77 pass, workspace 348; `cargo xtask ci` exits 0 |
+| M2.22 | `cargo test -p rava-interp --test generic_types` | 0 | 2026-11-24 | `rava-classfile`'s `metadata::signature` module parses class, method and field JVMS signatures into `ClassSignature`/`MethodSignature`/`TypeSignature`, preserving class and member type-parameter names with their class and interface bounds, nested `Outer<T>.Inner<U>` owners, `+`/`-`/`*` type arguments, arrays and `^` throws; malformed input, `V` outside a method result, trailing bytes and nesting past 256 are typed `SignatureError`s. `rava-vm`'s `generic` module resolves those names through the declaring class's loader: a raw type is the existing `Class`/primitive/array class object, while `ParameterizedType`, `TypeVariable`, `WildcardType` and `GenericArrayType` are `HeapObject::Type` objects cached structurally by `Shared::type_object` and enumerated as roots; `getClass` reports the public `java.lang.reflect` interface, and `Object.toString`/`Type.getTypeName` render a deterministic type name. The natives cover `Class.getGenericSuperclass`/`getGenericInterfaces`/`getTypeParameters`, `Field.getGenericType`, `Method.getGenericReturnType`/`getGenericParameterTypes`/`getTypeParameters`, `Constructor.getGenericParameterTypes`/`getTypeParameters`, `ParameterizedType.getActualTypeArguments`/`getRawType`/`getOwnerType`, `TypeVariable.getName`/`getBounds`/`getGenericDeclaration`, `WildcardType.getUpperBounds`/`getLowerBounds` and `GenericArrayType.getGenericComponentType`; the committed release-17 fixture (`demo.Box`, `StringBox`, `Plain`, `Nest`, `GenericProbe`) covers the parameterized superinterface, `List<String>`, `T[]`, `? extends Number`, `? super Integer`, a `Map$Entry` owner, a `Nest<String>.Inner<Integer>` owner, the generic method and both generic constructors; 7 tests; `cargo test -p rava-interp` 178, `rava-vm` 50, `rava-classfile` 56 and `rava-cli` 77 pass, workspace 361; `cargo xtask ci` exits 0 |
 
 M0.6 boundary: the reference and class-unloading hooks are registration points only.
 M0 has no collector, so no weak/soft/phantom reference is cleared and no class is
@@ -734,6 +735,8 @@ M2.21 boundary: `putstatic` resolves the owner through the executing class's loa
 
 `tableswitch`/`lookupswitch` decode their JVMS §6.5 alignment padding; a non-zero padding byte is malformed, not ignored. The default and every case target become instruction indices through the existing two-pass boundary map, and a non-boundary target, a negative pair count, a `tableswitch` whose high is below its low, a truncated table, and a `lookupswitch` whose keys are unsorted or duplicated are decode errors. `ldc`/`ldc_w` decode `CONSTANT_Integer` and `CONSTANT_Float` in addition to the M2.17 string and class forms; `ldc2_w` decodes `CONSTANT_Long`/`CONSTANT_Double`; a `long`/`double` through `ldc`/`ldc_w`, and `ldc2_w` of any other kind, are typed decode errors. `lcmp`, `fcmpl`/`fcmpg`, `dcmpl`/`dcmpg` and `lreturn`/`freturn`/`dreturn` were added so a fixture can return and compare those constants. The interpreter keeps one local slot per value, so a `long`/`double` argument is read from one local and a fixture may declare the JVM's two-slot width without using the second slot; this is the existing M2.18 deviation, not two-slot widening. There is no `wide` instruction, monitor, `ldc` of `MethodType`/`MethodHandle`/`Dynamic`, or Spring in this slice. The `BytecodeProbe` fixture is assembled in Rust, and its malformed switch methods are decoded when called, so those paths are typed errors rather than hand-built `DecodedMethod` values.
 
+M2.22 boundary: generic reflection reads the `Signature` attribute only. A class or member without one reports raw `Class` objects (a primitive, an array class or a named class), exactly as the JDK does; a malformed signature is `VmError::Signature`, never a silent fallback to the raw type. The exposed surface is `Class.getGenericSuperclass`/`getGenericInterfaces`/`getTypeParameters`, `Field.getGenericType`, `Method.getGenericReturnType`/`getGenericParameterTypes`/`getTypeParameters`, `Constructor.getGenericParameterTypes`/`getTypeParameters` and the four `java.lang.reflect` interface accessors; `getGenericExceptionTypes`, record-component generic types and `AnnotatedType` are not exposed. A Type object's class identity is the public interface it implements (`ParameterizedType`, `TypeVariable`, `WildcardType`, `GenericArrayType`) rather than the JDK's private `sun.reflect.generics.reflectiveObjects` class, and `getTypeName`/`toString` use the VM's deterministic formatter (`raw<arg, arg>`, `? extends X`, `? super X`, `X[]`), not the JDK's exact text. A type-variable occurrence is resolved against the executable's own parameters and then its declaring class's; an occurrence inherited from an enclosing class is kept by name with `Object` as its only bound and a null `getGenericDeclaration`, and an owner is derived from `InnerClasses` only when the outer class is loadable. `ParameterizedType.getOwnerType` reports a raw declaring class for a `$`-encoded member type and the explicit owner type when the signature spells `.Outer<...>`. No annotations changes, record or sealed views, or Spring behavior are added.
+
 ## Decision log
 
 | ADR | Decision | Status |
@@ -839,7 +842,13 @@ A fresh session should:
     interface and array types with array covariance, `tableswitch`/`lookupswitch` targets
     resolved to instruction indices, and `ldc`/`ldc2_w` of int/float/long/double with the
     returns and comparisons that observe them
-    (`cargo test -p rava-interp --test bytecode_surface`). M2.22 is next.
+    (`cargo test -p rava-interp --test bytecode_surface`). M2.22 landed the generic
+    `Type` graph and generic reflection: the JVMS signature parser with typed errors, the
+    `HeapObject::Type` representations and their structural cache and roots, the generic
+    queries on `Class`, `Field`, `Method` and `Constructor`, the accessors on
+    `ParameterizedType`, `TypeVariable`, `WildcardType` and `GenericArrayType`, and the
+    committed release-17 `Box`/`StringBox`/`Nest`/`GenericProbe` fixture
+    (`cargo test -p rava-interp --test generic_types`). M2.23 is next.
 4. Do not write runtime code outside a defined slice.
 
 ## Open decisions

@@ -14,7 +14,7 @@ use std::sync::{Mutex, MutexGuard, RwLock};
 use crate::VmError;
 use crate::heap::{
     AnnotationObject, ArrayClass, BoxedPrimitive, ClassRef, FieldLayout, Heap, HeapObject,
-    MemberKind, ObjRef, PrimitiveKind, ReflectMember,
+    MemberKind, ObjRef, PrimitiveKind, ReflectMember, TypeObject,
 };
 use crate::hooks::Hooks;
 use crate::loader::{ClassEntry, ClassId, ClassTable, LoaderId};
@@ -43,6 +43,7 @@ pub enum SharedLock {
     PrimitiveClasses,
     ArrayClasses,
     ReflectMembers,
+    TypeObjects,
     EnumConstants,
     InternedStrings,
     NativeRegistry,
@@ -58,6 +59,7 @@ impl fmt::Display for SharedLock {
             Self::PrimitiveClasses => write!(f, "primitive-class cache"),
             Self::ArrayClasses => write!(f, "array-class cache"),
             Self::ReflectMembers => write!(f, "reflected-member cache"),
+            Self::TypeObjects => write!(f, "generic-type cache"),
             Self::EnumConstants => write!(f, "enum-constant cache"),
             Self::InternedStrings => write!(f, "interned-string table"),
             Self::NativeRegistry => write!(f, "native registry"),
@@ -99,6 +101,10 @@ pub struct Shared {
     /// the objects, which are never freed while `Shared` lives and are reported as roots
     /// by [`Shared::roots`].
     reflect_members: Mutex<HashMap<(ClassId, MemberKind, String, String), ObjRef>>,
+    /// One `java.lang.reflect.Type` object per structural type. The cache owns the
+    /// objects, which are never freed while `Shared` lives and are reported as roots by
+    /// [`Shared::roots`]. A raw class type is not here: it is the class object itself.
+    type_objects: Mutex<HashMap<TypeObject, ObjRef>>,
     /// One enum-constant object per `(enum class, constant name)`. The cache owns the
     /// objects, which are never freed while `Shared` lives and are reported as roots by
     /// [`Shared::roots`].
@@ -121,6 +127,7 @@ impl Shared {
             primitive_classes: Mutex::new(HashMap::new()),
             array_classes: Mutex::new(HashMap::new()),
             reflect_members: Mutex::new(HashMap::new()),
+            type_objects: Mutex::new(HashMap::new()),
             enum_constants: Mutex::new(HashMap::new()),
             interned_strings: Mutex::new(HashMap::new()),
             natives: RwLock::new(HashMap::new()),
@@ -418,6 +425,33 @@ impl Shared {
         Ok(None)
     }
 
+    /// The `java.lang.reflect.Type` object for one structural type, allocated on first
+    /// use.
+    ///
+    /// The key is the whole structure, so two resolutions of the same signature — the
+    /// return type and the parameter type of one generic method, or the same field queried
+    /// twice — return the same handle. That is what makes `==` on two reflections of one
+    /// declaration true, as it is on the JDK. A raw class type never reaches this cache:
+    /// it is a `Class` object, because `java.lang.Class` implements `Type`.
+    ///
+    /// Lock order is cache, then heap, matching [`Shared::class_object`].
+    pub fn type_object(&self, ty: TypeObject) -> ObjRef {
+        let mut cache = self
+            .type_objects
+            .lock()
+            .expect("generic-type cache lock poisoned");
+        if let Some(reference) = cache.get(&ty) {
+            return *reference;
+        }
+        let reference = self
+            .heap
+            .lock()
+            .expect("heap lock poisoned")
+            .allocate_type(ty.clone());
+        cache.insert(ty, reference);
+        reference
+    }
+
     /// The reflected-member object for one `(class, kind, name, descriptor)`, allocated on
     /// first use.
     ///
@@ -629,6 +663,7 @@ impl Shared {
             Map,
             Array(ClassRef),
             Lambda(ClassId),
+            Type(&'static str),
         }
 
         let kind = {
@@ -651,6 +686,7 @@ impl Shared {
                 HeapObject::Map(_) => Kind::Map,
                 HeapObject::Array(array) => Kind::Array(array.component.clone()),
                 HeapObject::Lambda(lambda) => Kind::Lambda(lambda.interface),
+                HeapObject::Type(ty) => Kind::Type(ty.class_name()),
             }
         };
 
@@ -691,6 +727,10 @@ impl Shared {
                 self.class_object(class)
             }
             Kind::Array(component) => self.array_class(component),
+            Kind::Type(name) => {
+                let class = self.load_library_class(name)?;
+                self.class_object(class)
+            }
         }
     }
 
@@ -914,6 +954,23 @@ impl Shared {
         }
 
         {
+            let type_objects = self
+                .type_objects
+                .lock()
+                .expect("generic-type cache lock poisoned");
+            for (ty, reference) in type_objects.iter() {
+                if seen.insert(*reference) {
+                    roots.push(*reference);
+                }
+                for nested in ty.references() {
+                    if !nested.is_null() && seen.insert(nested) {
+                        roots.push(nested);
+                    }
+                }
+            }
+        }
+
+        {
             let enum_constants = self
                 .enum_constants
                 .lock()
@@ -1015,6 +1072,11 @@ impl Shared {
         {
             let _guard = self.reflect_members.try_lock().map_err(|_| LockHeld {
                 lock: SharedLock::ReflectMembers,
+            })?;
+        }
+        {
+            let _guard = self.type_objects.try_lock().map_err(|_| LockHeld {
+                lock: SharedLock::TypeObjects,
             })?;
         }
         {

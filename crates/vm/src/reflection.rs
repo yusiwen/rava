@@ -268,7 +268,7 @@ struct ClassEntryView {
 
 /// What a `Class` receiver denotes: a loaded class, one of the nine primitives, or an
 /// array class.
-enum ClassObject {
+pub(crate) enum ClassObject {
     /// A loaded class, identified by its `(loader, name)` class id.
     Named(ClassId),
     /// A primitive type, which has no class file and no loader.
@@ -279,7 +279,7 @@ enum ClassObject {
 
 impl ClassObject {
     /// The class ref this receiver denotes.
-    fn class_ref(&self) -> ClassRef {
+    pub(crate) fn class_ref(&self) -> ClassRef {
         match self {
             Self::Named(class) => ClassRef::Named(*class),
             Self::Primitive(kind) => ClassRef::Primitive(*kind),
@@ -293,7 +293,7 @@ impl ClassObject {
 /// A primitive class object and an array class object are distinct heap kinds, not a
 /// `ClassId`, so every native starts here instead of calling [`crate::Heap::class`] and
 /// failing on `int.class` or `int[].class`.
-fn class_object_of(shared: &Shared, receiver: ObjRef) -> Result<ClassObject, VmError> {
+pub(crate) fn class_object_of(shared: &Shared, receiver: ObjRef) -> Result<ClassObject, VmError> {
     let heap = shared.heap();
     match heap.get(receiver).map_err(heap_error)? {
         HeapObject::Class(class) => Ok(ClassObject::Named(*class)),

@@ -9,6 +9,7 @@ pub mod annotation;
 pub mod boxed;
 pub mod collections;
 pub mod error;
+pub mod generic;
 pub mod heap;
 pub mod hooks;
 pub mod instance;
@@ -30,8 +31,9 @@ pub mod verify;
 pub use error::VmError;
 pub use heap::{
     AnnotationObject, Array, ArrayClass, ArrayKind, BoxedPrimitive, ClassRef, EnumConstant,
-    FieldLayout, FieldSlot, Heap, HeapError, HeapObject, Instance, LambdaObject, LambdaTarget,
-    LambdaTargetKind, MemberKind, ObjRef, PrimitiveKind, ReflectMember,
+    FieldLayout, FieldSlot, GenericArrayType, Heap, HeapError, HeapObject, Instance, LambdaObject,
+    LambdaTarget, LambdaTargetKind, MemberKind, ObjRef, ParameterizedType, PrimitiveKind,
+    ReflectMember, TypeDeclaration, TypeObject, TypeVariableType, WildcardType,
 };
 pub use hooks::{ClassUnloadHook, Hooks, ReferenceHook};
 pub use loader::{ClassEntry, ClassId, ClassState, LoaderId};

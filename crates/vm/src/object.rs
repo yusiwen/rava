@@ -92,6 +92,13 @@ fn object_to_string(
     receiver: ObjRef,
     _args: &[Value],
 ) -> Result<Option<Value>, VmError> {
+    // A `java.lang.reflect.Type` object prints its type name, as the JDK's
+    // `ParameterizedTypeImpl`/`TypeVariableImpl` overrides do; a class object keeps the
+    // `ClassName@hash` shape.
+    if let Some(text) = crate::generic::type_text(shared, receiver)? {
+        let reference = shared.heap().allocate_string(text);
+        return Ok(Some(Value::Ref(reference)));
+    }
     let class_name = runtime_binary_name(shared, receiver)?;
     let text = format!("{class_name}@{:x}", receiver.identity_hash() as u32);
     let reference = shared.heap().allocate_string(text);
@@ -124,6 +131,7 @@ pub(crate) fn runtime_binary_name(shared: &Shared, receiver: ObjRef) -> Result<S
         Map,
         Array(ClassRef),
         Lambda(ClassId),
+        Type(&'static str),
     }
 
     let kind = {
@@ -146,6 +154,7 @@ pub(crate) fn runtime_binary_name(shared: &Shared, receiver: ObjRef) -> Result<S
             HeapObject::Map(_) => Kind::Map,
             HeapObject::Array(array) => Kind::Array(array.component.clone()),
             HeapObject::Lambda(lambda) => Kind::Lambda(lambda.interface),
+            HeapObject::Type(ty) => Kind::Type(ty.class_name()),
         }
     };
 
@@ -177,5 +186,6 @@ pub(crate) fn runtime_binary_name(shared: &Shared, receiver: ObjRef) -> Result<S
         Kind::List => Ok("java.util.ArrayList".to_owned()),
         Kind::Map => Ok("java.util.HashMap".to_owned()),
         Kind::Array(component) => shared.class_ref_name(&ClassRef::array(component)),
+        Kind::Type(name) => Ok(name.replace('/', ".")),
     }
 }

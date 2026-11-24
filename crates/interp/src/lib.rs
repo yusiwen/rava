@@ -1369,6 +1369,7 @@ fn runtime_class_ref(shared: &Shared, reference: ObjRef) -> Result<ClassRef, Int
         Library(&'static str),
         Class,
         Array(ClassRef),
+        Type(&'static str),
     }
 
     let kind = {
@@ -1392,6 +1393,7 @@ fn runtime_class_ref(shared: &Shared, reference: ObjRef) -> Result<ClassRef, Int
                 RuntimeKind::Array(ClassRef::array(array.component.clone()))
             }
             HeapObject::Lambda(lambda) => RuntimeKind::Named(lambda.interface),
+            HeapObject::Type(ty) => RuntimeKind::Type(ty.class_name()),
         }
     };
 
@@ -1400,6 +1402,7 @@ fn runtime_class_ref(shared: &Shared, reference: ObjRef) -> Result<ClassRef, Int
         RuntimeKind::Class => ClassRef::Named(shared.load_library_class("java/lang/Class")?),
         RuntimeKind::Library(name) => ClassRef::Named(shared.load_library_class(name)?),
         RuntimeKind::Array(class_ref) => class_ref,
+        RuntimeKind::Type(name) => ClassRef::Named(shared.load_library_class(name)?),
     })
 }
 
@@ -1558,6 +1561,7 @@ fn dispatch_class(
         Map,
         Array,
         Lambda(ClassId),
+        Type(&'static str),
     }
 
     let kind = {
@@ -1577,6 +1581,7 @@ fn dispatch_class(
             HeapObject::Map(_) => ReceiverKind::Map,
             HeapObject::Array(_) => ReceiverKind::Array,
             HeapObject::Lambda(lambda) => ReceiverKind::Lambda(lambda.interface),
+            HeapObject::Type(ty) => ReceiverKind::Type(ty.class_name()),
         }
     };
 
@@ -1594,6 +1599,7 @@ fn dispatch_class(
         ReceiverKind::List => resolve_from(shared, current, rava_vm::collections::ARRAY_LIST_CLASS),
         ReceiverKind::Map => resolve_from(shared, current, rava_vm::maps::HASH_MAP_CLASS),
         ReceiverKind::Array => resolve_from(shared, current, "java/lang/Object"),
+        ReceiverKind::Type(name) => resolve_from(shared, current, name),
     }
 }
 

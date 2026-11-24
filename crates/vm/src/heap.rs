@@ -477,6 +477,128 @@ pub struct ReflectMember {
     pub descriptor: String,
 }
 
+/// A `java.lang.reflect.Type` that is not a raw `Class`.
+///
+/// A raw class type (`String`, `int`, `String[]`) *is* a `Class` object in Java, because
+/// `Class` implements `Type`; those types are not represented here. This enum covers the
+/// four reflective interfaces the JDK creates separate objects for:
+/// `ParameterizedType`, `TypeVariable`, `WildcardType` and `GenericArrayType`.
+///
+/// Every nested type is an [`ObjRef`] to another `Class` object or `Type` object. Type
+/// objects are immutable and cached structurally by [`crate::Shared::type_object`], so two
+/// reflections of the same signature return the same handle; the nested handles are
+/// permanent roots through their own caches.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum TypeObject {
+    Parameterized(ParameterizedType),
+    TypeVariable(TypeVariableType),
+    Wildcard(WildcardType),
+    GenericArray(GenericArrayType),
+}
+
+impl TypeObject {
+    /// The internal name of the `java.lang.reflect` interface this object implements.
+    ///
+    /// This is the class identity [`crate::Shared::get_class`] reports and the class the
+    /// interpreter dispatches its virtual methods from. The JDK's actual implementation
+    /// classes are private (`sun.reflect.generics.reflectiveObjects.*Impl`); reporting the
+    /// public interface is this VM's documented, deterministic shape, as it is for lambdas.
+    pub fn class_name(&self) -> &'static str {
+        match self {
+            Self::Parameterized(_) => "java/lang/reflect/ParameterizedType",
+            Self::TypeVariable(_) => "java/lang/reflect/TypeVariable",
+            Self::Wildcard(_) => "java/lang/reflect/WildcardType",
+            Self::GenericArray(_) => "java/lang/reflect/GenericArrayType",
+        }
+    }
+
+    /// Every nested type handle this object owns, in a deterministic order.
+    ///
+    /// [`crate::Shared::roots`] reports them so a future collector sees the retention
+    /// instead of inferring it from the type-object cache alone.
+    pub fn references(&self) -> Vec<ObjRef> {
+        match self {
+            Self::Parameterized(parameterized) => {
+                let mut references = Vec::new();
+                references.extend(parameterized.owner);
+                references.extend(parameterized.arguments.iter().copied());
+                references
+            }
+            Self::TypeVariable(variable) => variable.bounds.clone(),
+            Self::Wildcard(wildcard) => {
+                let mut references = wildcard.upper.clone();
+                references.extend(wildcard.lower.iter().copied());
+                references
+            }
+            Self::GenericArray(array) => vec![array.component],
+        }
+    }
+}
+
+/// A `java.lang.reflect.ParameterizedType`: the raw class, its type arguments and the
+/// owner type of a member class.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ParameterizedType {
+    /// The raw class (`java/util/List`), resolved through the declaring class's loader.
+    pub raw: ClassRef,
+    /// The owner type for a member class. `None` for a top-level type; the JDK reports
+    /// the declaring class as a raw `Class` when the signature does not spell an owner.
+    pub owner: Option<ObjRef>,
+    pub arguments: Vec<ObjRef>,
+}
+
+/// A `java.lang.reflect.TypeVariable`: its name, its bounds and the declaration that
+/// introduced it.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct TypeVariableType {
+    pub name: String,
+    pub bounds: Vec<ObjRef>,
+    /// `None` only for a type-variable name whose declaration could not be recovered; a
+    /// parsed class or method signature always supplies one.
+    pub declaration: Option<TypeDeclaration>,
+}
+
+/// A `java.lang.reflect.WildcardType`: its upper and lower bounds.
+///
+/// `?` has the upper bound `Object` and no lower bound, `? extends X` has `[X]`, and
+/// `? super X` has `[Object]` upper and `[X]` lower, exactly as the JDK reports them.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct WildcardType {
+    pub upper: Vec<ObjRef>,
+    pub lower: Vec<ObjRef>,
+}
+
+/// A `java.lang.reflect.GenericArrayType`: its component type.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct GenericArrayType {
+    pub component: ObjRef,
+}
+
+/// The declaration that introduced a type variable: a class, method or constructor.
+///
+/// The fields name the `ReflectMember` the VM caches for the declaration; a type variable
+/// its `getGenericDeclaration` returns that member object (or the class object).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum TypeDeclaration {
+    Class(ClassId),
+    Member {
+        kind: MemberKind,
+        class: ClassId,
+        name: String,
+        descriptor: String,
+    },
+}
+
+impl TypeDeclaration {
+    /// The member kind of this declaration, or `None` for a class declaration.
+    pub fn member_kind(&self) -> Option<MemberKind> {
+        match self {
+            Self::Class(_) => None,
+            Self::Member { kind, .. } => Some(*kind),
+        }
+    }
+}
+
 /// One annotation instance (`java.lang.annotation.Annotation`).
 ///
 /// The object stores its annotation type's class identity and the element values the
@@ -587,6 +709,13 @@ pub enum HeapObject {
     /// distinct from [`HeapObject::Class`] and [`HeapObject::PrimitiveClass`], which stay
     /// the representations of a loaded class and a primitive.
     ArrayClass(ArrayClass),
+    /// A `java.lang.reflect.Type` that is not a raw `Class`: a parameterized type, a type
+    /// variable, a wildcard or a generic array type.
+    ///
+    /// A raw class type stays a `Class`/`PrimitiveClass`/`ArrayClass` object because
+    /// `java.lang.Class` itself implements `Type`. Cached by
+    /// [`crate::Shared::type_object`], never allocated by a caller directly.
+    Type(TypeObject),
     /// A reflected `Field`, `Method` or `Constructor`: one heap object per member.
     ///
     /// Like a class object, the object holds identity only; the class's member record is
@@ -743,6 +872,12 @@ impl Heap {
     /// [`crate::Shared::primitive_class`], which caches one object per primitive kind.
     pub fn allocate_primitive_class(&mut self, kind: PrimitiveKind) -> ObjRef {
         self.allocate(HeapObject::PrimitiveClass(kind))
+    }
+
+    /// Allocate a `java.lang.reflect.Type` object. Callers go through
+    /// [`crate::Shared::type_object`], which caches one object per structural type.
+    pub fn allocate_type(&mut self, ty: TypeObject) -> ObjRef {
+        self.allocate(HeapObject::Type(ty))
     }
 
     /// Allocate a reflected member. Callers go through
@@ -961,6 +1096,20 @@ impl Heap {
             _ => Err(HeapError::WrongObjectKind {
                 reference,
                 expected: "an array class object",
+            }),
+        }
+    }
+
+    /// The type behind a `java.lang.reflect.Type` object.
+    ///
+    /// A raw class type is a class object, not this heap kind, so it reports a typed
+    /// error here; callers that accept both use [`crate::generic`].
+    pub fn type_object(&self, reference: ObjRef) -> Result<&TypeObject, HeapError> {
+        match self.get(reference)? {
+            HeapObject::Type(ty) => Ok(ty),
+            _ => Err(HeapError::WrongObjectKind {
+                reference,
+                expected: "a reflected type",
             }),
         }
     }

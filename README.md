@@ -157,8 +157,8 @@ name through the primitive-class cache and an array descriptor through the array
 cache, without initializing the class. `ldc` of a `String` still interns, `ldc_w`'s
 two-byte index is supported, and a numeric constant or any other constant kind is a
 typed error; a missing class and a malformed array descriptor are typed errors too.
-Generic `Type`, `MethodType`/`MethodHandle` constants, lambdas, annotation changes and
-Spring remain later slices. **M2.18 is done (2026-11-24):** `invokedynamic` decodes
+`MethodType`/`MethodHandle` constants, annotation changes and Spring remain later
+slices. **M2.18 is done (2026-11-24):** `invokedynamic` decodes
 opcode `0xba` and resolves its `BootstrapMethods` entry into a typed `REF_invokeStatic`
 handle plus `String`/`Class`/`int`/`long`/`float`/`double` static arguments, with typed
 decode errors for a malformed, non-static or out-of-range bootstrap reference.
@@ -204,7 +204,22 @@ unsorted or duplicate lookup keys. `ldc`/`ldc_w` now decode Integer and Float co
 and `ldc2_w` Long/Double, with `lcmp`/`fcmp<op>`/`dcmp<op>` and
 `lreturn`/`freturn`/`dreturn` returning and comparing them; the existing one-slot local
 model is unchanged. The `BytecodeProbe` fixture and its malformed-switch methods are
-assembled in Rust. **M2.22 is next.**
+assembled in Rust. **M2.22 is done (2026-11-24):** the JVMS `Signature` grammar is parsed
+by `rava-classfile` into a typed class/method/field model that keeps type-parameter names,
+class and interface bounds, nested owners, wildcard indicators and arrays, and reports a
+malformed signature as a structured error. `rava-vm` resolves that graph through the
+declaring class's loader: a raw type is the existing `Class` object, while
+`ParameterizedType`, `TypeVariable`, `WildcardType` and `GenericArrayType` are cached
+`HeapObject::Type` objects and GC roots. `Class.getGenericSuperclass`,
+`getGenericInterfaces` and `getTypeParameters`, `Field.getGenericType`,
+`Method.getGenericReturnType`/`getGenericParameterTypes`/`getTypeParameters`, and
+`Constructor.getGenericParameterTypes`/`getTypeParameters` expose the graph, with the
+`java.lang.reflect` interface accessors and deterministic type names. A committed
+`javac --release 17` fixture (`Box<T extends Number> implements Comparable<Box<T>>` with
+`List<String>`, `T[]`, `? extends Number`, `? super Integer` and `Map.Entry`, a generic
+method and generic constructors) drives the APIs through `invokevirtual`/`invokeinterface`.
+`getGenericExceptionTypes`, record/sealed views, annotation changes and Spring remain
+later slices. **M2.23 is next.**
 
 ## What this project is
 

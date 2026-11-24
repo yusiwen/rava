@@ -31,10 +31,11 @@ pub use builder::ClassBuilder;
 pub use constant_pool::{Constant, ConstantPool, ReferenceKind};
 pub use error::Error;
 pub use metadata::{
-    Annotation, AnnotationValue, ClassMetadata, ConstantValue, ElementValue, EnclosingMethod,
-    FieldMetadata, InnerClass, MethodMetadata, MethodNameAndDescriptor, MethodParameter,
-    RawAttribute, RecordComponent, TypeAnnotation, TypeAnnotationTarget, TypePathEntry,
-    TypePathKind,
+    Annotation, AnnotationValue, ClassMetadata, ClassSignature, ClassTypeSignature, ConstantValue,
+    ElementValue, EnclosingMethod, FieldMetadata, InnerClass, MethodMetadata,
+    MethodNameAndDescriptor, MethodParameter, MethodSignature, PrimitiveSignature, RawAttribute,
+    RecordComponent, SignatureError, TypeAnnotation, TypeAnnotationTarget, TypeArgument,
+    TypeParameter, TypePathEntry, TypePathKind, TypeSignature,
 };
 pub use model::{
     Attribute, BootstrapArgument, BootstrapMethod, BootstrapMethodEntry, BootstrapMethodHandle,

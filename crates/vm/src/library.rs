@@ -22,7 +22,7 @@ use crate::loader::LoaderId;
 use crate::shared::Shared;
 use crate::thread::ThreadState;
 use crate::value::Value;
-use crate::{annotation, boxed, collections, instance, maps, object, reflection, string};
+use crate::{annotation, boxed, collections, generic, instance, maps, object, reflection, string};
 
 /// `java.lang.System`'s binary-stable internal name.
 const SYSTEM_CLASS: &str = "java/lang/System";
@@ -47,6 +47,7 @@ pub fn register_all(shared: &Shared) -> Result<(), VmError> {
     maps::register_natives(shared);
     boxed::register_natives(shared);
     reflection::register_natives(shared);
+    generic::register_natives(shared);
     annotation::register_natives(shared);
     register_print_stream(shared);
     install_system_streams(shared)

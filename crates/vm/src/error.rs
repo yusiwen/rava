@@ -79,6 +79,11 @@ pub enum VmError {
     DuplicateClass { loader: LoaderId, name: String },
     /// No loader in the delegation chain supplied the class.
     ClassNotFound { loader: LoaderId, name: String },
+    /// A `Signature` attribute is not a well-formed JVMS generic signature.
+    ///
+    /// Reflection reports this instead of falling back to the raw type, because a class
+    /// file that declares generic metadata and encodes it badly is a real defect.
+    Signature(rava_classfile::metadata::SignatureError),
 }
 
 impl fmt::Display for VmError {
@@ -123,6 +128,7 @@ impl fmt::Display for VmError {
             Self::ClassNotFound { loader, name } => {
                 write!(f, "class {name} not found from loader {}", loader.0)
             }
+            Self::Signature(error) => write!(f, "invalid generic signature: {error}"),
         }
     }
 }
@@ -132,8 +138,15 @@ impl std::error::Error for VmError {
         match self {
             Self::Io { source, .. } => Some(source),
             Self::ClassFile(error) => Some(error),
+            Self::Signature(error) => Some(error),
             _ => None,
         }
+    }
+}
+
+impl From<rava_classfile::metadata::SignatureError> for VmError {
+    fn from(error: rava_classfile::metadata::SignatureError) -> Self {
+        Self::Signature(error)
     }
 }
 
