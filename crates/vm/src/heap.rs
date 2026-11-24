@@ -67,6 +67,27 @@ impl ArrayKind {
             Self::Boolean | Self::Byte | Self::Char | Self::Short | Self::Int => Value::Int(0),
         }
     }
+
+    /// The Java element name used in diagnostics.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Boolean => "boolean",
+            Self::Byte => "byte",
+            Self::Char => "char",
+            Self::Short => "short",
+            Self::Int => "int",
+            Self::Long => "long",
+            Self::Float => "float",
+            Self::Double => "double",
+            Self::Reference => "reference",
+        }
+    }
+}
+
+impl fmt::Display for ArrayKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.name())
+    }
 }
 
 /// One instance field's position in a class layout.

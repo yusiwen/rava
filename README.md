@@ -34,7 +34,12 @@ C1 stubs that carry neither `Code` nor `ACC_NATIVE`. **M2.5 is done (2026-11-24)
 `new`/`dup`/`invokespecial`/`getfield`/`putfield` and the reference loads/stores execute;
 `run_instance_method` puts `this` in local 0 on the existing frame, the VM owns the
 superclass-first instance layout and allocation, and instance calls prefer the native
-registry, then `Code`, including the registered no-op `Object.<init>()V`. **M2.6 is next.**
+registry, then `Code`, including the registered no-op `Object.<init>()V`. **M2.6 is done
+(2026-11-24):** `newarray`, `anewarray`, `multianewarray`, `arraylength` and the array
+load/store opcodes allocate and access the existing heap arrays; `goto`, the
+`if<cond>`/`if_icmp<cond>` comparisons, `ifnull`/`ifnonnull` and `iinc` execute with
+branch targets resolved to instruction indices at decode time; and bounds, null,
+negative-size and element-kind failures are typed errors. **M2.7 is next.**
 
 ## What this project is
 

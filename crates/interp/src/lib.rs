@@ -1,8 +1,9 @@
 //! Bytecode decoding, frames and the interpreter.
 //!
 //! M0.5a implements the integer subset and `invokestatic`; M2.4 added native dispatch
-//! through the receiver-carrying ABI, and M2.5 adds instance allocation, constructors,
-//! instance fields and instance method calls. The decoded form and the frame are the
+//! through the receiver-carrying ABI, M2.5 adds instance allocation, constructors,
+//! instance fields and instance method calls, and M2.6 adds primitive/reference arrays
+//! and the integer control-flow instructions. The decoded form and the frame are the
 //! contracts a later JIT consumes; there is no second frame model.
 
 #![forbid(unsafe_code)]
@@ -13,14 +14,14 @@ mod instr;
 
 pub use error::InterpError;
 pub use frame::Frame;
-pub use instr::{DecodedMethod, Instr, decode};
+pub use instr::{DecodedMethod, Instr, IntCondition, decode};
 
 use std::sync::Arc;
 
 use rava_classfile::model::ACC_STATIC;
 use rava_vm::{
-    ClassEntry, ClassId, ClassState, FrameRootsGuard, HeapObject, ObjRef, Shared, ThreadState,
-    Value,
+    ArrayKind, ClassEntry, ClassId, ClassState, FrameRootsGuard, HeapObject, ObjRef, Shared,
+    ThreadState, Value,
 };
 
 /// Run a static method with `args` and return its result (`None` for `void`).
@@ -201,6 +202,13 @@ fn execute(
                 let reference = shared.allocate_instance(target)?;
                 frame.push(Value::Ref(reference))?;
             }
+            Instr::Iinc(index, increment) => {
+                let slot = frame.locals.get_mut(usize::from(index)).ok_or_else(|| {
+                    InterpError::Decode(format!("local {index} is outside the frame"))
+                })?;
+                let value = slot.as_int().ok_or(InterpError::WrongValue)?;
+                *slot = Value::Int(value.wrapping_add(i32::from(increment)));
+            }
             Instr::ILoad(index) | Instr::ALoad(index) => {
                 let value = *frame.locals.get(usize::from(index)).ok_or_else(|| {
                     InterpError::Decode(format!("local {index} is outside the frame"))
@@ -213,6 +221,90 @@ fn execute(
                     InterpError::Decode(format!("local {index} is outside the frame"))
                 })?;
                 *slot = value;
+            }
+            Instr::NewArray(kind) => {
+                let length = checked_length(int(frame.pop()?)?)?;
+                let reference = shared.heap().allocate_array(kind, length);
+                frame.push(Value::Ref(reference))?;
+            }
+            Instr::ANewArray { component } => {
+                let length = checked_length(int(frame.pop()?)?)?;
+                // `anewarray` resolves its component type (JVMS §6.5.anewarray). Array
+                // component types have no class identity in this slice, so only an object
+                // component is resolved; the descriptor alone describes an array one.
+                resolve_array_component(shared, frame.class, &component)?;
+                let reference = shared.heap().allocate_array(ArrayKind::Reference, length);
+                frame.push(Value::Ref(reference))?;
+            }
+            Instr::MultiANewArray {
+                component,
+                dimensions,
+            } => {
+                let mut counts = Vec::with_capacity(usize::from(dimensions));
+                for _ in 0..dimensions {
+                    counts.push(int(frame.pop()?)?);
+                }
+                counts.reverse();
+                let reference = allocate_multidim(shared, &component, &counts)?;
+                frame.push(Value::Ref(reference))?;
+            }
+            Instr::ArrayLength => {
+                let reference = array_ref(frame)?;
+                let length = shared.heap().array(reference)?.elements.len();
+                let length = i32::try_from(length).map_err(|_| {
+                    InterpError::Decode("array is longer than an int can hold".to_owned())
+                })?;
+                frame.push(Value::Int(length))?;
+            }
+            Instr::ArrayLoad(kind) => {
+                let index = int(frame.pop()?)?;
+                let reference = array_ref(frame)?;
+                let value = {
+                    let heap = shared.heap();
+                    let array = heap.array(reference)?;
+                    ensure_array_kind(kind, array.kind)?;
+                    array.elements[element_position(index, array.elements.len())?]
+                };
+                frame.push(value)?;
+            }
+            Instr::ArrayStore(kind) => {
+                // JVMS §6.5.iastore: the value is on top, then the index, then the array.
+                let value = frame.pop()?;
+                let index = int(frame.pop()?)?;
+                let reference = array_ref(frame)?;
+                {
+                    let mut heap = shared.heap();
+                    let array = heap.array_mut(reference)?;
+                    ensure_array_kind(kind, array.kind)?;
+                    let position = element_position(index, array.elements.len())?;
+                    if !value_fits_array(kind, value) {
+                        return Err(InterpError::WrongValue);
+                    }
+                    array.elements[position] = value;
+                }
+            }
+            Instr::Goto(target) => frame.pc = target,
+            Instr::If(condition, target) => {
+                if condition.satisfied(int(frame.pop()?)?, 0) {
+                    frame.pc = target;
+                }
+            }
+            Instr::IfICmp(condition, target) => {
+                let right = int(frame.pop()?)?;
+                let left = int(frame.pop()?)?;
+                if condition.satisfied(left, right) {
+                    frame.pc = target;
+                }
+            }
+            Instr::IfNull(target) => {
+                if pop_is_null(frame)? {
+                    frame.pc = target;
+                }
+            }
+            Instr::IfNonNull(target) => {
+                if !pop_is_null(frame)? {
+                    frame.pc = target;
+                }
             }
             Instr::LdcString(text) => {
                 let reference = shared.heap().allocate_string(text);
@@ -542,6 +634,150 @@ fn class_name(shared: &Shared, class: ClassId) -> String {
 
 fn int(value: Value) -> Result<i32, InterpError> {
     value.as_int().ok_or(InterpError::WrongValue)
+}
+
+/// Pop a reference for an array instruction. A null handle is not rejected here: the
+/// heap reports it as `HeapError::NullReference`, the same typed error every other
+/// reference access produces.
+fn array_ref(frame: &mut Frame) -> Result<ObjRef, InterpError> {
+    match frame.pop()? {
+        Value::Ref(reference) => Ok(reference),
+        _ => Err(InterpError::WrongValue),
+    }
+}
+
+/// Pop a reference and report whether it is null, for `ifnull`/`ifnonnull`.
+fn pop_is_null(frame: &mut Frame) -> Result<bool, InterpError> {
+    match frame.pop()? {
+        Value::Ref(reference) => Ok(reference.is_null()),
+        _ => Err(InterpError::WrongValue),
+    }
+}
+
+/// A non-negative array length, or `NegativeArraySize`.
+fn checked_length(length: i32) -> Result<usize, InterpError> {
+    usize::try_from(length).map_err(|_| InterpError::NegativeArraySize(length))
+}
+
+/// A non-negative element index inside `length`, or `ArrayIndexOutOfBounds`.
+fn element_position(index: i32, length: usize) -> Result<usize, InterpError> {
+    let position =
+        usize::try_from(index).map_err(|_| InterpError::ArrayIndexOutOfBounds { index, length })?;
+    if position >= length {
+        return Err(InterpError::ArrayIndexOutOfBounds { index, length });
+    }
+    Ok(position)
+}
+
+/// Check that an array instruction addresses the array's element kind.
+///
+/// `baload`/`bastore` are decoded as [`ArrayKind::Byte`] but accept a `boolean[]` too;
+/// every other opcode matches its kind exactly.
+fn ensure_array_kind(expected: ArrayKind, found: ArrayKind) -> Result<(), InterpError> {
+    let byte_or_boolean = expected == ArrayKind::Byte && found == ArrayKind::Boolean;
+    if expected == found || byte_or_boolean {
+        return Ok(());
+    }
+    Err(InterpError::ArrayKindMismatch {
+        expected: expected_array_name(expected),
+        found,
+    })
+}
+
+fn expected_array_name(kind: ArrayKind) -> &'static str {
+    if kind == ArrayKind::Byte {
+        "boolean or byte"
+    } else {
+        kind.name()
+    }
+}
+
+/// Whether a value can be stored through an array store opcode of this element kind.
+fn value_fits_array(kind: ArrayKind, value: Value) -> bool {
+    matches!(
+        (kind, value),
+        (
+            ArrayKind::Boolean
+                | ArrayKind::Byte
+                | ArrayKind::Char
+                | ArrayKind::Short
+                | ArrayKind::Int,
+            Value::Int(_),
+        ) | (ArrayKind::Long, Value::Long(_))
+            | (ArrayKind::Float, Value::Float(_))
+            | (ArrayKind::Double, Value::Double(_))
+            | (ArrayKind::Reference, Value::Ref(_))
+    )
+}
+
+/// Resolve an `anewarray` component through the current class's loader.
+///
+/// An array component (`[I`, `[[Ljava/lang/String;`) names a type this slice has no
+/// class identity for, so it is described by the descriptor and not resolved.
+fn resolve_array_component(
+    shared: &Shared,
+    current: ClassId,
+    component: &str,
+) -> Result<(), InterpError> {
+    if component.starts_with('[') {
+        return Ok(());
+    }
+    resolve_from(shared, current, component)?;
+    Ok(())
+}
+
+/// Allocate a `multianewarray` array, one nesting level per count.
+///
+/// `descriptor` is the full array descriptor from the instruction and `counts` has one
+/// length per allocated dimension, outermost first. When fewer dimensions are allocated
+/// than the descriptor has, the innermost allocated level is a reference array whose
+/// elements stay null, which is what `new int[2][]` produces.
+fn allocate_multidim(
+    shared: &Shared,
+    descriptor: &str,
+    counts: &[i32],
+) -> Result<ObjRef, InterpError> {
+    let element = descriptor.strip_prefix('[').ok_or_else(|| {
+        InterpError::Decode(format!(
+            "multianewarray descriptor {descriptor} is not an array"
+        ))
+    })?;
+    let Some((&first, rest)) = counts.split_first() else {
+        return Err(InterpError::Decode(
+            "multianewarray allocated no dimensions".to_owned(),
+        ));
+    };
+    let length = checked_length(first)?;
+    if rest.is_empty() {
+        let kind = array_element_kind(element)?;
+        return Ok(shared.heap().allocate_array(kind, length));
+    }
+    let reference = shared.heap().allocate_array(ArrayKind::Reference, length);
+    for position in 0..length {
+        let child = allocate_multidim(shared, element, rest)?;
+        shared.heap().array_mut(reference)?.elements[position] = Value::Ref(child);
+    }
+    Ok(reference)
+}
+
+/// The `ArrayKind` of one array descriptor's element type.
+fn array_element_kind(element: &str) -> Result<ArrayKind, InterpError> {
+    Ok(match element.as_bytes().first().copied() {
+        Some(b'I') => ArrayKind::Int,
+        Some(b'J') => ArrayKind::Long,
+        Some(b'F') => ArrayKind::Float,
+        Some(b'D') => ArrayKind::Double,
+        Some(b'B') => ArrayKind::Byte,
+        Some(b'C') => ArrayKind::Char,
+        Some(b'S') => ArrayKind::Short,
+        Some(b'Z') => ArrayKind::Boolean,
+        Some(b'L' | b'[') => ArrayKind::Reference,
+        _ => {
+            return Err(InterpError::Decode(format!(
+                "bad array element descriptor {element}"
+            )));
+        }
+    })
 }
 
 /// Replace the frame's published roots with its locals/stack plus `values`, the

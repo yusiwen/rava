@@ -6,7 +6,7 @@
 **Started:** 2026-11-22
 
 > Ledger. P0 and P1 were accepted on 2026-11-23. M1 is complete; M2 is in progress
-> (M2.1, M2.2, M2.3, M2.4 and M2.5 done). Keep this file honest and terse.
+> (M2.1, M2.2, M2.3, M2.4, M2.5 and M2.6 done). Keep this file honest and terse.
 
 ## Phase status
 
@@ -26,7 +26,7 @@ release process, if wanted, becomes its own phase.
 
 > Gates are defined in `docs/requirements.md` § Milestones. P0 and P1 are accepted;
 > M0 and M1 are complete, and both gate reviews have passed. M2 is in progress, with
-> M2.1, M2.2, M2.3, M2.4 and M2.5 done.
+> M2.1, M2.2, M2.3, M2.4, M2.5 and M2.6 done.
 
 | Milestone | Delivers | Gate | Status |
 | :--- | :--- | :--- | :--- |
@@ -62,11 +62,11 @@ release process, if wanted, becomes its own phase.
 | M2.3 | `stdlib/c1/classes` as the bootstrap library and its metadata through the VM | R3 | `cargo test -p rava-vm --test c1_runtime` exits 0 | done |
 | M2.4 | Class objects and basic `Object`/`Class` reflection | R3 | `cargo test -p rava-interp --test class_objects` exits 0 | done |
 | M2.5 | Instance allocation, constructors, fields and instance calls | R3 | `cargo test -p rava-interp --test instance_execution` exits 0 | done |
-| M2.6 | Arrays and integer control flow | R3 | `cargo test -p rava-interp --test arrays_control` exits 0 | todo |
+| M2.6 | Arrays and integer control flow | R3 | `cargo test -p rava-interp --test arrays_control` exits 0 | done |
 
 P0 and P1 are accepted; P2 is done because the M2 increments are sliced. All M0 and
-M1 slices are done, and both gate reviews passed. M2.1, M2.2, M2.3, M2.4 and M2.5 are
-done; M2.6 is next.
+M1 slices are done, and both gate reviews passed. M2.1, M2.2, M2.3, M2.4, M2.5 and
+M2.6 are done; M2.7 is next.
 
 ## Slice log
 
@@ -89,6 +89,7 @@ done; M2.6 is next.
 | M2.3 | `cargo test -p rava-vm --test c1_runtime` | 0 | 2026-11-24 | `stdlib/c1/classes` is the bootstrap class source through the existing `DirectorySource` and `(loader, name)` identity; `Shared::with_library_dir`, `Shared::load_library_class`, `Shared::library_metadata` and `ClassEntry::metadata()` decode C1 metadata without a `Code` attribute; the test loads `java.lang.String`, `java.lang.Class`, `java.util.List`, sealed `java.lang.reflect.Executable` and annotation type `java.lang.Deprecated`, checks superclass/interfaces/signatures/field and method descriptors/annotations/permitted subclasses, a second loader's distinct identity and no `Code` on any stub method; 7 tests; `cargo test -p rava-vm` passes 42 tests; `cargo xtask ci` exits 0 |
 | M2.4 | `cargo test -p rava-interp --test class_objects` | 0 | 2026-11-24 | `HeapObject::Class(ClassId)`, its heap allocator/accessor, `Shared::class_object` (one cached object per `(loader, name)` identity) and `Shared::get_class` for `Str`/`Instance`/`Class` (arrays return a typed error); cached class objects are enumerated by `Shared::roots`; the native ABI takes the receiver `ObjRef` (`ObjRef::NULL` for static calls), and `run_static_method`/`invokevirtual` consult the registry before `Code`, so the C1 stubs (no `Code`, no `ACC_NATIVE`) execute; `invokevirtual` resolves `HeapObject::Class` as `java/lang/Class` and `HeapObject::Str` as `java/lang/String`, walking the superclass chain; `Object.getClass`, `Class.getName/getModifiers/isInterface/isArray/getSuperclass/forName`; `ReflectProbe` fixture; 8 tests; `cargo test -p rava-interp` 16, `cargo test -p rava-vm` 42 and `cargo test -p rava-cli` 67 pass, workspace 175; `cargo xtask ci` exits 0 |
 | M2.5 | `cargo test -p rava-interp --test instance_execution` | 0 | 2026-11-24 | `new`, `dup`, `aconst_null`, `invokespecial`, `getfield`, `putfield` and narrow/wide `aload`/`astore` decode and execute; `run_instance_method` reuses the existing `Frame`, puts `this` in local 0 and leaves static calls on the unchanged path; `Shared::field_layout` builds superclass-first instance layouts (static fields excluded) and `Shared::allocate_instance` allocates with field defaults; `new` resolves and initializes the class from the current class's loader; `getfield`/`putfield` resolve the exact owner/name/descriptor, use the receiver's runtime layout and reject a static field through an instance opcode and a descriptor mismatch; `invokespecial` resolves on the instruction's owner while `invokevirtual` dispatches from the receiver's class, and both prefer the native registry before executing `Code`; `instance::register_natives` supplies `java/lang/Object.<init>()V` as a no-op for the C1 stub that has no `Code`; `Point`/`PointProbe` fixture; 8 tests; `cargo test -p rava-interp` 24, `cargo test -p rava-vm` 42 and `cargo test -p rava-cli` 67 pass, workspace 183; `cargo xtask ci` exits 0 |
+| M2.6 | `cargo test -p rava-interp --test arrays_control` | 0 | 2026-11-24 | `newarray` (all eight primitive `atype` values), `anewarray`, `multianewarray`, `arraylength`, the eight primitive array loads/stores, `aaload`/`aastore`, `iinc`, `goto`, `ifeq`/`ifne`/`iflt`/`ifge`/`ifgt`/`ifle`, `if_icmp{eq,ne,lt,ge,gt,le}` and `ifnull`/`ifnonnull` decode and execute; branch offsets are resolved at decode time to instruction indices, so the dispatch loop never computes a byte address and a non-boundary target is a decode error; `newarray`/`anewarray`/`multianewarray` allocate through the existing `Heap`/`ArrayKind`/`Array`, and `anewarray` resolves an object component through the current class's loader; bounds, null, negative-size and `ArrayKind`/element-type errors are typed; the `ArrayProbe` fixture (`sum` with `if_icmpge`/`goto`/`iaload`/`arraylength`, `make` with `newarray`/`iastore`, `refs` with `anewarray`/`aastore`, a two-dimensional `multianewarray`, and one method per comparison) exercises them; 12 tests; `cargo test -p rava-interp` 36, `cargo test -p rava-vm` 42, `cargo test -p rava-classfile` 50 and `cargo test -p rava-cli` 67 pass, workspace 195; `cargo xtask ci` exits 0 |
 
 M0.6 boundary: the reference and class-unloading hooks are registration points only.
 M0 has no collector, so no weak/soft/phantom reference is cleared and no class is
@@ -240,6 +241,27 @@ adds no array instruction, array class identity or array reflection. `Object.<in
 the only new native; `Field`, `Method` and `Constructor` objects, annotations, generics,
 records and Spring are later slices.
 
+M2.6 boundary: arrays are the existing `Heap` `Array`/`ArrayKind` model; this slice adds
+no second representation and no array class identity. `newarray` maps all eight primitive
+`atype` values, `anewarray` allocates a `reference` array and resolves an object component
+through the current class's loader, and `multianewarray` allocates one `Array` per
+allocated dimension (a partial allocation such as `new int[2][]` leaves the inner
+references null). An array still has no `ClassId`, so `Shared::get_class` keeps returning
+the typed M2.4 error and `Class.isArray` stays false for an array; `dispatch_class` still
+sends an array's virtual calls to `java/lang/Object`. `aaload`/`aastore` do not check
+`ArrayStoreException`: the array stores no component type, so storing a reference of an
+unrelated class is accepted as long as the value is a reference. `baload`/`bastore` accept
+both `boolean[]` and `byte[]`; every other primitive array opcode requires the matching
+`ArrayKind`. A `byte`/`char`/`short` store keeps the 32-bit `Value` unchanged instead of
+narrowing it. Every array instruction checks null (through the heap's `NullReference`) and
+bounds (`ArrayIndexOutOfBounds`, negative indexes included), and a negative length is
+`NegativeArraySize`. `iinc` is decoded as well, so a compiled loop counter works.
+Branches are resolved once, at decode time, to instruction indices; decode rejects a
+target that is not an instruction boundary but does not reject unreachable code.
+`tableswitch`/`lookupswitch`, `wide`, `jsr`/`ret`, `checkcast`/`instanceof`,
+`athrow`/exception handlers, `invokeinterface`, interfaces, reflection members and Spring
+remain later slices.
+
 ## Decision log
 
 | ADR | Decision | Status |
@@ -272,7 +294,9 @@ A fresh session should:
    (`cargo test -p rava-interp --test class_objects`). M2.5 landed instance allocation,
    constructors, instance fields and instance method calls, including the
    `Object.<init>()V` no-op (`cargo test -p rava-interp --test instance_execution`).
-   M2.6 is next.
+   M2.6 landed arrays and integer control flow: primitive and reference array creation,
+   the array load/store forms and the integer branches resolved to instruction indices
+   (`cargo test -p rava-interp --test arrays_control`). M2.7 is next.
 4. Do not write runtime code outside a defined slice.
 
 ## Open decisions

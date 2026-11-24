@@ -7,9 +7,11 @@
 //!
 //! What it covers is exactly what the fixtures need: integer constants, integer and
 //! reference loads and stores, `iinc`, `aconst_null`, `dup`, two conditional branches,
-//! `goto`, `getstatic`, `getfield`, `putfield`, `new`, `invokevirtual`, `invokespecial`,
-//! `invokestatic` through [`op`](Assembler::op), and the `ireturn`/`areturn`/`return` forms.
-//! Everything else is still raw bytes through [`Assembler::op`].
+//! `goto`, `getstatic`, `getfield`, `putfield`, `new`, array creation and access
+//! (`newarray`, `anewarray`, `multianewarray`, `arraylength`, `iaload`/`iastore` and
+//! `aaload`/`aastore`), `invokevirtual`, `invokespecial`, `invokestatic` through
+//! [`op`](Assembler::op), and the `ireturn`/`areturn`/`return` forms. Everything else is
+//! still raw bytes through [`Assembler::op`].
 //!
 //! `tableswitch` and `lookupswitch` are deliberately absent: their padding depends on the switch
 //! opcode's own address, which is a different encoding problem (and the decoder already handles the
@@ -126,6 +128,11 @@ impl Assembler {
         self.bytes.push(0x60);
     }
 
+    /// `imul`: multiply two ints.
+    pub fn imul(&mut self) {
+        self.bytes.push(0x68);
+    }
+
     pub fn ldc(&mut self, index: u16) {
         // Only the one-byte form; a wider constant pool needs `ldc_w`, which no fixture does yet.
         debug_assert!(index < 256, "ldc index {index} needs ldc_w");
@@ -144,6 +151,52 @@ impl Assembler {
     /// `putfield`: write an instance field through a `CONSTANT_Fieldref`.
     pub fn putfield(&mut self, index: u16) {
         self.op(0xb5, &index.to_be_bytes());
+    }
+
+    /// `newarray`: allocate a primitive array. `atype` is the JVMS array-type code
+    /// (`4` boolean, `5` char, `6` float, `7` double, `8` byte, `9` short, `10` int,
+    /// `11` long).
+    pub fn newarray(&mut self, atype: u8) {
+        self.op(0xbc, &[atype]);
+    }
+
+    /// `anewarray`: allocate a reference array whose component is named by the
+    /// `CONSTANT_Class` at `index`.
+    pub fn anewarray(&mut self, index: u16) {
+        self.op(0xbd, &index.to_be_bytes());
+    }
+
+    /// `multianewarray`: allocate `dimensions` levels of the array type named by the
+    /// `CONSTANT_Class` at `index`.
+    pub fn multianewarray(&mut self, index: u16, dimensions: u8) {
+        let mut operands = index.to_be_bytes().to_vec();
+        operands.push(dimensions);
+        self.op(0xc5, &operands);
+    }
+
+    /// `arraylength`: push the length of an array reference.
+    pub fn arraylength(&mut self) {
+        self.bytes.push(0xbe);
+    }
+
+    /// `iaload`: read an `int` array element.
+    pub fn iaload(&mut self) {
+        self.bytes.push(0x2e);
+    }
+
+    /// `iastore`: write an `int` array element.
+    pub fn iastore(&mut self) {
+        self.bytes.push(0x4f);
+    }
+
+    /// `aaload`: read a reference array element.
+    pub fn aaload(&mut self) {
+        self.bytes.push(0x32);
+    }
+
+    /// `aastore`: write a reference array element.
+    pub fn aastore(&mut self) {
+        self.bytes.push(0x53);
     }
 
     /// `new`: allocate an instance of the class named by a `CONSTANT_Class`.

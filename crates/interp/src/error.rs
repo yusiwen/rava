@@ -2,7 +2,7 @@
 
 use std::fmt;
 
-use rava_vm::VmError;
+use rava_vm::{ArrayKind, VmError};
 
 #[derive(Debug)]
 pub enum InterpError {
@@ -38,6 +38,21 @@ pub enum InterpError {
         name: String,
         descriptor: String,
     },
+    /// An array instruction read or wrote past the end, or used a negative index.
+    ArrayIndexOutOfBounds {
+        index: i32,
+        length: usize,
+    },
+    /// An array instruction's element type does not match the array's `ArrayKind`.
+    ///
+    /// `expected` is the element name the opcode addresses; `baload`/`bastore` report
+    /// `"boolean or byte"` because they accept both kinds.
+    ArrayKindMismatch {
+        expected: &'static str,
+        found: ArrayKind,
+    },
+    /// `newarray`/`anewarray`/`multianewarray` was given a negative length.
+    NegativeArraySize(i32),
     StackUnderflow,
     WrongValue,
     BadDescriptor(String),
@@ -79,6 +94,16 @@ impl fmt::Display for InterpError {
             Self::NativeOrAbstract { name, descriptor } => {
                 write!(f, "method {name}{descriptor} has no bytecode")
             }
+            Self::ArrayIndexOutOfBounds { index, length } => {
+                write!(
+                    f,
+                    "array index {index} is outside an array of length {length}"
+                )
+            }
+            Self::ArrayKindMismatch { expected, found } => {
+                write!(f, "array kind mismatch: expected {expected}, found {found}")
+            }
+            Self::NegativeArraySize(size) => write!(f, "negative array size {size}"),
             Self::StackUnderflow => write!(f, "operand stack underflow"),
             Self::WrongValue => write!(f, "operand has the wrong type"),
             Self::BadDescriptor(descriptor) => write!(f, "unsupported descriptor {descriptor}"),
