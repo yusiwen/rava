@@ -6,11 +6,17 @@
 # header-only placeholder in stdlib/c1/classes and is excluded from
 # `rava compat metadata --check`.
 #
-# owners: 28
+# owners: 36
 
 java/lang/Thread$Builder
 java/lang/Thread$Builder$OfVirtual
+javax/annotation/CheckForNull
+javax/annotation/Nonnull
+javax/annotation/Nullable
 javax/annotation/Resource
+javax/annotation/meta/TypeQualifierDefault
+javax/annotation/meta/TypeQualifierNickname
+javax/cache/Cache
 javax/cache/CacheManager
 javax/cache/Caching
 javax/cache/configuration/Configuration
@@ -20,6 +26,7 @@ javax/money/CurrencyUnit
 javax/money/Monetary
 javax/money/MonetaryAmount
 javax/money/MonetaryAmountFactory
+javax/money/NumberValue
 javax/money/format/MonetaryAmountFormat
 javax/money/format/MonetaryFormats
 javax/wsdl/Definition
@@ -36,3 +43,4 @@ javax/xml/rpc/handler/Handler
 javax/xml/rpc/handler/HandlerChain
 javax/xml/rpc/handler/HandlerInfo
 javax/xml/rpc/handler/HandlerRegistry
+jdk/internal/vm/annotation/IntrinsicCandidate

@@ -324,9 +324,9 @@ fn passes_all_four_stages_and_prints_ok() {
         "link-check",
         "stub determinism",
         "java 17, 1 jar",
-        "4 classes, 1 field, 2 methods, 1 interface-method",
-        "4 classes, 4 member records, unresolved 0",
-        "4 class files byte-identical",
+        "5 classes, 1 field, 2 methods, 1 interface-method",
+        "5 classes, 4 member records, unresolved 0",
+        "5 class files byte-identical",
         "compat check: ok",
     ] {
         assert!(

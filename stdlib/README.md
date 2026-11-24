@@ -17,7 +17,7 @@ This directory is **generated** by `rava compat stubs` from the committed surfac
 manifest (`compat/surface/spring-boot-3.5.16.txt`). It is a signature-only stub
 library, not the rava runtime class library.
 
-The committed tree has 980 class files and declares 177 fields and 4,674 methods,
+The committed tree has 1047 class files and declares 177 fields and 4,674 methods,
 which is every one of the 3,626 method and 1,048 interface-method records in the
 manifest.
 

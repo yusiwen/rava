@@ -274,7 +274,9 @@ path = "stdlib/classes"
 }
 
 /// Two classes whose platform references overlap, plus non-platform and array
-/// references that must be filtered out.
+/// references that must be filtered out. The array class reference is skipped, but the
+/// `println` descriptor and the `System.out` field descriptor still name
+/// `java/lang/String` and `java/io/PrintStream`; that is the descriptor closure.
 fn fixture_jar() -> Vec<u8> {
     let first = synthetic_class(
         "com/example/First",
@@ -309,6 +311,179 @@ fn records(text: &str) -> Vec<&str> {
     text.lines().filter(|line| !line.starts_with('#')).collect()
 }
 
+/// One declared field or method of a synthetic class.
+struct Declared<'a> {
+    access: u16,
+    name: &'a str,
+    descriptor: &'a str,
+    signature: Option<&'a str>,
+}
+
+/// One enum-valued element of a class-level `RuntimeVisibleAnnotations` attribute.
+struct EnumAnnotation<'a> {
+    annotation_type: &'a str,
+    element: &'a str,
+    enum_type: &'a str,
+    constant: &'a str,
+}
+
+/// Encodes one field or method body: access, name, descriptor and a `Signature`
+/// attribute when the member is generic.
+fn declared(pool: &mut Pool, member: &Declared<'_>) -> Vec<u8> {
+    let name = pool.utf8(member.name);
+    let descriptor = pool.utf8(member.descriptor);
+    let mut attributes = Vec::new();
+    if let Some(signature) = member.signature {
+        let signature_name = pool.utf8("Signature");
+        let signature_index = pool.utf8(signature);
+        attributes.push((signature_name, signature_index.to_be_bytes().to_vec()));
+    }
+
+    let mut out = Vec::new();
+    out.extend_from_slice(&member.access.to_be_bytes());
+    out.extend_from_slice(&name.to_be_bytes());
+    out.extend_from_slice(&descriptor.to_be_bytes());
+    out.extend_from_slice(&(attributes.len() as u16).to_be_bytes());
+    for (attribute_name, payload) in attributes {
+        out.extend_from_slice(&attribute_name.to_be_bytes());
+        out.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+        out.extend_from_slice(&payload);
+    }
+    out
+}
+
+/// Builds a class whose fields, methods, class `Signature` and class annotation name
+/// platform types that only a descriptor carries, never a `CONSTANT_Class`.
+fn closure_class(
+    name: &str,
+    fields: &[Declared<'_>],
+    methods: &[Declared<'_>],
+    class_signature: Option<&str>,
+    annotation: Option<EnumAnnotation<'_>>,
+) -> Vec<u8> {
+    let mut pool = Pool::new();
+    let this_class = pool.class(name);
+    let super_class = pool.class("java/lang/Object");
+
+    let field_infos: Vec<Vec<u8>> = fields
+        .iter()
+        .map(|field| declared(&mut pool, field))
+        .collect();
+    let method_infos: Vec<Vec<u8>> = methods
+        .iter()
+        .map(|method| declared(&mut pool, method))
+        .collect();
+
+    let mut class_attributes = Vec::new();
+    if let Some(signature) = class_signature {
+        let signature_name = pool.utf8("Signature");
+        let signature_index = pool.utf8(signature);
+        class_attributes.push((signature_name, signature_index.to_be_bytes().to_vec()));
+    }
+    if let Some(annotation) = annotation {
+        let attribute_name = pool.utf8("RuntimeVisibleAnnotations");
+        let annotation_type = pool.utf8(annotation.annotation_type);
+        let element = pool.utf8(annotation.element);
+        let enum_type = pool.utf8(annotation.enum_type);
+        let constant = pool.utf8(annotation.constant);
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&1u16.to_be_bytes()); // one annotation
+        payload.extend_from_slice(&annotation_type.to_be_bytes());
+        payload.extend_from_slice(&1u16.to_be_bytes()); // one element-value pair
+        payload.extend_from_slice(&element.to_be_bytes());
+        payload.push(b'e');
+        payload.extend_from_slice(&enum_type.to_be_bytes());
+        payload.extend_from_slice(&constant.to_be_bytes());
+        class_attributes.push((attribute_name, payload));
+    }
+
+    let mut out = Vec::new();
+    out.extend_from_slice(&0xCAFE_BABEu32.to_be_bytes());
+    out.extend_from_slice(&0u16.to_be_bytes()); // minor
+    out.extend_from_slice(&61u16.to_be_bytes()); // major, Java 17
+    out.extend_from_slice(&pool.next.to_be_bytes());
+    out.extend_from_slice(&pool.bytes);
+    out.extend_from_slice(&0x0021u16.to_be_bytes()); // public super
+    out.extend_from_slice(&this_class.to_be_bytes());
+    out.extend_from_slice(&super_class.to_be_bytes());
+    out.extend_from_slice(&0u16.to_be_bytes()); // interfaces
+    out.extend_from_slice(&(field_infos.len() as u16).to_be_bytes());
+    for field in &field_infos {
+        out.extend_from_slice(field);
+    }
+    out.extend_from_slice(&(method_infos.len() as u16).to_be_bytes());
+    for method in &method_infos {
+        out.extend_from_slice(method);
+    }
+    out.extend_from_slice(&(class_attributes.len() as u16).to_be_bytes());
+    for (attribute_name, payload) in &class_attributes {
+        out.extend_from_slice(&attribute_name.to_be_bytes());
+        out.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+        out.extend_from_slice(payload);
+    }
+    out
+}
+
+#[test]
+fn records_types_named_only_by_descriptors_signatures_and_annotations() {
+    let class = closure_class(
+        "com/example/Closure",
+        &[Declared {
+            access: 0x0001,
+            name: "names",
+            descriptor: "Ljava/util/List;",
+            signature: Some("Ljava/util/List<Ljava/lang/String;>;"),
+        }],
+        &[Declared {
+            access: 0x0001,
+            name: "element",
+            descriptor: "()[Ljava/lang/annotation/ElementType;",
+            signature: Some("()Ljava/util/Map<Ljava/lang/String;Ljava/lang/Integer;>;"),
+        }],
+        Some("Ljava/lang/Object;Ljava/lang/Comparable<Ljava/lang/String;>;"),
+        Some(EnumAnnotation {
+            annotation_type: "Ljava/lang/annotation/Target;",
+            element: "value",
+            enum_type: "Ljava/lang/annotation/ElementType;",
+            constant: "TYPE",
+        }),
+    );
+    let jar = stored_zip(&[("com/example/Closure.class", &class)]);
+    let fixture = Fixture::new(&[("first.jar", &jar)]);
+
+    let output = fixture.run(&[]);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let text = fs::read_to_string(fixture.manifest_path()).expect("read manifest");
+    let records = records(&text);
+    for expected in [
+        // class `Signature`: superinterface and its type argument
+        "class java/lang/Comparable",
+        "class java/lang/String",
+        // field signature and descriptor
+        "class java/util/List",
+        // method signature
+        "class java/lang/Integer",
+        "class java/util/Map",
+        // method descriptor: array element
+        "class java/lang/annotation/ElementType",
+        // annotation type and its enum value's type
+        "class java/lang/annotation/Target",
+    ] {
+        assert!(
+            records.contains(&expected),
+            "missing `{expected}` in:\n{text}"
+        );
+    }
+    assert!(
+        !records.contains(&"class com/example/Closure"),
+        "the scanned class itself is not a platform class and stays out"
+    );
+}
+
 #[test]
 fn writes_a_sorted_deduplicated_manifest_and_checks_it() {
     let jar = fixture_jar();
@@ -322,7 +497,7 @@ fn writes_a_sorted_deduplicated_manifest_and_checks_it() {
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
     for expected in [
-        "classes           4",
+        "classes           5",
         "fields            1",
         "methods           2",
         "interface-methods 1",
@@ -341,6 +516,7 @@ fn writes_a_sorted_deduplicated_manifest_and_checks_it() {
             "class java/io/PrintStream",
             "class java/lang/Object",
             "class java/lang/Runnable",
+            "class java/lang/String",
             "class java/lang/System",
             "field java/lang/System out Ljava/io/PrintStream;",
             "method java/io/PrintStream println (Ljava/lang/String;)V",
@@ -352,7 +528,7 @@ fn writes_a_sorted_deduplicated_manifest_and_checks_it() {
         "# target: java 17 (class file 61.0), spring boot 3.5.16, spring framework 6.2.19, tomcat 10.1.55",
         "# reference app: reference-app 0.1.0 (dev.rava.reference.ReferenceApplication)",
         "# jars: 1",
-        "# classes: 4",
+        "# classes: 5",
         "# fields: 1",
         "# methods: 2",
         "# interface-methods: 1",
@@ -395,7 +571,7 @@ fn check_fails_when_the_committed_manifest_is_stale() {
     assert_eq!(output.status.code(), Some(1));
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("out of date"), "{stderr}");
-    assert!(stderr.contains("line 12"), "{stderr}");
+    assert!(stderr.contains("line 13"), "{stderr}");
 }
 
 #[test]

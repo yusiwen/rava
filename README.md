@@ -9,8 +9,9 @@ parser, loader identity, heap/seams, the interpreter core, Hello, safepoint/GC-r
 and no-lock-across-Java-call invariants, the verifier dataflow skeleton with the
 metadata dump fixture, the pinned target lock with the reference application and its
 35-jar set, the static surface manifest (`compat/surface/spring-boot-3.5.16.txt`:
-980 classes, 177 fields, 3,626 methods, 1,048 interface methods), and the
-signature-only stub library under `stdlib/classes/` (980 class files) with a
+1047 classes, 177 fields, 3,626 methods, 1,048 interface methods, including the
+descriptor/signature/annotation closure around the constant-pool owners), and the
+signature-only stub library under `stdlib/classes/` (1047 class files) with a
 zero-unresolved link-check. The manifest and stubs regenerate byte-identically, and
 `rava compat check` runs the whole M1 gate. **M2.1 is done (2026-11-24):** a typed C1
 metadata model in `rava-classfile` (annotations of every element-value kind, parameter
@@ -18,10 +19,10 @@ and type annotations, generic signatures, records, sealed permits, nestmates, in
 enclosing classes, exceptions and parameter names) with every raw attribute payload
 retained, a normalized text dump, committed Java 17 fixtures and golden dumps, plus
 typed errors for malformed payloads. **M2.2 is done (2026-11-24):** a separate JDK 17
-signature stub tree under `stdlib/c1/classes/` (980 class files, 952 projected from the
-host JDK's `lib/ct.sym` release-17 signatures and 28 header-only placeholders for
+signature stub tree under `stdlib/c1/classes/` (1047 class files, 1011 projected from the
+host JDK's `lib/ct.sym` release-17 signatures and 36 header-only placeholders for
 owners Java 17 does not define) with a faithful class-file writer, and a normalized
-metadata check whose diff is 0 across the 952 referenced classes. `stdlib/classes/` is
+metadata check whose diff is 0 across the 1011 referenced classes. `stdlib/classes/` is
 unchanged and the M1 gate still passes. **M2.3 is done (2026-11-24):** the C1 tree is
 the bootstrap class source, read through the existing `DirectorySource` with
 `(loader, name)` identity; `Shared::with_library_dir`, `Shared::load_library_class`,
@@ -264,16 +265,20 @@ spring_fixes`). **M2.23 is blocked (2026-11-24):** the committed `demo.SpringSmo
 fixture and `crates/cli/tests/spring_context.rs` start a real Spring
 `AnnotationConfigApplicationContext` and assert the `hello` bean, but the local test still
 fails. M2.26 fixed the `instanceof`-of-null bug the chain exposed and the
-`LinkedHashMap(int,float,boolean)` constructor behind it, and the startup now stops at a
-class the pinned manifest never included: `Method.getReturnType()` on
-`java.lang.annotation.Target.value()` resolves `Ljava/lang/annotation/ElementType;`, and
-`stdlib/c1/classes` has no `ElementType`. The M1.2 manifest records `CONSTANT_Class`
-owners only, so a type that appears solely inside a descriptor (`ElementType`,
-`RetentionPolicy`) has no stub; fixing that expands the pinned manifest and both stub
-trees, not the runtime. The startup chain before that point is in place: monitors, the
-missing numeric instructions, collections, iterators, logging, concurrency natives,
-exception construction, reflection, the primitive-box step, the stream pipeline,
-`computeIfAbsent`, `getDeclaredClasses` and comparators. The M2 gate is not claimed.
+`LinkedHashMap(int,float,boolean)` constructor behind it. The startup chain before the
+current point is in place: monitors, the missing numeric instructions, collections,
+iterators, logging, concurrency natives, exception construction, reflection, the
+primitive-box step, the stream pipeline, `computeIfAbsent`, `getDeclaredClasses` and
+comparators. **M2.27 is done (2026-11-24):** the M1.2 scanner closes over declared and
+referenced field/method descriptors, class/method/field `Signature` types (bounds,
+arguments, owners and `^` throws) and the type descriptors annotations encode, so a
+platform type named only by `[Ljava/lang/annotation/ElementType;` or
+`@Target(ElementType.TYPE)` becomes a manifest owner. The re-baselined manifest has 1047
+classes, both committed stub trees have 1047 class files, and
+`compat/surface/c1-unreferenced.txt` lists 36 owners; `compat check` and
+`compat metadata --check` exit 0. The re-baseline cleared `ElementType`; the startup now
+stops at `Method.isBridge()Z`, a runtime gap with no native implementation and no `Code`
+in the C1 tree, so M2.23 stays blocked. The M2 gate is not claimed.
 
 ## What this project is
 

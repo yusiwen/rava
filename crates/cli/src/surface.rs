@@ -69,7 +69,7 @@ impl Surface {
     /// Parses the committed manifest.
     ///
     /// Blank lines and `#` comments are allowed. A commented count such as
-    /// `# classes: 980` is checked against the records; a stale header is a hard error,
+    /// `# classes: 1047` is checked against the records; a stale header is a hard error,
     /// because it means the committed file and its report disagree.
     pub fn parse(text: &str) -> Result<Self, SurfaceError> {
         let mut surface = Self::default();

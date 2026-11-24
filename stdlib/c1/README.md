@@ -5,17 +5,18 @@ M1 `stdlib/classes/` surface stubs. It is the C1 metadata reference the reflecti
 work builds on and, since M2.3, the class library the VM's bootstrap loader reads
 through a `DirectorySource`.
 
-The committed tree has 980 class files:
+The committed tree has 1047 class files:
 
-- **952** are projected from the host JDK's `lib/ct.sym` release-17 signature of the
+- **1011** are projected from the host JDK's `lib/ct.sym` release-17 signature of the
   same class. The generator parses the `.sig` entry with `rava-classfile`, sets the
   class-file version to the pinned 61.0, and re-emits the class with the constant pool
   at its original indices and every attribute payload verbatim. No JDK class-file bytes
   are copied: the signature is parsed into the model and written back out by our own
   writer.
-- **28** are header-only placeholders for manifest owners Java 17 does not define (the
-  `Thread$Builder` classes, JCache, Moneta, WSDL and the Java EE
-  `javax.annotation.Resource`). They carry their name, `public abstract`, a
+- **36** are header-only placeholders for manifest owners Java 17 does not define (the
+  `Thread$Builder` classes, JCache, Moneta, WSDL, the Java EE `javax.annotation.Resource`,
+  the JSR-305 `javax.annotation` type qualifiers and the JDK-internal
+  `jdk.internal.vm.annotation.IntrinsicCandidate`). They carry their name, `public abstract`, a
   `java/lang/Object` superclass, version 61.0 and a `RavaC1Unreferenced.java`
   `SourceFile`; they have no members and no metadata claim. The owner list is
   `compat/surface/c1-unreferenced.txt`.
