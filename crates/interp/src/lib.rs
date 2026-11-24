@@ -13,7 +13,7 @@ pub use error::InterpError;
 pub use frame::Frame;
 pub use instr::{DecodedMethod, Instr, decode};
 
-use rava_vm::{ClassId, ClassState, HeapObject, Shared, ThreadState, Value};
+use rava_vm::{ClassId, ClassState, FrameRootsGuard, HeapObject, Shared, ThreadState, Value};
 
 /// Run a static method with `args` and return its result (`None` for `void`).
 pub fn run_static_method(
@@ -24,6 +24,7 @@ pub fn run_static_method(
     descriptor: &str,
     args: Vec<Value>,
 ) -> Result<Option<Value>, InterpError> {
+    shared.check_no_locks_held()?;
     let entry = shared
         .entry(class)
         .ok_or_else(|| InterpError::Decode(format!("class {} is not loaded", class.0)))?;
@@ -73,18 +74,23 @@ pub fn run_static_method(
     }
     locals[..args.len()].copy_from_slice(&args);
     let mut frame = Frame::new(class, locals, decoded.instructions, decoded.max_stack);
-    execute(shared, thread, &mut frame)
+    let guard = thread.enter_frame();
+    guard.publish(&frame.roots());
+    execute(shared, thread, &mut frame, &guard)
 }
 
 fn execute(
     shared: &Shared,
     thread: &ThreadState,
     frame: &mut Frame,
+    guard: &FrameRootsGuard<'_>,
 ) -> Result<Option<Value>, InterpError> {
     loop {
-        // The first safepoint poll point in the runtime. There is no stop-the-world
-        // yet; the state machine is in place.
-        let _ = thread.poll_safepoint();
+        // Safepoint poll: when a request is pending, the frame publishes its fresh
+        // roots before the request is acknowledged, so a collector can never observe
+        // the acknowledgement with the previous epoch's snapshot. There is no
+        // stop-the-world yet; the state machine is in place.
+        thread.poll_with(|| guard.publish(&frame.roots()));
         let instruction = frame.instructions.get(frame.pc).cloned().ok_or_else(|| {
             InterpError::Decode("execution ran past the instruction list".to_owned())
         })?;
@@ -179,6 +185,12 @@ fn execute(
                             entry.name
                         ))
                     })?;
+                shared.check_no_locks_held()?;
+                // The receiver and arguments have been popped from the frame; publish
+                // them with the frame's roots so the native call cannot lose them.
+                let mut call_roots = args.clone();
+                call_roots.push(Value::Ref(reference));
+                publish_roots(guard, frame, &call_roots);
                 let result =
                     native(shared, thread, entry.loader, &args).map_err(InterpError::Vm)?;
                 if !descriptor.ends_with(")V") {
@@ -215,6 +227,10 @@ fn execute(
                 }
                 args.reverse();
                 let target = resolve_from(shared, frame.class, &class)?;
+                shared.check_no_locks_held()?;
+                // The arguments have been popped from this frame; publish them so
+                // they stay roots while the callee runs.
+                publish_roots(guard, frame, &args);
                 let result = run_static_method(shared, thread, target, &name, &descriptor, args)?;
                 if !descriptor.ends_with(")V") {
                     let value = result
@@ -230,6 +246,17 @@ fn execute(
 
 fn int(value: Value) -> Result<i32, InterpError> {
     value.as_int().ok_or(InterpError::WrongValue)
+}
+
+/// Replace the frame's published roots with its locals/stack plus `values`, the
+/// references a call has just popped from the operand stack.
+fn publish_roots(guard: &FrameRootsGuard<'_>, frame: &Frame, values: &[Value]) {
+    let mut roots = frame.roots();
+    roots.extend(values.iter().filter_map(|value| match value {
+        Value::Ref(reference) if !reference.is_null() => Some(*reference),
+        _ => None,
+    }));
+    guard.publish(&roots);
 }
 
 fn resolve_from(shared: &Shared, current: ClassId, name: &str) -> Result<ClassId, InterpError> {

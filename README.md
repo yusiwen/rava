@@ -4,9 +4,10 @@ A Java 17 runtime in Rust, built to run Spring — not just a corpus.
 
 ## Status
 
-**Decisions accepted (2026-11-23). M0.1–M0.5b are in place: workspace, parser,
-loader identity, heap/seams, the interpreter core and Hello.** M0.6, safepoint/GC-root
-invariants, is next.
+**Decisions accepted (2026-11-23). M0.1–M0.6 are in place: workspace, parser,
+loader identity, heap/seams, the interpreter core, Hello, and safepoint/GC-root and
+no-lock-across-Java-call invariants.** M0.7, the verifier skeleton and metadata dump
+fixture, is next.
 
 ## What this project is
 
@@ -54,12 +55,6 @@ remain as a decision record.
 - Not a full Java SE implementation in the first target.
 - JNI and native libraries are not in the first target; they are a later target (Q17).
 - Not a reactive runtime yet; WebFlux is a committed later target.
-
-## Codebase
-
-The implementation may reuse existing Rust components (class-file parser, instruction
-model, interpreter) where they fit. Every imported component is re-reviewed against
-this project's requirements and ADRs; no decision record is imported with the code.
 
 ## Development
 

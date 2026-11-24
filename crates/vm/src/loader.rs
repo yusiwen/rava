@@ -114,6 +114,12 @@ impl ClassTable {
         self.entries.get(id.index())
     }
 
+    /// Snapshot every loaded class. Root enumeration takes this under the class-table
+    /// lock once, then reads each class's statics under its own short lock.
+    pub(crate) fn entries(&self) -> Vec<Arc<ClassEntry>> {
+        self.entries.clone()
+    }
+
     pub(crate) fn class_count(&self) -> usize {
         self.entries.len()
     }

@@ -21,6 +21,7 @@ pub enum InterpError {
     StackUnderflow,
     WrongValue,
     BadDescriptor(String),
+    HeldLock(rava_vm::LockHeld),
 }
 
 impl fmt::Display for InterpError {
@@ -40,6 +41,7 @@ impl fmt::Display for InterpError {
             Self::StackUnderflow => write!(f, "operand stack underflow"),
             Self::WrongValue => write!(f, "operand has the wrong type"),
             Self::BadDescriptor(descriptor) => write!(f, "unsupported descriptor {descriptor}"),
+            Self::HeldLock(error) => write!(f, "call-boundary invariant violated: {error}"),
         }
     }
 }
@@ -49,6 +51,7 @@ impl std::error::Error for InterpError {
         match self {
             Self::ClassFile(error) => Some(error),
             Self::Vm(error) => Some(error),
+            Self::HeldLock(error) => Some(error),
             _ => None,
         }
     }
@@ -63,5 +66,11 @@ impl From<rava_classfile::Error> for InterpError {
 impl From<VmError> for InterpError {
     fn from(error: VmError) -> Self {
         Self::Vm(error)
+    }
+}
+
+impl From<rava_vm::LockHeld> for InterpError {
+    fn from(error: rava_vm::LockHeld) -> Self {
+        Self::HeldLock(error)
     }
 }

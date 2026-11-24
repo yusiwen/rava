@@ -1,19 +1,22 @@
 //! The shared runtime state.
 //!
-//! `Shared` is split into independently lockable parts: the class table and the
-//! heap. Per-thread state lives in [`crate::ThreadState`]; a Java call never holds
-//! one of these locks.
+//! `Shared` is split into independently lockable parts: the class table, the heap,
+//! the native registry and stdout. Per-thread state lives in [`crate::ThreadState`];
+//! a Java call never holds one of these locks. [`Shared::check_no_locks_held`] is the
+//! probe the interpreter uses to enforce that invariant at call boundaries.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::fmt;
+use std::sync::Arc;
 use std::sync::{Mutex, MutexGuard, RwLock};
 
 use crate::VmError;
-use crate::heap::Heap;
+use crate::heap::{Heap, ObjRef};
+use crate::hooks::Hooks;
 use crate::loader::{ClassEntry, ClassId, ClassTable, LoaderId};
 use crate::source::ClassSource;
 use crate::thread::ThreadState;
 use crate::value::Value;
-use std::sync::Arc;
 
 pub type NativeFn = fn(&Shared, &ThreadState, LoaderId, &[Value]) -> Result<Option<Value>, VmError>;
 
@@ -24,11 +27,46 @@ pub struct NativeKey {
     pub descriptor: String,
 }
 
+/// The independently lockable parts of [`Shared`] the no-lock probe covers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SharedLock {
+    ClassTable,
+    Heap,
+    NativeRegistry,
+    Stdout,
+}
+
+impl fmt::Display for SharedLock {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ClassTable => write!(f, "class table"),
+            Self::Heap => write!(f, "heap"),
+            Self::NativeRegistry => write!(f, "native registry"),
+            Self::Stdout => write!(f, "stdout"),
+        }
+    }
+}
+
+/// A [`SharedLock`] that was held when a Java call boundary was probed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LockHeld {
+    pub lock: SharedLock,
+}
+
+impl fmt::Display for LockHeld {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "the {} lock is held across a Java call", self.lock)
+    }
+}
+
+impl std::error::Error for LockHeld {}
+
 pub struct Shared {
     classes: RwLock<ClassTable>,
     heap: Mutex<Heap>,
     natives: RwLock<HashMap<NativeKey, NativeFn>>,
     stdout: Mutex<Vec<u8>>,
+    hooks: Hooks,
 }
 
 impl Shared {
@@ -38,6 +76,7 @@ impl Shared {
             heap: Mutex::new(Heap::new()),
             natives: RwLock::new(HashMap::new()),
             stdout: Mutex::new(Vec::new()),
+            hooks: Hooks::default(),
         }
     }
 
@@ -101,6 +140,80 @@ impl Shared {
 
     pub fn thread_state(&self, id: u64) -> ThreadState {
         ThreadState::new(id)
+    }
+
+    /// The reference and class-unloading hook registry. M0 registers callbacks only;
+    /// there is no collector and no unloading yet.
+    pub fn hooks(&self) -> &Hooks {
+        &self.hooks
+    }
+
+    /// Collect the VM roots: every non-null class static field plus the roots the
+    /// given threads' active frames published.
+    ///
+    /// The class table is snapshotted before any per-class statics lock is taken, and
+    /// each statics lock is released before the next class is visited, so this never
+    /// holds one shared lock while another is acquired. This returns the roots only,
+    /// not their transitive closure; M0 has no collector.
+    pub fn roots(&self, threads: &[&ThreadState]) -> Vec<ObjRef> {
+        let entries: Vec<Arc<ClassEntry>> = {
+            let classes = self.classes.read().expect("class table lock poisoned");
+            classes.entries()
+        };
+
+        let mut roots = Vec::new();
+        let mut seen = HashSet::new();
+        for entry in entries {
+            let statics = entry.statics.lock().expect("static field lock poisoned");
+            for value in statics.values() {
+                let Value::Ref(reference) = *value else {
+                    continue;
+                };
+                if !reference.is_null() && seen.insert(reference) {
+                    roots.push(reference);
+                }
+            }
+        }
+
+        for thread in threads {
+            for reference in thread.frame_roots() {
+                if seen.insert(reference) {
+                    roots.push(reference);
+                }
+            }
+        }
+        roots
+    }
+
+    /// Probe the shared locks before entering a Java or native call. Returns the first
+    /// lock that is already held, meaning a VM lock would be held across the call.
+    ///
+    /// M0 runs one thread, so a held lock is reported as held; the probe cannot yet
+    /// distinguish this thread's guard from another thread's, which M5 will need.
+    pub fn check_no_locks_held(&self) -> Result<(), LockHeld> {
+        // Each probe guard is scoped to its own block: the probe checks one lock at a
+        // time and never holds a lock while checking the next.
+        {
+            let _guard = self.classes.try_write().map_err(|_| LockHeld {
+                lock: SharedLock::ClassTable,
+            })?;
+        }
+        {
+            let _guard = self.heap.try_lock().map_err(|_| LockHeld {
+                lock: SharedLock::Heap,
+            })?;
+        }
+        {
+            let _guard = self.natives.try_write().map_err(|_| LockHeld {
+                lock: SharedLock::NativeRegistry,
+            })?;
+        }
+        {
+            let _guard = self.stdout.try_lock().map_err(|_| LockHeld {
+                lock: SharedLock::Stdout,
+            })?;
+        }
+        Ok(())
     }
 
     pub fn register_native(

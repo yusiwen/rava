@@ -6,7 +6,9 @@
 
 pub mod error;
 pub mod heap;
+pub mod hooks;
 pub mod loader;
+pub mod memory;
 pub mod shared;
 pub mod source;
 pub mod thread;
@@ -16,8 +18,10 @@ pub use error::VmError;
 pub use heap::{
     Array, ArrayKind, FieldLayout, FieldSlot, Heap, HeapError, HeapObject, Instance, ObjRef,
 };
+pub use hooks::{ClassUnloadHook, Hooks, ReferenceHook};
 pub use loader::{ClassEntry, ClassId, ClassState, LoaderId};
-pub use shared::{NativeFn, NativeKey, Shared};
+pub use memory::{MemoryError, MemoryRegion};
+pub use shared::{LockHeld, NativeFn, NativeKey, Shared, SharedLock};
 pub use source::{ClassSource, DirectorySource, JarSource};
-pub use thread::ThreadState;
+pub use thread::{FrameRootsGuard, ThreadState};
 pub use value::Value;

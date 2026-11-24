@@ -5,9 +5,9 @@
 **License:** MIT
 **Started:** 2026-11-22
 
-> Ledger. P0 and P1 were accepted on 2026-11-23. M0.1–M0.5b (workspace, parser,
-> loader identity, heap/seams, the interpreter and Hello) are committed. M0.6 and M0.7
-> remain before M0 is complete. Keep this file honest and terse.
+> Ledger. P0 and P1 were accepted on 2026-11-23. M0.1–M0.5b are committed;
+> M0.6 is implemented in the working tree. M0.7 remains before M0 is complete.
+> Keep this file honest and terse.
 
 ## Phase status
 
@@ -51,28 +51,29 @@ release process, if wanted, becomes its own phase.
 | M0.4 | Heap handles, field layout and the `Shared`/`ThreadState` seams | R13 | `cargo test -p rava-vm --test heap_handles` exits 0 | done |
 | M0.5a | Decoded IR, frames and a static call | R13 | `cargo test -p rava-interp --test arithmetic` exits 0 | done |
 | M0.5b | Hello through the interpreter: class library and native minimum | R13 | `cargo test -p rava-interp --test hello` exits 0 | done |
-| M0.6 | Safepoint polling, GC roots and the no-lock-across-Java-call invariant | R13 | `cargo test -p rava-vm --test safepoints` exits 0 | todo |
+| M0.6 | Safepoint polling, GC roots and the no-lock-across-Java-call invariant | R13 | `cargo test -p rava-vm --test safepoints` exits 0 | done |
 | M0.7 | Verifier dataflow skeleton and the metadata dump fixture | R13 | `cargo test -p rava-vm --test verifier_skeleton` exits 0 | todo |
 
-P0 and P1 are accepted; P2 is done because the M0 increments are now sliced. M0.1 is
-the only completed slice.
+P0 and P1 are accepted; P2 is done because the M0 increments are now sliced. M0.1–M0.6
+are done; M0.7 is the remaining M0 slice.
 
 ## Slice log
 
 | Slice | Acceptance command | Exit | Date | Evidence |
 | :--- | :--- | :--- | :--- | :--- |
 | M0.1 | `cargo xtask ci` | 0 | 2026-11-24 | Workspace, crates and the local gate; no runtime behavior yet |
-| M0.2 | `cargo test -p rava-classfile` | 0 | 2026-11-24 | Parser ported; raw attributes retained; 13 tests pass |
+| M0.2 | `cargo test -p rava-classfile` | 0 | 2026-11-24 | Parser implemented; raw attributes retained; 13 tests pass |
 | M0.3 | `cargo test -p rava-vm --test loader_identity` | 0 | 2026-11-24 | Directory and DEFLATE jar sources; parent-first delegation; 6 tests pass |
 | M0.4 | `cargo test -p rava-vm --test heap_handles` | 0 | 2026-11-24 | Generation handles, field layout, arrays and safepoint handshake; 6 tests pass |
 | M0.5a | `cargo test -p rava-interp --test arithmetic` | 0 | 2026-11-24 | Decoded integer IR, frame, `invokestatic`; 3 tests pass |
 | M0.5b | `cargo test -p rava-interp --test hello` | 0 | 2026-11-24 | `getstatic`/`ldc`/`invokevirtual`, class initialization and native PrintStream; 2 tests pass |
+| M0.6 | `cargo test -p rava-vm --test safepoints` | 0 | 2026-11-24 | Frame-root stack with RAII cleanup, publish-before-acknowledge safepoint handshake, `Shared` root enumeration, lock probe at call boundaries, `MemoryRegion` seam and hook registration points; 9 tests pass; `cargo xtask ci` exits 0 |
 
-## Codebase
-
-The implementation may reuse existing Rust components (class-file parser, instruction
-model, interpreter) where they fit. Each imported component is re-reviewed against
-this project's ADRs and covered by tests; no decision record is imported with the code.
+M0.6 boundary: the reference and class-unloading hooks are registration points only.
+M0 has no collector, so no weak/soft/phantom reference is cleared and no class is
+unloaded; M5 (ADR-0008) implements them on this seam. `MemoryRegion` is a VM-owned
+byte region with a fake address, not an off-heap allocator; S2-raw replaces the
+backing store without changing the address/bounds API.
 
 ## Decision log
 
@@ -97,7 +98,8 @@ A fresh session should:
 
 1. Read `README.md`, `docs/requirements.md` and `docs/open-questions.md`.
 2. Read the ADRs in order; 0001–0005 are the project-defining decisions.
-3. M0.1–M0.5b are done; the next slice is M0.6 (safepoint polling, GC roots and the no-lock invariant).
+3. M0.1–M0.6 are done; the next slice is M0.7 (verifier dataflow skeleton and the
+   metadata dump fixture).
 4. Do not write runtime code outside an M0 slice.
 
 ## Open decisions
