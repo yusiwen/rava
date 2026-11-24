@@ -12,7 +12,7 @@
 //! `java/lang/Object` reaches these implementations.
 
 use crate::VmError;
-use crate::heap::{HeapObject, MemberKind, ObjRef};
+use crate::heap::{ClassRef, HeapObject, MemberKind, ObjRef};
 use crate::loader::{ClassId, LoaderId};
 use crate::shared::Shared;
 use crate::thread::ThreadState;
@@ -103,9 +103,9 @@ fn object_to_string(
 /// An instance reports its defining class, a string `java.lang.String`, a class object
 /// `java.lang.Class`, a reflected member its `java.lang.reflect` class, a box its boxed
 /// class (`java.lang.Integer`), a builder `java.lang.StringBuilder`, a list
-/// `java.util.ArrayList` and a map `java.util.HashMap`. An array has no class identity in
-/// this slice, so it returns a typed error instead of a wrong name, the same choice
-/// `Shared::get_class` makes.
+/// `java.util.ArrayList` and a map `java.util.HashMap`. An array reports its array class's
+/// name (`[I`, `[Ljava.lang.String;`), which is the JDK's default `Object.toString` shape.
+/// The three VM-level containers use the bootstrap class library as their identity.
 ///
 /// [`crate::string::object_text`] reuses this for `String.valueOf(Object)` and
 /// [`crate::collections`] for `StringBuilder.append(Object)`.
@@ -121,7 +121,7 @@ pub(crate) fn runtime_binary_name(shared: &Shared, receiver: ObjRef) -> Result<S
         StringBuilder,
         List,
         Map,
-        Array,
+        Array(ClassRef),
     }
 
     let kind = {
@@ -134,6 +134,7 @@ pub(crate) fn runtime_binary_name(shared: &Shared, receiver: ObjRef) -> Result<S
             HeapObject::Str(_) => Kind::Str,
             HeapObject::Class(_) => Kind::Class,
             HeapObject::PrimitiveClass(_) => Kind::Class,
+            HeapObject::ArrayClass(_) => Kind::Class,
             HeapObject::Reflect(member) => Kind::Reflect(member.kind),
             HeapObject::Boxed(boxed) => Kind::Boxed(boxed.binary_name()),
             HeapObject::Annotation(_) => Kind::Annotation,
@@ -141,7 +142,7 @@ pub(crate) fn runtime_binary_name(shared: &Shared, receiver: ObjRef) -> Result<S
             HeapObject::StringBuilder(_) => Kind::StringBuilder,
             HeapObject::List(_) => Kind::List,
             HeapObject::Map(_) => Kind::Map,
-            HeapObject::Array(_) => Kind::Array,
+            HeapObject::Array(array) => Kind::Array(array.component.clone()),
         }
     };
 
@@ -166,8 +167,6 @@ pub(crate) fn runtime_binary_name(shared: &Shared, receiver: ObjRef) -> Result<S
         Kind::StringBuilder => Ok("java.lang.StringBuilder".to_owned()),
         Kind::List => Ok("java.util.ArrayList".to_owned()),
         Kind::Map => Ok("java.util.HashMap".to_owned()),
-        Kind::Array => Err(VmError::Native(
-            "array class names are not supported yet (M2.9)".to_owned(),
-        )),
+        Kind::Array(component) => shared.class_ref_name(&ClassRef::array(component)),
     }
 }

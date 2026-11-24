@@ -33,8 +33,8 @@ use std::sync::Arc;
 
 use rava_classfile::model::ACC_STATIC;
 use rava_vm::{
-    ArrayKind, BoxedPrimitive, ClassEntry, ClassId, ClassState, FrameRootsGuard, HeapObject,
-    MemberKind, ObjRef, Shared, ThreadState, Value,
+    ArrayKind, BoxedPrimitive, ClassEntry, ClassId, ClassRef, ClassState, FrameRootsGuard,
+    HeapObject, MemberKind, ObjRef, PrimitiveKind, Shared, ThreadState, Value,
 };
 
 /// Run a static method with `args` and return its result (`None` for `void`).
@@ -256,16 +256,22 @@ fn execute(
             }
             Instr::NewArray(kind) => {
                 let length = checked_length(int(frame.pop()?)?)?;
-                let reference = shared.heap().allocate_array(kind, length);
+                let component =
+                    kind.primitive_kind()
+                        .map(ClassRef::Primitive)
+                        .ok_or_else(|| {
+                            InterpError::Decode("newarray has a reference element kind".to_owned())
+                        })?;
+                let reference = shared.heap().allocate_array(component, length);
                 frame.push(Value::Ref(reference))?;
             }
             Instr::ANewArray { component } => {
                 let length = checked_length(int(frame.pop()?)?)?;
-                // `anewarray` resolves its component type (JVMS §6.5.anewarray). Array
-                // component types have no class identity in this slice, so only an object
-                // component is resolved; the descriptor alone describes an array one.
-                resolve_array_component(shared, frame.class, &component)?;
-                let reference = shared.heap().allocate_array(ArrayKind::Reference, length);
+                // `anewarray` resolves its component type (JVMS §6.5.anewarray), which
+                // may itself be an array class (`[[I` is allocated with `anewarray` of
+                // `[I`).
+                let component = resolve_class_ref(shared, frame.class, &component)?;
+                let reference = shared.heap().allocate_array(component, length);
                 frame.push(Value::Ref(reference))?;
             }
             Instr::MultiANewArray {
@@ -277,7 +283,7 @@ fn execute(
                     counts.push(int(frame.pop()?)?);
                 }
                 counts.reverse();
-                let reference = allocate_multidim(shared, &component, &counts)?;
+                let reference = allocate_multidim(shared, frame.class, &component, &counts)?;
                 frame.push(Value::Ref(reference))?;
             }
             Instr::ArrayLength => {
@@ -851,20 +857,30 @@ fn value_fits_array(kind: ArrayKind, value: Value) -> bool {
     )
 }
 
-/// Resolve an `anewarray` component through the current class's loader.
+/// Resolve an `anewarray` or `multianewarray` component through the current class's
+/// loader.
 ///
-/// An array component (`[I`, `[[Ljava/lang/String;`) names a type this slice has no
-/// class identity for, so it is described by the descriptor and not resolved.
-fn resolve_array_component(
+/// A component is a class name (`java/lang/String`), a primitive descriptor (`I`, from
+/// the innermost `multianewarray` level) or an array descriptor (`[I`,
+/// `[[Ljava/lang/String;`). Each becomes a [`ClassRef`], so the allocated array carries a
+/// component class and `getClass()`/`getComponentType()` can name it.
+fn resolve_class_ref(
     shared: &Shared,
     current: ClassId,
     component: &str,
-) -> Result<(), InterpError> {
-    if component.starts_with('[') {
-        return Ok(());
+) -> Result<ClassRef, InterpError> {
+    if component.starts_with('[') || PrimitiveKind::from_descriptor(component).is_some() {
+        let loader = resolve_loader(shared, current)?;
+        return Ok(shared.class_ref_for_descriptor(loader, component)?);
     }
-    resolve_from(shared, current, component)?;
-    Ok(())
+    Ok(ClassRef::Named(resolve_from(shared, current, component)?))
+}
+
+fn resolve_loader(shared: &Shared, current: ClassId) -> Result<rava_vm::LoaderId, InterpError> {
+    Ok(shared
+        .entry(current)
+        .ok_or_else(|| InterpError::Decode("current class vanished".to_owned()))?
+        .loader)
 }
 
 /// Allocate a `multianewarray` array, one nesting level per count.
@@ -875,10 +891,11 @@ fn resolve_array_component(
 /// elements stay null, which is what `new int[2][]` produces.
 fn allocate_multidim(
     shared: &Shared,
+    current: ClassId,
     descriptor: &str,
     counts: &[i32],
 ) -> Result<ObjRef, InterpError> {
-    let element = descriptor.strip_prefix('[').ok_or_else(|| {
+    let component = descriptor.strip_prefix('[').ok_or_else(|| {
         InterpError::Decode(format!(
             "multianewarray descriptor {descriptor} is not an array"
         ))
@@ -889,36 +906,20 @@ fn allocate_multidim(
         ));
     };
     let length = checked_length(first)?;
-    if rest.is_empty() {
-        let kind = array_element_kind(element)?;
-        return Ok(shared.heap().allocate_array(kind, length));
-    }
-    let reference = shared.heap().allocate_array(ArrayKind::Reference, length);
-    for position in 0..length {
-        let child = allocate_multidim(shared, element, rest)?;
-        shared.heap().array_mut(reference)?.elements[position] = Value::Ref(child);
+    let component = resolve_class_ref(shared, current, component)?;
+    let reference = shared.heap().allocate_array(component, length);
+    if !rest.is_empty() {
+        let element = descriptor.strip_prefix('[').ok_or_else(|| {
+            InterpError::Decode(format!(
+                "multianewarray descriptor {descriptor} is not an array"
+            ))
+        })?;
+        for position in 0..length {
+            let child = allocate_multidim(shared, current, element, rest)?;
+            shared.heap().array_mut(reference)?.elements[position] = Value::Ref(child);
+        }
     }
     Ok(reference)
-}
-
-/// The `ArrayKind` of one array descriptor's element type.
-fn array_element_kind(element: &str) -> Result<ArrayKind, InterpError> {
-    Ok(match element.as_bytes().first().copied() {
-        Some(b'I') => ArrayKind::Int,
-        Some(b'J') => ArrayKind::Long,
-        Some(b'F') => ArrayKind::Float,
-        Some(b'D') => ArrayKind::Double,
-        Some(b'B') => ArrayKind::Byte,
-        Some(b'C') => ArrayKind::Char,
-        Some(b'S') => ArrayKind::Short,
-        Some(b'Z') => ArrayKind::Boolean,
-        Some(b'L' | b'[') => ArrayKind::Reference,
-        _ => {
-            return Err(InterpError::Decode(format!(
-                "bad array element descriptor {element}"
-            )));
-        }
-    })
 }
 
 /// Replace the frame's published roots with its locals/stack plus `values`, the
@@ -942,13 +943,14 @@ fn resolve_from(shared: &Shared, current: ClassId, name: &str) -> Result<ClassId
 
 /// The class a virtual call starts resolution from.
 ///
-/// An instance dispatches from its defining class. A string, a class object, a box, a
-/// `StringBuilder`, an `ArrayList` or a `HashMap` has no `ClassId` of its own in the heap,
-/// so it dispatches from `java/lang/String`, `java/lang/Class`, its boxed class
-/// (`java/lang/Integer`), `java/lang/StringBuilder`, `java/util/ArrayList` or
-/// `java/util/HashMap`, resolved through the caller's loader. An array has no class
-/// identity yet; `Object` methods (including `getClass`, which reports a typed error) still
-/// dispatch, and any other method fails resolution normally.
+/// An instance dispatches from its defining class. A string, a class object (a loaded
+/// class, a primitive or an array class), a box, a `StringBuilder`, an `ArrayList` or a
+/// `HashMap` has no `ClassId` of its own in the heap, so it dispatches from
+/// `java/lang/String`, `java/lang/Class`, its boxed class (`java/lang/Integer`),
+/// `java/lang/StringBuilder`, `java/util/ArrayList` or `java/util/HashMap`, resolved
+/// through the caller's loader. An array instance dispatches from `java/lang/Object` (its
+/// `getClass` native reports the array class); any other method fails resolution
+/// normally.
 fn dispatch_class(
     shared: &Shared,
     current: ClassId,
@@ -975,6 +977,7 @@ fn dispatch_class(
             HeapObject::Str(_) => ReceiverKind::Str,
             HeapObject::Class(_) => ReceiverKind::Class,
             HeapObject::PrimitiveClass(_) => ReceiverKind::Class,
+            HeapObject::ArrayClass(_) => ReceiverKind::Class,
             HeapObject::Reflect(member) => ReceiverKind::Reflect(member.kind),
             HeapObject::Boxed(boxed) => ReceiverKind::Boxed(*boxed),
             HeapObject::Annotation(annotation) => ReceiverKind::Annotation(annotation.class),

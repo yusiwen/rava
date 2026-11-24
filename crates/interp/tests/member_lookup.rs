@@ -8,17 +8,18 @@
 //! registry is exercised as well as the direct native calls.
 //!
 //! Lookup misses are `null` in this slice (the JDK throws `NoSuchFieldException` or
-//! `NoSuchMethodException`; exception synthesis does not exist yet), and a primitive or
-//! array parameter class is a typed error because those class objects are not
-//! representable. Both outcomes are asserted exactly.
+//! `NoSuchMethodException`; exception synthesis does not exist yet). M2.15 added the
+//! primitive parameter classes and M2.16 the array ones; a class whose binary name is a
+//! primitive keyword is still a typed error because it is not a class object of that
+//! shape. Both outcomes are asserted exactly.
 
 use std::path::PathBuf;
 
 use rava_classfile::{Assembler, ClassBuilder};
 use rava_interp::{InterpError, run_instance_method, run_static_method};
 use rava_vm::{
-    ArrayKind, ClassId, LoaderId, MemberKind, ObjRef, ReflectMember, Shared, ThreadState, Value,
-    VmError, instance, object, reflection,
+    ClassId, ClassRef, LoaderId, MemberKind, ObjRef, PrimitiveKind, ReflectMember, Shared,
+    ThreadState, Value, VmError, instance, object, reflection,
 };
 
 const ACC_PRIVATE: u16 = 0x0002;
@@ -363,8 +364,13 @@ fn fixture() -> Fixture {
 }
 
 fn reference_array(shared: &Shared, values: &[ObjRef]) -> ObjRef {
+    let component = ClassRef::Named(
+        shared
+            .load_library_class("java/lang/Class")
+            .expect("Class loads"),
+    );
     let mut heap = shared.heap();
-    let array = heap.allocate_array(ArrayKind::Reference, values.len());
+    let array = heap.allocate_array(component, values.len());
     {
         let array = heap.array_mut(array).expect("a reference array");
         for (slot, value) in array.elements.iter_mut().zip(values) {
@@ -876,10 +882,15 @@ fn primitive_and_null_parameter_classes_are_typed_errors() {
     );
 
     // A null slot in the Class[] is a typed error, as is a null Class[] itself.
-    let null_array = fixture
-        .shared
-        .heap()
-        .allocate_array(ArrayKind::Reference, 1);
+    let null_array = fixture.shared.heap().allocate_array(
+        ClassRef::Named(
+            fixture
+                .shared
+                .load_library_class("java/lang/Class")
+                .expect("Class loads"),
+        ),
+        1,
+    );
     assert_native_error(
         lookup(
             &fixture,
@@ -916,7 +927,10 @@ fn primitive_and_null_parameter_classes_are_typed_errors() {
     );
 
     // A primitive array is not a Class[] either.
-    let int_array = fixture.shared.heap().allocate_array(ArrayKind::Int, 0);
+    let int_array = fixture
+        .shared
+        .heap()
+        .allocate_array(ClassRef::Primitive(PrimitiveKind::Int), 0);
     assert_native_error(
         lookup(
             &fixture,

@@ -9,7 +9,10 @@ use std::path::PathBuf;
 
 use rava_classfile::{Assembler, ClassBuilder, ClassFile};
 use rava_interp::{Instr, IntCondition, InterpError, decode, run_static_method};
-use rava_vm::{ArrayKind, ClassId, HeapError, LoaderId, ObjRef, Shared, ThreadState, Value};
+use rava_vm::{
+    ArrayKind, ClassId, ClassRef, HeapError, LoaderId, ObjRef, PrimitiveKind, Shared, ThreadState,
+    Value,
+};
 
 const ACC_PUBLIC_STATIC: u16 = 0x0009;
 
@@ -706,7 +709,10 @@ fn bounds_null_and_negative_sizes_are_typed_errors() {
 fn array_element_kinds_are_checked() {
     let fixture = fixture();
 
-    let longs = fixture.shared.heap().allocate_array(ArrayKind::Long, 2);
+    let longs = fixture
+        .shared
+        .heap()
+        .allocate_array(ClassRef::Primitive(PrimitiveKind::Long), 2);
     match call(
         &fixture,
         "badIntLoad",

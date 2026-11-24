@@ -7,7 +7,7 @@
 
 > Ledger. P0 and P1 were accepted on 2026-11-23. M1 is complete; M2 is in progress
 > (M2.1, M2.2, M2.3, M2.4, M2.5, M2.6, M2.7, M2.8, M2.9, M2.10, M2.11, M2.12,
-> M2.13, M2.14 and M2.15 done). Keep this file honest and terse.
+> M2.13, M2.14, M2.15 and M2.16 done). Keep this file honest and terse.
 
 ## Phase status
 
@@ -28,7 +28,7 @@ release process, if wanted, becomes its own phase.
 > Gates are defined in `docs/requirements.md` § Milestones. P0 and P1 are accepted;
 > M0 and M1 are complete, and both gate reviews have passed. M2 is in progress, with
 > M2.1, M2.2, M2.3, M2.4, M2.5, M2.6, M2.7, M2.8, M2.9, M2.10, M2.11, M2.12, M2.13,
-> M2.14 and M2.15 done.
+> M2.14, M2.15 and M2.16 done.
 
 | Milestone | Delivers | Gate | Status |
 | :--- | :--- | :--- | :--- |
@@ -74,12 +74,12 @@ release process, if wanted, becomes its own phase.
 | M2.13 | `HashMap` and `String.valueOf`/value conversion | R3 | `cargo test -p rava-interp --test maps_values` exits 0 | done |
 | M2.14 | Named member lookup (`getDeclaredMethod`/`getField`/`getConstructor`) | R3 | `cargo test -p rava-interp --test member_lookup` exits 0 | done |
 | M2.15 | Primitive `Class` identity and primitive member types | R3 | `cargo test -p rava-interp --test primitive_classes` exits 0 | done |
-| M2.16 | Array `Class` identity and array member types | R3 | `cargo test -p rava-interp --test array_classes` exits 0 | todo |
+| M2.16 | Array `Class` identity and array member types | R3 | `cargo test -p rava-interp --test array_classes` exits 0 | done |
 
 P0 and P1 are accepted; P2 is done because the M2 increments are sliced. All M0 and
 M1 slices are done, and both gate reviews passed. M2.1, M2.2, M2.3, M2.4, M2.5,
-M2.6, M2.7, M2.8, M2.9, M2.10, M2.11, M2.12, M2.13, M2.14 and M2.15 are done;
-M2.16 is next.
+M2.6, M2.7, M2.8, M2.9, M2.10, M2.11, M2.12, M2.13, M2.14, M2.15 and M2.16 are done;
+M2.17 is next.
 
 ## Slice log
 
@@ -112,6 +112,7 @@ M2.16 is next.
 | M2.13 | `cargo test -p rava-interp --test maps_values` | 0 | 2026-11-24 | `HeapObject::Map(Vec<(Value, Value)>)` is an insertion-ordered map with a heap allocator and accessors, selected by the `java.util.HashMap` class identity in `Shared::allocate_instance`; `Shared::get_class`, `invokevirtual` dispatch and `Object.toString`'s runtime name report `java.util.HashMap`, and `Shared::roots` enumerates every non-null key and value a map holds. The natives cover the `()V`/`(I)V` constructors, `size`, `isEmpty`, `put` (returning the previous value or null), `get`, `containsKey`, `containsValue`, `remove` and `clear`; null keys and values are stored, a string key compares by content, a boxed `Integer` key by value and every other key by reference identity, and a negative capacity or a non-reference argument is a typed `VmError::Native`. `String.valueOf` covers `Object`, `int`, `long`, `boolean`, `char`, `float` and `double`: null renders `"null"`, a `String` returns itself, a boxed `Integer` its decimal value, any other object the VM's `ClassName@hex` shape that matches M2.9 `Object.toString`, `valueOf(int)` is byte-identical to `Integer.toString(int)`, and a lone surrogate `char` is `UnpairedSurrogate`; the value-conversion helpers moved from `collections` to `string`, so `StringBuilder.append(Object)` keeps the same text. The assembled `MapProbe` exercises the bytecode path, two distinct equal-content string keys and two distinct boxed `Integer` keys, roots, and typed errors; 16 tests; `cargo test -p rava-interp` 108, `rava-vm` 47, `rava-classfile` 50 and `rava-cli` 67 pass, workspace 272; `cargo xtask ci` exits 0 |
 | M2.14 | `cargo test -p rava-interp --test member_lookup` | 0 | 2026-11-24 | `Class.getDeclaredField`/`getField`, `getDeclaredMethod`/`getMethod` and `getDeclaredConstructor`/`getConstructor` are registry natives; a field matches by name and an executable by name plus the parameter descriptors built from its `Class[]` argument (reference parameter classes only), first in class-file order, and a method's return type is not part of the query; `get*` searches the class, its superclass chain and its interfaces with a visited set, while `getDeclared*` and the constructor queries stay on the receiver; a miss is null (the JDK's `NoSuchFieldException`/`NoSuchMethodException` is deferred because exception objects are not synthesized), and a primitive, array, null or non-`Class` parameter class is a typed `VmError::Native`; every hit is the M2.8 `Shared::reflect_member` object, so it is reference-identical to the array queries and stable across calls; the interpreter's `argument_count` now skips an array parameter's element descriptor, so `Class.getDeclaredMethod(String, Class[])` is callable from bytecode; the fixture has a field-hiding subclass, an interface method and three constructors; 5 tests; `cargo test -p rava-interp` 113, `rava-vm` 47, `rava-classfile` 50 and `rava-cli` 67 pass, workspace 277; `cargo xtask ci` exits 0 |
 | M2.15 | `cargo test -p rava-interp --test primitive_classes` | 0 | 2026-11-24 | `HeapObject::PrimitiveClass(PrimitiveKind)` is a heap kind distinct from `HeapObject::Class(ClassId)`, with `Shared::primitive_class` as the one-object-per-kind cache, its own lock and no-lock probe entry, and `Shared::roots` leaving every cached primitive class object a root; `Class.forName` of `boolean`, `byte`, `char`, `short`, `int`, `long`, `float`, `double` and `void` returns that cached object, whose `getName` is the Java name, `getModifiers` is `0x0411` (`public abstract final`, `void` included), `isPrimitive` is true, `isArray`/`isInterface` are false and `getSuperclass`/`getComponentType` are null, while `getClass()` reports `java.lang.Class`; a primitive class object declares no members, so the declared-member array queries return empty arrays and the named lookups return the documented null miss; `Field.getType`, `Method.getReturnType`/`getParameterTypes` and `Constructor.getParameterTypes` resolve primitive descriptors to primitive class objects, and a `Class[]` of primitive class objects builds the exact one-character descriptor (`I`, `Z`, ...) a named lookup matches, while a reference class object still builds `L...;` and a `Void.TYPE` parameter builds `V`, which matches nothing; the nine wrapper `TYPE` fields are resolved virtually by `Shared::static_field_value` on the interpreter's `getstatic` fallback because the C1 stubs have no initializer `Code`, and every other wrapper static (`Integer.MAX_VALUE`) stays absent; the `Bean`/`PrimitiveProbe` fixture asserts the flags, names, member types, lookup hits and misses, a bytecode `setValue`/`getValue` round trip through `int.class`, all nine `TYPE` fields, and the documented boundaries; 6 new tests; `cargo test -p rava-interp` 119, `rava-vm` 47, `rava-classfile` 50 and `rava-cli` 67 pass, workspace 283; `cargo xtask ci` exits 0 |
+| M2.16 | `cargo test -p rava-interp --test array_classes` | 0 | 2026-11-24 | `ClassRef` (a named class, a primitive or a nested array) and `ArrayClass` (a component) describe a class identity beyond `ClassId`; `HeapObject::ArrayClass(ArrayClass)` is a heap kind distinct from `HeapObject::Class(ClassId)` and `HeapObject::PrimitiveClass(PrimitiveKind)`, and `Array` gains the `component` its allocation named, so `newarray`/`anewarray`/`multianewarray` and `String.toCharArray` carry an exact component; `Shared::array_class` is the one-object-per-component cache, with its own lock, a no-lock probe entry and `Shared::roots` entries, and `Shared::get_class` reports an array's array class; `Class.forName` accepts `[I`, `[[I` and `[Ljava.lang.String;` (dotted or internal component names) and returns that cached object, whose `getName` is the JDK descriptor form, `getModifiers` is `0x0411` (`public abstract final`), `isArray` is true, `isPrimitive`/`isInterface` are false, `getComponentType` is the primitive, named or nested-array component class object, and `getSuperclass` is `java.lang.Object` for primitive and reference arrays; `Field.getType`, `Method.getReturnType`/`getParameterTypes` and `Constructor.getParameterTypes` resolve array descriptors through the declaring class's loader, and the named lookups build the exact array descriptor from array `Class[]` entries (`([I)[I`, `([I[Ljava/lang/String;)V`), while a mismatch is the documented null miss; an array class declares no members, so its declared-member arrays are empty and its named lookups are null misses; a malformed array descriptor (`[Q`, `[V`, `[L;`) and a missing named component are typed errors, and a `Class.forName` array resolves only through the bootstrap loader; the assembled `Bean`/`ArrayClassProbe` fixture (an `int[]`, `String[]` and `int[][]` field, `()V`/`([I)V`/`([I[Ljava/lang/String;)V` constructors and `([I)[I`/`([Ljava/lang/String;)[Ljava/lang/String;` methods) asserts names, flags, component identities, `getClass` on `new int[...]`/`new String[...]`/`new int[...][...]`, member types, named lookup hits and misses, and root/cache stability; 6 new tests; `cargo test -p rava-interp` 125, `rava-vm` 47, `rava-classfile` 50 and `rava-cli` 67 pass, workspace 289; `cargo xtask ci` exits 0 |
 
 M0.6 boundary: the reference and class-unloading hooks are registration points only.
 M0 has no collector, so no weak/soft/phantom reference is cleared and no class is
@@ -561,6 +562,37 @@ primitive class object keeps the M2.9 `java.lang.Class@hash` shape instead of th
 `class int`. The `crates/interp/tests/primitive_classes.rs` fixture is assembled in Rust
 because it needs no JDK.
 
+M2.16 boundary: a class identity beyond `ClassId` is a `ClassRef` — a named class, a
+primitive or an array class — and an array class is an `ArrayClass` identified by its
+component alone. `HeapObject::ArrayClass(ArrayClass)` is a distinct heap kind, so
+`HeapObject::Class(ClassId)` and `HeapObject::PrimitiveClass(PrimitiveKind)` keep their
+identity unchanged. There is exactly one array class object per component in
+`Shared::array_classes`, enumerated by `Shared::roots`, with its own lock and no-lock
+probe entry; a nested array's component is itself an array class ref, so the chain is
+stable without a second object. An array heap object now carries the component its
+allocation named, so `getClass()` on `new int[n]`, `new String[n]` and
+`new int[r][c]` reports the exact cached array class. `Class.getName` for an array is the
+JDK descriptor form with dots (`[I`, `[[I`, `[Ljava.lang.String;`), `getModifiers` is
+`0x0411` (`public abstract final`), `isArray` is true, `isPrimitive` and `isInterface` are
+false, `getComponentType` returns the primitive, named or nested-array component class
+object, and `getSuperclass` is `java.lang.Object` for primitive and reference arrays.
+`Class.forName` accepts an array name and resolves a named component through the
+bootstrap loader only, so an array whose component is not in the bootstrap class library
+is a loader error even when a child loader defines it; it does not initialize the
+component or the array class. An array class declares no fields, methods or constructors,
+so the declared-member queries return empty arrays and the named lookups return the
+documented null miss. `Field.getType`, `Method.getReturnType`/`getParameterTypes` and
+`Constructor.getParameterTypes` resolve an array descriptor through the declaring
+class's loader, and a named lookup accepts array class objects in its `Class[]` and
+builds the exact array descriptor. A malformed descriptor (`[Q`, `[V`, `[L;`) and a
+missing named component are typed errors. This slice does not decode a class constant
+with `ldc`, so Java's `int[].class` spelling is exercised through `Class.forName("[I")`
+instead; array covariance and `ArrayStoreException` are still absent (`aastore` keeps
+M2.6's no-check behavior), `Class.toString` keeps the M2.9 `java.lang.Class@hash` shape
+rather than the JDK's `class [I`, and generic `Type`, annotation changes and Spring stay
+out of this slice. The `crates/interp/tests/array_classes.rs` fixture is assembled in
+Rust because it needs no JDK.
+
 ## Decision log
 
 | ADR | Decision | Status |
@@ -634,7 +666,13 @@ A fresh session should:
     `Class.forName` names, primitive member types from `Field`/`Method`/`Constructor`,
     primitive parameter descriptors in named lookup, the virtual wrapper `TYPE` fields,
     and the `Bean`/`PrimitiveProbe` fixture (`cargo test -p rava-interp --test
-    primitive_classes`). M2.16 is next.
+    primitive_classes`). M2.16 landed array class identity and array member types: the
+    `ClassRef`/`ArrayClass` representation and the `HeapObject::ArrayClass` heap kind,
+    the `Shared::array_class` per-component cache and its roots, the component now
+    carried by an array heap object, the array `Class` queries and `Class.forName` names,
+    array descriptors in member types and in named lookup parameters, and the
+    `Bean`/`ArrayClassProbe` fixture (`cargo test -p rava-interp --test array_classes`).
+    M2.17 is next.
 4. Do not write runtime code outside a defined slice.
 
 ## Open decisions

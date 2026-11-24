@@ -16,7 +16,7 @@ use std::path::PathBuf;
 use rava_classfile::{Assembler, ClassBuilder};
 use rava_interp::{InterpError, reflect_invoke, run_instance_method, run_static_method};
 use rava_vm::{
-    ArrayKind, BoxedPrimitive, ClassId, HeapObject, LoaderId, MemberKind, ObjRef, Shared,
+    BoxedPrimitive, ClassId, ClassRef, HeapObject, LoaderId, MemberKind, ObjRef, Shared,
     ThreadState, Value, VmError, boxed, instance, object, reflection, string,
 };
 
@@ -266,8 +266,13 @@ fn member(fixture: &Fixture, kind: MemberKind, name: &str, descriptor: &str) -> 
 }
 
 fn reference_array(shared: &Shared, values: &[ObjRef]) -> ObjRef {
+    let component = ClassRef::Named(
+        shared
+            .load_library_class("java/lang/Object")
+            .expect("Object loads"),
+    );
     let mut heap = shared.heap();
-    let array = heap.allocate_array(ArrayKind::Reference, values.len());
+    let array = heap.allocate_array(component, values.len());
     {
         let array = heap.array_mut(array).expect("a reference array");
         for (slot, value) in array.elements.iter_mut().zip(values) {

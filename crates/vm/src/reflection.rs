@@ -1,5 +1,5 @@
 //! `Object`/`Class` reflection natives (M2.4), reflected members (M2.8), field access
-//! (M2.10), named member lookup (M2.14) and primitive types (M2.15).
+//! (M2.10), named member lookup (M2.14), primitive types (M2.15) and array types (M2.16).
 //!
 //! The surface here is deliberately small. M2.4 supplies the six class-object methods
 //! plus `Object.getClass`: names, modifiers, interface/array flags, the superclass and
@@ -18,25 +18,30 @@
 //! answer for it, a primitive descriptor resolves to it in `Field.getType`,
 //! `Method.getReturnType`/`getParameterTypes` and `Constructor.getParameterTypes`, and a
 //! `Class[]` of primitive class objects builds the primitive descriptors a named lookup
-//! matches. `Method.invoke` and `Constructor.newInstance` need the interpreter's
-//! execution machinery, so they live in `rava-interp` instead of this crate;
-//! annotations, array class identity, generic types and access checks remain later
-//! slices.
+//! matches. M2.16 adds array class objects: the cached
+//! [`crate::HeapObject::ArrayClass`] object for a component, its descriptor-form
+//! `getName`, `0x0411` modifiers, `isArray`, its component and `java.lang.Object`
+//! superclass, array descriptors in the same member types, and array class objects in a
+//! named lookup's `Class[]`. `Method.invoke` and `Constructor.newInstance` need the
+//! interpreter's execution machinery, so they live in `rava-interp` instead of this
+//! crate; annotations, generic types and access checks remain later slices.
 //!
 //! The natives read the class table rather than caching a second copy of the metadata:
-//! a class object is either a [`crate::ClassId`] or a [`crate::PrimitiveKind`], and every
-//! answer comes from that class's parsed `ClassFile` or from the primitive kind. A
-//! reflected member is only a [`crate::ReflectMember`] (declaring class, kind, name and
-//! descriptor), and its modifiers and types come from the same typed C1 metadata.
-//! `Class.forName` loads and allocates the class object; it does not initialize the class,
-//! because the C1 stubs have no observable `<clinit>`.
+//! a class object is a [`crate::ClassId`], a [`crate::PrimitiveKind`] or an
+//! [`crate::ArrayClass`], and every answer comes from that class's parsed `ClassFile`,
+//! the primitive kind or the array component. A reflected member is only a
+//! [`crate::ReflectMember`] (declaring class, kind, name and descriptor), and its
+//! modifiers and types come from the same typed C1 metadata. `Class.forName` loads and
+//! allocates the class object; it does not initialize the class, because the C1 stubs
+//! have no observable `<clinit>`.
 
 use std::collections::HashSet;
 
 use crate::VmError;
 use crate::boxed;
 use crate::heap::{
-    ArrayKind, HeapError, HeapObject, MemberKind, ObjRef, PrimitiveKind, ReflectMember,
+    ArrayClass, ArrayKind, ClassRef, HeapError, HeapObject, MemberKind, ObjRef, PrimitiveKind,
+    ReflectMember,
 };
 use crate::loader::{ClassId, LoaderId};
 use crate::shared::Shared;
@@ -59,6 +64,10 @@ const METHOD_MODIFIERS: u16 = 0x1DFF;
 
 /// `Modifier.constructorModifiers()`: only the three access bits are Java modifiers.
 const CONSTRUCTOR_MODIFIERS: u16 = 0x0007;
+
+/// `Class.getModifiers()` for an array class: `Modifier.PUBLIC | Modifier.ABSTRACT |
+/// Modifier.FINAL`, the same `0x0411` every primitive reports on the reference JDK.
+const ARRAY_MODIFIERS: u16 = 0x0411;
 
 /// `ACC_INTERFACE` (JVMS §4.1).
 const ACC_INTERFACE: u16 = 0x0200;
@@ -239,7 +248,6 @@ fn class_of(shared: &Shared, class: ClassId) -> Result<ClassEntryView, VmError> 
         .ok_or_else(|| VmError::Loader(format!("class id {} is not loaded", class.0)))?;
     let view = ClassEntryView {
         loader: entry.loader,
-        name: entry.name.replace('/', "."),
         access_flags: entry.file.access_flags,
         super_name: entry
             .file
@@ -254,28 +262,43 @@ fn class_of(shared: &Shared, class: ClassId) -> Result<ClassEntryView, VmError> 
 /// class-table lock or a heap guard.
 struct ClassEntryView {
     loader: LoaderId,
-    name: String,
     access_flags: u16,
     super_name: Option<String>,
 }
 
-/// What a `Class` receiver denotes: a loaded class or one of the nine primitives.
+/// What a `Class` receiver denotes: a loaded class, one of the nine primitives, or an
+/// array class.
 enum ClassObject {
     /// A loaded class, identified by its `(loader, name)` class id.
     Named(ClassId),
     /// A primitive type, which has no class file and no loader.
     Primitive(PrimitiveKind),
+    /// An array class, identified by its component.
+    Array(ArrayClass),
+}
+
+impl ClassObject {
+    /// The class ref this receiver denotes.
+    fn class_ref(&self) -> ClassRef {
+        match self {
+            Self::Named(class) => ClassRef::Named(*class),
+            Self::Primitive(kind) => ClassRef::Primitive(*kind),
+            Self::Array(array) => ClassRef::Array(Box::new(array.clone())),
+        }
+    }
 }
 
 /// Classify a `Class` receiver.
 ///
-/// A primitive class object is a distinct heap kind, not a `ClassId`, so every native
-/// starts here instead of calling [`crate::Heap::class`] and failing on `int.class`.
+/// A primitive class object and an array class object are distinct heap kinds, not a
+/// `ClassId`, so every native starts here instead of calling [`crate::Heap::class`] and
+/// failing on `int.class` or `int[].class`.
 fn class_object_of(shared: &Shared, receiver: ObjRef) -> Result<ClassObject, VmError> {
     let heap = shared.heap();
     match heap.get(receiver).map_err(heap_error)? {
         HeapObject::Class(class) => Ok(ClassObject::Named(*class)),
         HeapObject::PrimitiveClass(kind) => Ok(ClassObject::Primitive(*kind)),
+        HeapObject::ArrayClass(array) => Ok(ClassObject::Array(array.clone())),
         _ => Err(VmError::Native(format!("{receiver} is not a Class object"))),
     }
 }
@@ -291,8 +314,8 @@ fn object_get_class(
     Ok(Some(Value::Ref(class)))
 }
 
-/// `Class.getName()`: the dotted binary name of a loaded class, or the primitive's Java
-/// name (`int`, `void`).
+/// `Class.getName()`: the dotted binary name of a loaded class, the primitive's Java name
+/// (`int`, `void`), or the JDK's descriptor form for an array (`[I`, `[Ljava.lang.String;`).
 fn class_get_name(
     shared: &Shared,
     _thread: &ThreadState,
@@ -300,16 +323,14 @@ fn class_get_name(
     receiver: ObjRef,
     _args: &[Value],
 ) -> Result<Option<Value>, VmError> {
-    let name = match class_object_of(shared, receiver)? {
-        ClassObject::Named(class) => class_of(shared, class)?.name,
-        ClassObject::Primitive(kind) => kind.name().to_owned(),
-    };
+    let class = class_object_of(shared, receiver)?;
+    let name = shared.class_ref_name(&class.class_ref())?;
     let name = shared.heap().allocate_string(name);
     Ok(Some(Value::Ref(name)))
 }
 
 /// `Class.getModifiers()`: the Java modifier mask of a loaded class, or the fixed
-/// `public abstract final` (`0x0411`) every primitive reports on the JDK 17.
+/// `public abstract final` (`0x0411`) every primitive and array class reports on the JDK 17.
 fn class_get_modifiers(
     shared: &Shared,
     _thread: &ThreadState,
@@ -322,6 +343,7 @@ fn class_get_modifiers(
             i32::from(class_of(shared, class)?.access_flags & CLASS_MODIFIERS)
         }
         ClassObject::Primitive(kind) => i32::from(kind.modifiers()),
+        ClassObject::Array(_) => i32::from(ARRAY_MODIFIERS),
     };
     Ok(Some(Value::Int(modifiers)))
 }
@@ -335,17 +357,12 @@ fn class_is_interface(
 ) -> Result<Option<Value>, VmError> {
     let flag = match class_object_of(shared, receiver)? {
         ClassObject::Named(class) => class_of(shared, class)?.access_flags & ACC_INTERFACE != 0,
-        ClassObject::Primitive(_) => false,
+        ClassObject::Primitive(_) | ClassObject::Array(_) => false,
     };
     Ok(Some(Value::Int(i32::from(flag))))
 }
 
-/// `Class.isArray()`: always false today.
-///
-/// A primitive is not an array, and arrays themselves have no class identity yet, so no
-/// `Class` object can represent one and this native cannot observe a true case. The
-/// receiver is still validated, so a wrong receiver is an error rather than a silently
-/// false answer.
+/// `Class.isArray()`: true exactly for an array class object.
 fn class_is_array(
     shared: &Shared,
     _thread: &ThreadState,
@@ -353,8 +370,8 @@ fn class_is_array(
     receiver: ObjRef,
     _args: &[Value],
 ) -> Result<Option<Value>, VmError> {
-    let _class = class_object_of(shared, receiver)?;
-    Ok(Some(Value::Int(0)))
+    let flag = matches!(class_object_of(shared, receiver)?, ClassObject::Array(_));
+    Ok(Some(Value::Int(i32::from(flag))))
 }
 
 /// `Class.isPrimitive()`: true exactly for the nine primitive class objects.
@@ -372,11 +389,7 @@ fn class_is_primitive(
     Ok(Some(Value::Int(i32::from(flag))))
 }
 
-/// `Class.getComponentType()`: null.
-///
-/// A loaded class that is not an array reports null on the JDK, and a primitive is not
-/// an array either. Array class objects do not exist in this slice, so no receiver can
-/// observe a component type.
+/// `Class.getComponentType()`: the component class object of an array, null otherwise.
 fn class_get_component_type(
     shared: &Shared,
     _thread: &ThreadState,
@@ -384,8 +397,13 @@ fn class_get_component_type(
     receiver: ObjRef,
     _args: &[Value],
 ) -> Result<Option<Value>, VmError> {
-    let _class = class_object_of(shared, receiver)?;
-    Ok(Some(Value::Ref(ObjRef::NULL)))
+    match class_object_of(shared, receiver)? {
+        ClassObject::Array(array) => {
+            let component = shared.class_object_for_ref(&array.component)?;
+            Ok(Some(Value::Ref(component)))
+        }
+        ClassObject::Named(_) | ClassObject::Primitive(_) => Ok(Some(Value::Ref(ObjRef::NULL))),
+    }
 }
 
 fn class_get_superclass(
@@ -395,30 +413,44 @@ fn class_get_superclass(
     receiver: ObjRef,
     _args: &[Value],
 ) -> Result<Option<Value>, VmError> {
-    let ClassObject::Named(class) = class_object_of(shared, receiver)? else {
-        // A primitive has no superclass on the JDK: `int.class.getSuperclass()` is null.
-        return Ok(Some(Value::Ref(ObjRef::NULL)));
-    };
-    let view = class_of(shared, class)?;
-    // JDK semantics: an interface, like `Object`, reports no superclass even though the
-    // class file names `java/lang/Object` as the interface's superclass.
-    let Some(super_name) = view
-        .super_name
-        .filter(|_| view.access_flags & ACC_INTERFACE == 0)
-    else {
-        return Ok(Some(Value::Ref(ObjRef::NULL)));
-    };
-    let super_class = shared.load_class(view.loader, &super_name)?;
-    let object = shared.class_object(super_class)?;
-    Ok(Some(Value::Ref(object)))
+    let class = class_object_of(shared, receiver)?;
+    match class {
+        ClassObject::Array(_) => {
+            // Every array class extends `java.lang.Object`, for primitive and reference
+            // component types alike.
+            let object = shared.load_library_class("java/lang/Object")?;
+            let object = shared.class_object(object)?;
+            Ok(Some(Value::Ref(object)))
+        }
+        ClassObject::Primitive(_) => {
+            // A primitive has no superclass on the JDK: `int.class.getSuperclass()` is null.
+            Ok(Some(Value::Ref(ObjRef::NULL)))
+        }
+        ClassObject::Named(class) => {
+            let view = class_of(shared, class)?;
+            // JDK semantics: an interface, like `Object`, reports no superclass even though
+            // the class file names `java/lang/Object` as the interface's superclass.
+            let Some(super_name) = view
+                .super_name
+                .filter(|_| view.access_flags & ACC_INTERFACE == 0)
+            else {
+                return Ok(Some(Value::Ref(ObjRef::NULL)));
+            };
+            let super_class = shared.load_class(view.loader, &super_name)?;
+            let object = shared.class_object(super_class)?;
+            Ok(Some(Value::Ref(object)))
+        }
+    }
 }
 
-/// `Class.forName(String)`: a loaded class object, or the cached primitive class object
-/// for a primitive name (`int`, `void`).
+/// `Class.forName(String)`: a loaded class object, the cached primitive class object for
+/// a primitive name (`int`, `void`), or the cached array class object for an array name
+/// (`[I`, `[[I`, `[Ljava.lang.String;`).
 ///
-/// `Class.forName` takes a binary name (`java.util.List`), not an internal one. Array
-/// class names (`[Ljava.lang.String;`, `[I`) need the array identity this slice does not
-/// have, so they fail loudly instead of loading a class that does not exist.
+/// `Class.forName` takes a binary name (`java.util.List`), not an internal one; for an
+/// array it takes the JDK's descriptor form with dots in an object component. The named
+/// component of an array is resolved through the bootstrap loader, exactly as a named
+/// argument is.
 fn class_for_name(
     shared: &Shared,
     _thread: &ThreadState,
@@ -440,9 +472,12 @@ fn class_for_name(
         return Ok(Some(Value::Ref(shared.primitive_class(kind))));
     }
     if name.starts_with('[') {
-        return Err(VmError::Native(format!(
-            "Class.forName does not support array class names yet: {name}"
-        )));
+        // A descriptor's object names are internal; `Class.forName` accepts the dotted
+        // spelling, so a `[Ljava.lang.String;` argument becomes `[Ljava/lang/String;`.
+        let descriptor = name.replace('.', "/");
+        let class_ref = shared.class_ref_for_descriptor(LoaderId::BOOTSTRAP, &descriptor)?;
+        let object = shared.class_object_for_ref(&class_ref)?;
+        return Ok(Some(Value::Ref(object)));
     }
     let internal = name.replace('.', "/");
     let class = shared.load_library_class(&internal)?;
@@ -526,14 +561,15 @@ fn declared_members(shared: &Shared, class: ClassId, kind: MemberKind) -> Result
     for (name, descriptor) in &members {
         objects.push(shared.reflect_member(class, kind, name, descriptor)?);
     }
-    allocate_reference_array(shared, &objects)
+    let component = shared.load_library_class(kind.class_name())?;
+    allocate_reference_array(shared, ClassRef::Named(component), &objects)
 }
 
 /// The declared members of a `Class` receiver.
 ///
-/// A primitive class object has no class file, so it declares nothing: the JDK returns
-/// an empty array for `int.class.getDeclaredFields()`, `getDeclaredMethods()` and
-/// `getDeclaredConstructors()`. A loaded class goes through [`declared_members`].
+/// A primitive or array class object has no class file, so it declares nothing: the JDK
+/// returns an empty array for `int.class.getDeclaredFields()` and for the same query on
+/// `int[].class`. A loaded class goes through [`declared_members`].
 fn declared_members_of(
     shared: &Shared,
     receiver: ObjRef,
@@ -541,17 +577,23 @@ fn declared_members_of(
 ) -> Result<ObjRef, VmError> {
     match class_object_of(shared, receiver)? {
         ClassObject::Named(class) => declared_members(shared, class, kind),
-        ClassObject::Primitive(_) => allocate_reference_array(shared, &[]),
+        ClassObject::Primitive(_) | ClassObject::Array(_) => {
+            // The empty result still has the query's array type: `Field[]`, `Method[]` or
+            // `Constructor[]`.
+            let component = shared.load_library_class(kind.class_name())?;
+            allocate_reference_array(shared, ClassRef::Named(component), &[])
+        }
     }
 }
 
-/// Allocate a `java.lang.Object[]`-shaped reference array holding `values`.
+/// Allocate a reference array with the given component, holding `values`.
 pub(crate) fn allocate_reference_array(
     shared: &Shared,
+    component: ClassRef,
     values: &[ObjRef],
 ) -> Result<ObjRef, VmError> {
     let mut heap = shared.heap();
-    let array = heap.allocate_array(ArrayKind::Reference, values.len());
+    let array = heap.allocate_array(component, values.len());
     {
         let array = heap.array_mut(array).map_err(heap_error)?;
         for (slot, value) in array.elements.iter_mut().zip(values.iter()) {
@@ -568,15 +610,15 @@ struct FoundMember {
     descriptor: String,
 }
 
-/// The loaded class behind a member-query receiver, or `None` for a primitive.
+/// The loaded class behind a member-query receiver, or `None` for a primitive or array.
 ///
-/// A primitive class object declares no members, so a named lookup on it is a miss; the
-/// JDK's `NoSuchFieldException`/`NoSuchMethodException` is still represented as the
-/// documented `null` miss in this slice.
+/// A primitive or array class object declares no members, so a named lookup on it is a
+/// miss; the JDK's `NoSuchFieldException`/`NoSuchMethodException` is still represented as
+/// the documented `null` miss in this slice.
 fn named_receiver(shared: &Shared, receiver: ObjRef) -> Result<Option<ClassId>, VmError> {
     Ok(match class_object_of(shared, receiver)? {
         ClassObject::Named(class) => Some(class),
-        ClassObject::Primitive(_) => None,
+        ClassObject::Primitive(_) | ClassObject::Array(_) => None,
     })
 }
 
@@ -714,16 +756,15 @@ fn lookup_name(
 
 /// Build the parameter descriptors of a lookup from its `Class[]` argument.
 ///
-/// A parameter class object is either a loaded class or a primitive. A loaded class
-/// becomes its `Linternal/Name;` descriptor; a primitive class object becomes its
-/// one-character descriptor (`I`, `Z`, ..., `V`), which is what makes
-/// `getDeclaredMethod("setValue", new Class[]{int.class})` match `(I)V`. Array class
-/// objects do not exist in this slice (there is no `[I` or `[Ljava/lang/String;`
-/// identity), so a parameter class whose binary name is an array descriptor is a typed
-/// error rather than a guessed descriptor. A loaded class whose binary name is a
-/// primitive keyword is a bogus class rather than a primitive class object, so it is a
-/// typed error too. A null element, a null array and a non-`Class` element are typed
-/// errors, where the JDK would raise `NullPointerException`.
+/// A parameter class object is a loaded class, a primitive or an array class. A loaded
+/// class becomes its `Linternal/Name;` descriptor; a primitive becomes its one-character
+/// descriptor (`I`, `Z`, ..., `V`); an array class becomes its array descriptor (`[I`,
+/// `[Ljava/lang/String;`, `[[I`). That is what makes
+/// `getDeclaredMethod("sum", new Class[]{int[].class})` match `([I)[I`. A loaded class
+/// whose binary name is a primitive keyword or an array descriptor is a bogus class
+/// rather than a class object of that shape, so it is a typed error too. A null element,
+/// a null array and a non-`Class` element are typed errors, where the JDK would raise
+/// `NullPointerException`.
 fn parameter_class_descriptors(
     shared: &Shared,
     args: &[Value],
@@ -767,6 +808,7 @@ fn parameter_class_descriptors(
             })? {
                 HeapObject::Class(class) => ClassObject::Named(*class),
                 HeapObject::PrimitiveClass(kind) => ClassObject::Primitive(*kind),
+                HeapObject::ArrayClass(array) => ClassObject::Array(array.clone()),
                 _ => {
                     return Err(VmError::Native(format!(
                         "{operation} parameter class is not a Class object: {reference} is not a class object"
@@ -785,6 +827,10 @@ fn parameter_class_descriptors(
                 descriptors.push(kind.descriptor().to_owned());
                 continue;
             }
+            ClassObject::Array(array) => {
+                descriptors.push(shared.array_descriptor(&array)?);
+                continue;
+            }
             ClassObject::Named(class) => class,
         };
         let entry = shared
@@ -793,7 +839,7 @@ fn parameter_class_descriptors(
         let name = entry.name.clone();
         if name.starts_with('[') {
             return Err(VmError::Native(format!(
-                "{operation} does not support array parameter classes yet: {name}"
+                "{operation} does not accept a class named like an array descriptor: {name}"
             )));
         }
         if is_primitive_class_name(&name) {
@@ -1271,7 +1317,11 @@ fn executable_get_parameter_types(
     for descriptor in descriptors {
         classes.push(class_for_descriptor(shared, loader, descriptor)?);
     }
-    let array = allocate_reference_array(shared, &classes)?;
+    let array = allocate_reference_array(
+        shared,
+        ClassRef::Named(shared.load_library_class("java/lang/Class")?),
+        &classes,
+    )?;
     Ok(Some(Value::Ref(array)))
 }
 
@@ -1330,30 +1380,19 @@ fn declaring_loader(shared: &Shared, member: &ReflectMember) -> Result<LoaderId,
 
 /// Resolve one type descriptor to a class object.
 ///
-/// A primitive descriptor (`I`, `Z`, ..., `V`) returns the cached primitive class
-/// object, which is `Field.getType`, `Method.getReturnType` and `getParameterTypes` over
-/// a primitive member. An object descriptor (`Ljava/lang/String;`) resolves the named
-/// class through the declaring class's loader. Array descriptors (`[I`) have no class
-/// identity in this slice, so they return a typed error instead of a wrong `Class`
-/// object.
+/// A primitive descriptor (`I`, `Z`, ..., `V`) returns the cached primitive class object;
+/// an object descriptor (`Ljava/lang/String;`) resolves the named class through the
+/// declaring class's loader; an array descriptor (`[I`, `[Ljava/lang/String;`, `[[I`)
+/// returns the cached array class object whose components are resolved through that same
+/// loader. That is what makes `Field.getType`, `Method.getReturnType`,
+/// `Method.getParameterTypes` and `Constructor.getParameterTypes` report array types.
 fn class_for_descriptor(
     shared: &Shared,
     loader: LoaderId,
     descriptor: &str,
 ) -> Result<ObjRef, VmError> {
-    if let Some(kind) = PrimitiveKind::from_descriptor(descriptor) {
-        return Ok(shared.primitive_class(kind));
-    }
-    let Some(internal) = descriptor
-        .strip_prefix('L')
-        .and_then(|rest| rest.strip_suffix(';'))
-    else {
-        return Err(VmError::Native(format!(
-            "array class objects are not supported yet: {descriptor}"
-        )));
-    };
-    let class = shared.load_class(loader, internal)?;
-    shared.class_object(class)
+    let class_ref = shared.class_ref_for_descriptor(loader, descriptor)?;
+    shared.class_object_for_ref(&class_ref)
 }
 
 /// Split a method descriptor's parameter list into its parameter descriptors.

@@ -115,9 +115,9 @@ by name, a method or constructor by name plus the parameter descriptors built fr
 declared-only constructor lookup. A hit is the cached reflected-member object, a miss is
 null, and at M2.14 a primitive or array parameter class, a null `Class[]`, a null element
 or a non-`Class` element was a typed error because those class objects did not exist yet;
-M2.15 adds the primitive class objects (array class identity is still absent).
-Access-control filtering, array `Class` identity, the generic `Type` graph and Spring
-remain later slices. **M2.15 is done (2026-11-24):** a primitive class object is a
+M2.15 added the primitive class objects and M2.16 the array ones. Access-control
+filtering, the generic `Type` graph and Spring remain later slices. **M2.15 is done
+(2026-11-24):** a primitive class object is a
 dedicated heap kind (`HeapObject::PrimitiveClass`) cached one per `PrimitiveKind` in
 `Shared::primitive_class` and enumerated by `Shared::roots`, so `Class.forName("int")` and
 `Integer.TYPE` return the same object. All nine primitives report the JDK name, the
@@ -131,8 +131,24 @@ and a `Class[]` of primitive class objects builds the exact one-character descri
 `getDeclaredMethod`/`getMethod`/`getDeclaredConstructor`/`getConstructor`, so a reflected
 method or constructor with an `int` parameter resolves and invokes. The nine wrapper
 `TYPE` fields resolve virtually because the C1 stubs carry no initializer `Code`, while
-every other wrapper static stays absent; array `Class` identity, the generic `Type` graph,
-annotation changes and Spring remain later slices. **M2.16 is next.**
+every other wrapper static stays absent; the generic `Type` graph, annotation changes
+and Spring remain later slices. **M2.16 is done (2026-11-24):** an array class is a
+dedicated heap kind (`HeapObject::ArrayClass`) identified by its component (a named
+class, a primitive or a nested array) and cached one per component in
+`Shared::array_class`, with its own lock, no-lock probe entry and `Shared::roots` entries.
+`Class.forName("[I")`, `"[Ljava.lang.String;"` and `"[[I"` return that cached object,
+whose `getName` is the JDK descriptor form (`[I`, `[[I`, `[Ljava.lang.String;`),
+`getModifiers` is `0x0411`, `isArray` is true, `isPrimitive` and `isInterface` are false,
+`getComponentType` is the named, primitive or nested array component class object, and
+`getSuperclass` is `java.lang.Object`. An array heap object carries the component its
+allocation named, so `getClass()` on `new int[n]` and `new String[n]` reports the cached
+array class. `Field.getType`, `Method.getReturnType`/`getParameterTypes` and
+`Constructor.getParameterTypes` resolve array descriptors, and
+`getDeclaredMethod`/`getMethod`/`getDeclaredConstructor`/`getConstructor` accept array
+class objects in their `Class[]`, so an array parameter resolves by its exact descriptor;
+a miss is still null. An array class declares no members, and a malformed array
+descriptor or missing component is a typed error. Generic `Type`, `ldc` class literals,
+annotation changes and Spring remain later slices. **M2.17 is next.**
 
 ## What this project is
 

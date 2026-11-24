@@ -1346,7 +1346,7 @@ fn probe_declared_fields_keep_class_file_order_and_find_by_name() {
 }
 
 #[test]
-fn primitive_descriptors_are_primitive_class_objects_and_array_ones_are_typed_errors() {
+fn primitive_and_array_descriptors_are_class_objects() {
     let fixture = fixture();
 
     // M2.15: `Integer.MAX_VALUE` is an `int`, and a primitive descriptor now resolves to
@@ -1386,24 +1386,21 @@ fn primitive_descriptors_are_primitive_class_objects_and_array_ones_are_typed_er
     );
     assert_eq!(char_at, "int");
 
-    // An array descriptor still has no class identity, so it stays a typed error.
-    let to_char_array = call(
-        &fixture,
-        "methodReturnTypeName",
-        "(Ljava/lang/Class;Ljava/lang/String;)Ljava/lang/String;",
-        vec![
-            string_class_argument(&fixture),
-            name_argument(&fixture, "toCharArray"),
-        ],
+    // M2.16: an array descriptor resolves to the cached array class object.
+    let to_char_array = string_value(
+        &fixture.shared,
+        call(
+            &fixture,
+            "methodReturnTypeName",
+            "(Ljava/lang/Class;Ljava/lang/String;)Ljava/lang/String;",
+            vec![
+                string_class_argument(&fixture),
+                name_argument(&fixture, "toCharArray"),
+            ],
+        )
+        .unwrap(),
     );
-    assert!(
-        matches!(
-            to_char_array,
-            Err(InterpError::Vm(VmError::Native(ref detail)))
-                if detail.contains("array class objects")
-        ),
-        "{to_char_array:?}"
-    );
+    assert_eq!(to_char_array, "[C");
 }
 
 #[test]

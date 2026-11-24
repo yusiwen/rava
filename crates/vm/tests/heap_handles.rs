@@ -3,7 +3,8 @@
 use std::sync::Arc;
 
 use rava_vm::{
-    ArrayKind, ClassId, DirectorySource, FieldLayout, Heap, HeapError, ObjRef, Shared, Value,
+    ArrayKind, ClassId, ClassRef, DirectorySource, FieldLayout, Heap, HeapError, ObjRef,
+    PrimitiveKind, Shared, Value,
 };
 
 fn empty_shared() -> Shared {
@@ -62,7 +63,7 @@ fn freeing_a_slot_invalidates_the_old_handle() {
 #[test]
 fn arrays_use_their_kind_defaults_and_are_distinct_from_instances() {
     let mut heap = Heap::new();
-    let reference = heap.allocate_array(ArrayKind::Int, 3);
+    let reference = heap.allocate_array(ClassRef::Primitive(PrimitiveKind::Int), 3);
     let array = heap.array(reference).unwrap();
     assert_eq!(array.kind, ArrayKind::Int);
     assert_eq!(array.elements, vec![Value::Int(0); 3]);

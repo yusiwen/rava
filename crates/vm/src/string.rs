@@ -18,7 +18,7 @@
 //! implementations for `invokevirtual`.
 
 use crate::VmError;
-use crate::heap::{ArrayKind, HeapError, HeapObject, ObjRef};
+use crate::heap::{ClassRef, HeapError, HeapObject, ObjRef, PrimitiveKind};
 use crate::loader::LoaderId;
 use crate::shared::Shared;
 use crate::thread::ThreadState;
@@ -570,7 +570,7 @@ fn string_to_char_array(
     let text = receiver_text(shared, receiver)?;
     let units = utf16_units(&text);
     let mut heap = shared.heap();
-    let array = heap.allocate_array(ArrayKind::Char, units.len());
+    let array = heap.allocate_array(ClassRef::Primitive(PrimitiveKind::Char), units.len());
     {
         let array = heap.array_mut(array).map_err(heap_error)?;
         for (slot, unit) in array.elements.iter_mut().zip(units.iter()) {
@@ -600,7 +600,8 @@ fn string_intern(
 /// native cannot re-enter the interpreter. The shape is the one
 /// [`crate::object::runtime_binary_name`] and `ObjRef::identity_hash` produce for
 /// `Object.toString`, so the two agree wherever the JDK would call the default `toString`.
-/// An array has no class identity in this slice, so it is a typed error.
+/// An array uses its array class's JDK descriptor-form name, so `String.valueOf(int[])`
+/// is the default `[I@hex` shape.
 ///
 /// [`crate::collections`] reuses this for `StringBuilder.append(Object)`.
 pub(crate) fn object_text(

@@ -19,8 +19,9 @@
 //!
 //! Deliberate limits of this slice: only runtime-visible annotations are exposed (a
 //! `RuntimeInvisibleAnnotations` entry has no annotation object, as on the JDK); array
-//! and primitive *class literals* (`[I`, `int.class`) have no class identity yet and are
-//! typed errors; `getAnnotationsByType`/repeatable containers, parameter annotations,
+//! and primitive *class literals* (`[I`, `int.class`) are still typed errors in this
+//! annotation path even though `Class` itself now models them; `getAnnotationsByType`/
+//! repeatable containers, parameter annotations,
 //! type annotations, `isAnnotationPresent`, records and generic `Type` graphs stay out.
 //! `Annotation.equals` compares the effective element values (declared or default), so it
 //! agrees with itself across two queries, but `hashCode` is a deterministic hash of that
@@ -32,7 +33,9 @@ use std::fmt::Write as _;
 use rava_classfile::metadata::{Annotation, ElementValue};
 
 use crate::VmError;
-use crate::heap::{AnnotationObject, ArrayKind, HeapError, MemberKind, ObjRef, ReflectMember};
+use crate::heap::{
+    AnnotationObject, ArrayKind, ClassRef, HeapError, MemberKind, ObjRef, ReflectMember,
+};
 use crate::loader::{ClassId, LoaderId};
 use crate::reflection::{allocate_reference_array, parameter_descriptors, return_descriptor};
 use crate::shared::Shared;
@@ -311,7 +314,8 @@ fn annotation_array(
     let loader = element_loader(shared, element)?;
     let annotations = visible_annotations(shared, element, include_inherited)?;
     let objects = annotation_objects(shared, loader, &annotations)?;
-    let array = allocate_reference_array(shared, &objects)?;
+    let component = ClassRef::Named(shared.load_library_class(ANNOTATION_CLASS)?);
+    let array = allocate_reference_array(shared, component, &objects)?;
     Ok(Value::Ref(array))
 }
 
@@ -524,6 +528,10 @@ fn element_to_value(
                 ))
             })?;
             let kind = array_kind_of(element_descriptor)?;
+            // The array's component is the declared element type, so `getClass()` on an
+            // annotation element array reports the same array class as a member type.
+            let component = shared.class_ref_for_descriptor(loader, element_descriptor)?;
+            debug_assert_eq!(component.array_kind(), kind);
             // Convert before taking the heap lock: `element_to_value` allocates, so the
             // two lock scopes must not nest.
             let mut values = Vec::with_capacity(items.len());
@@ -531,7 +539,7 @@ fn element_to_value(
                 values.push(element_to_value(shared, loader, element_descriptor, item)?);
             }
             let mut heap = shared.heap();
-            let array = heap.allocate_array(kind, values.len());
+            let array = heap.allocate_array(component, values.len());
             {
                 let allocated = heap.array_mut(array).map_err(heap_error)?;
                 for (slot, value) in allocated.elements.iter_mut().zip(values) {
@@ -582,8 +590,9 @@ fn load_descriptor_class(
 
 /// Resolve an object descriptor to its `Class` object.
 ///
-/// An array or primitive class literal (`[I`, `int.class`) has no class identity in
-/// M2.11, so it is a typed error rather than a wrong `Class` object.
+/// The annotation path predates the M2.15/M2.16 class identity and stays on object
+/// descriptors only, so an array or primitive class literal (`[I`, `int.class`) is a
+/// typed error here rather than a wrong `Class` object.
 fn class_object_for_descriptor(
     shared: &Shared,
     loader: LoaderId,

@@ -88,6 +88,24 @@ impl ArrayKind {
         }
     }
 
+    /// The primitive kind this element kind stores, or `None` for a reference array.
+    ///
+    /// `boolean` and `byte` are distinct `ArrayKind`s (JVMS §6.5.newarray selects them
+    /// with different `atype` values), so each maps to its own `PrimitiveKind`.
+    pub fn primitive_kind(self) -> Option<PrimitiveKind> {
+        Some(match self {
+            Self::Boolean => PrimitiveKind::Boolean,
+            Self::Byte => PrimitiveKind::Byte,
+            Self::Char => PrimitiveKind::Char,
+            Self::Short => PrimitiveKind::Short,
+            Self::Int => PrimitiveKind::Int,
+            Self::Long => PrimitiveKind::Long,
+            Self::Float => PrimitiveKind::Float,
+            Self::Double => PrimitiveKind::Double,
+            Self::Reference => return None,
+        })
+    }
+
     /// The Java element name used in diagnostics.
     pub fn name(self) -> &'static str {
         match self {
@@ -198,6 +216,23 @@ impl PrimitiveKind {
             .find(|kind| kind.descriptor() == descriptor)
     }
 
+    /// The primitive element kind of an array whose component is this primitive.
+    ///
+    /// `void` is not a valid array component (JVMS §4.3.2), so it has no array kind.
+    pub fn array_kind(self) -> Option<ArrayKind> {
+        Some(match self {
+            Self::Boolean => ArrayKind::Boolean,
+            Self::Byte => ArrayKind::Byte,
+            Self::Char => ArrayKind::Char,
+            Self::Short => ArrayKind::Short,
+            Self::Int => ArrayKind::Int,
+            Self::Long => ArrayKind::Long,
+            Self::Float => ArrayKind::Float,
+            Self::Double => ArrayKind::Double,
+            Self::Void => return None,
+        })
+    }
+
     /// The `java.lang` wrapper class that declares this primitive's `TYPE` field.
     pub fn wrapper_class(self) -> &'static str {
         match self {
@@ -224,6 +259,62 @@ impl PrimitiveKind {
 impl fmt::Display for PrimitiveKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.name())
+    }
+}
+
+/// One array class: its component type.
+///
+/// The component is the whole identity of the array class, so `int[]` is the array of
+/// [`ClassRef::Primitive`]`(Int)` and `int[][]` is the array of that array. The
+/// `ClassRef` does not carry a name: a component's descriptor and its Java name are read
+/// from the class table by [`crate::Shared`], which is where a loaded class's binary name
+/// lives. An array class object is [`HeapObject::ArrayClass`]; exactly one object exists
+/// per `ArrayClass`, created by [`crate::Shared::array_class`].
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ArrayClass {
+    /// The component type. A nested array's component is itself an array class.
+    pub component: ClassRef,
+}
+
+impl ArrayClass {
+    pub fn new(component: ClassRef) -> Self {
+        Self { component }
+    }
+}
+
+/// A class identity: a loaded class, one of the nine primitives, or an array class.
+///
+/// This is the type of an array's component and the key of [`crate::Shared::array_class`].
+/// It does not replace [`HeapObject::Class`] or [`HeapObject::PrimitiveClass`]: a class
+/// object in the heap is still those kinds, and an array class object is
+/// [`HeapObject::ArrayClass`].
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum ClassRef {
+    /// A loaded class, identified by its `(loader, name)` class id.
+    Named(ClassId),
+    /// A primitive type, which has no class file and no loader.
+    Primitive(PrimitiveKind),
+    /// An array class, identified by its component.
+    Array(Box<ArrayClass>),
+}
+
+impl ClassRef {
+    /// The array class whose component is `self`.
+    pub fn array(component: ClassRef) -> Self {
+        Self::Array(Box::new(ArrayClass::new(component)))
+    }
+
+    /// The `ArrayKind` this class ref stores when it is an array's component.
+    ///
+    /// A primitive component selects its primitive kind; a named class or a nested array
+    /// selects a reference array. `void` is not a legal array component, so it is mapped
+    /// to a reference array rather than inventing a primitive array kind; every caller
+    /// builds the ref from a parsed descriptor, which rejects `[V`.
+    pub fn array_kind(&self) -> ArrayKind {
+        match self {
+            Self::Primitive(kind) => kind.array_kind().unwrap_or(ArrayKind::Reference),
+            Self::Named(_) | Self::Array(_) => ArrayKind::Reference,
+        }
     }
 }
 
@@ -298,6 +389,13 @@ pub struct Instance {
 #[derive(Debug)]
 pub struct Array {
     pub kind: ArrayKind,
+    /// The component class this array was allocated with.
+    ///
+    /// `newarray` stores a primitive kind, `anewarray`/`multianewarray` store the named
+    /// class or nested array class the instruction names, and `String.toCharArray` stores
+    /// `char`. The component is what `getClass()` and `Class.getComponentType()` report;
+    /// `kind` stays the element representation the load/store opcodes check.
+    pub component: ClassRef,
     pub elements: Vec<Value>,
 }
 
@@ -431,6 +529,14 @@ pub enum HeapObject {
     /// distinct from [`HeapObject::Class`], which stays the representation of a loaded
     /// class's identity.
     PrimitiveClass(PrimitiveKind),
+    /// An array class object (`int[]`, `String[][]`).
+    ///
+    /// The object holds an [`ArrayClass`], which is its component type. There is exactly
+    /// one object per array class: [`crate::Shared::array_class`] creates and caches them,
+    /// and [`crate::Shared::roots`] reports the cache as roots. An array class object is
+    /// distinct from [`HeapObject::Class`] and [`HeapObject::PrimitiveClass`], which stay
+    /// the representations of a loaded class and a primitive.
+    ArrayClass(ArrayClass),
     /// A reflected `Field`, `Method` or `Constructor`: one heap object per member.
     ///
     /// Like a class object, the object holds identity only; the class's member record is
@@ -548,9 +654,20 @@ impl Heap {
         self.allocate(HeapObject::Instance(Instance { class, fields }))
     }
 
-    pub fn allocate_array(&mut self, kind: ArrayKind, length: usize) -> ObjRef {
+    pub fn allocate_array(&mut self, component: ClassRef, length: usize) -> ObjRef {
+        let kind = component.array_kind();
         let elements = vec![kind.default_value(); length];
-        self.allocate(HeapObject::Array(Array { kind, elements }))
+        self.allocate(HeapObject::Array(Array {
+            kind,
+            component,
+            elements,
+        }))
+    }
+
+    /// Allocate an array class object. Callers go through
+    /// [`crate::Shared::array_class`], which caches one object per component.
+    pub fn allocate_array_class(&mut self, component: ClassRef) -> ObjRef {
+        self.allocate(HeapObject::ArrayClass(ArrayClass::new(component)))
     }
 
     pub fn allocate_string(&mut self, text: impl Into<String>) -> ObjRef {
@@ -754,6 +871,20 @@ impl Heap {
             _ => Err(HeapError::WrongObjectKind {
                 reference,
                 expected: "a primitive class object",
+            }),
+        }
+    }
+
+    /// The array class behind an array class object.
+    ///
+    /// A loaded class object and a primitive class object are different heap kinds, so
+    /// this reports a typed error for them rather than inventing a component.
+    pub fn array_class(&self, reference: ObjRef) -> Result<&ArrayClass, HeapError> {
+        match self.get(reference)? {
+            HeapObject::ArrayClass(array) => Ok(array),
+            _ => Err(HeapError::WrongObjectKind {
+                reference,
+                expected: "an array class object",
             }),
         }
     }

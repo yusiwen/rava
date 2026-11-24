@@ -13,8 +13,8 @@ use std::sync::{Mutex, MutexGuard, RwLock};
 
 use crate::VmError;
 use crate::heap::{
-    AnnotationObject, BoxedPrimitive, FieldLayout, Heap, HeapObject, MemberKind, ObjRef,
-    PrimitiveKind, ReflectMember,
+    AnnotationObject, ArrayClass, BoxedPrimitive, ClassRef, FieldLayout, Heap, HeapObject,
+    MemberKind, ObjRef, PrimitiveKind, ReflectMember,
 };
 use crate::hooks::Hooks;
 use crate::loader::{ClassEntry, ClassId, ClassTable, LoaderId};
@@ -41,6 +41,7 @@ pub enum SharedLock {
     Heap,
     ClassObjects,
     PrimitiveClasses,
+    ArrayClasses,
     ReflectMembers,
     EnumConstants,
     InternedStrings,
@@ -55,6 +56,7 @@ impl fmt::Display for SharedLock {
             Self::Heap => write!(f, "heap"),
             Self::ClassObjects => write!(f, "class-object cache"),
             Self::PrimitiveClasses => write!(f, "primitive-class cache"),
+            Self::ArrayClasses => write!(f, "array-class cache"),
             Self::ReflectMembers => write!(f, "reflected-member cache"),
             Self::EnumConstants => write!(f, "enum-constant cache"),
             Self::InternedStrings => write!(f, "interned-string table"),
@@ -89,6 +91,10 @@ pub struct Shared {
     /// are never freed while `Shared` lives and are reported as roots by
     /// [`Shared::roots`].
     primitive_classes: Mutex<HashMap<PrimitiveKind, ObjRef>>,
+    /// One array class object per component [`ClassRef`]. The cache owns the objects,
+    /// which are never freed while `Shared` lives and are reported as roots by
+    /// [`Shared::roots`]. The component is the whole identity of an array class.
+    array_classes: Mutex<HashMap<ClassRef, ObjRef>>,
     /// One reflected-member object per `(class, kind, name, descriptor)`. The cache owns
     /// the objects, which are never freed while `Shared` lives and are reported as roots
     /// by [`Shared::roots`].
@@ -113,6 +119,7 @@ impl Shared {
             heap: Mutex::new(Heap::new()),
             class_objects: Mutex::new(HashMap::new()),
             primitive_classes: Mutex::new(HashMap::new()),
+            array_classes: Mutex::new(HashMap::new()),
             reflect_members: Mutex::new(HashMap::new()),
             enum_constants: Mutex::new(HashMap::new()),
             interned_strings: Mutex::new(HashMap::new()),
@@ -224,6 +231,154 @@ impl Shared {
             .allocate_primitive_class(kind);
         cache.insert(kind, reference);
         reference
+    }
+
+    /// The array class object for one component, allocated on first use.
+    ///
+    /// The component is the whole identity of an array class, so `int[]` is keyed by
+    /// [`ClassRef::Primitive`]`(Int)` and `int[][]` by the `int[]` ref. A second request
+    /// for the same component returns the same handle, which is what makes
+    /// `Class.forName("[I")`, `int[].class` and a `new int[...]` receiver's `getClass()`
+    /// reference-identical. The returned handle is stable: array class objects are never
+    /// freed and are reported as roots by [`Shared::roots`].
+    ///
+    /// A named component must already be loaded. Lock order is cache, then heap, matching
+    /// [`Shared::class_object`].
+    pub fn array_class(&self, component: ClassRef) -> Result<ObjRef, VmError> {
+        self.validate_class_ref(&component)?;
+        let mut cache = self
+            .array_classes
+            .lock()
+            .expect("array-class cache lock poisoned");
+        if let Some(reference) = cache.get(&component) {
+            return Ok(*reference);
+        }
+        let reference = self
+            .heap
+            .lock()
+            .expect("heap lock poisoned")
+            .allocate_array_class(component.clone());
+        cache.insert(component, reference);
+        Ok(reference)
+    }
+
+    /// The class object a [`ClassRef`] denotes: a loaded class, a primitive or an array.
+    pub fn class_object_for_ref(&self, class_ref: &ClassRef) -> Result<ObjRef, VmError> {
+        match class_ref {
+            ClassRef::Named(class) => self.class_object(*class),
+            ClassRef::Primitive(kind) => Ok(self.primitive_class(*kind)),
+            ClassRef::Array(array) => self.array_class(array.component.clone()),
+        }
+    }
+
+    /// The JVM field descriptor of a [`ClassRef`].
+    ///
+    /// A named class contributes `Linternal/Name;`, a primitive its one-character
+    /// descriptor and an array a `[` followed by its component's descriptor. A named
+    /// component must be loaded.
+    pub fn class_ref_descriptor(&self, class_ref: &ClassRef) -> Result<String, VmError> {
+        match class_ref {
+            ClassRef::Named(class) => {
+                let entry = self.entry(*class).ok_or_else(|| {
+                    VmError::Loader(format!("class id {} is not loaded", class.0))
+                })?;
+                Ok(format!("L{};", entry.name))
+            }
+            ClassRef::Primitive(kind) => Ok(kind.descriptor().to_owned()),
+            ClassRef::Array(array) => self.array_descriptor(array),
+        }
+    }
+
+    /// The JVM field descriptor of an array class (`[I`, `[Ljava/lang/String;`).
+    pub fn array_descriptor(&self, array: &ArrayClass) -> Result<String, VmError> {
+        Ok(format!("[{}", self.class_ref_descriptor(&array.component)?))
+    }
+
+    /// The name of a [`ClassRef`] as `Class.getName()` reports it.
+    ///
+    /// A named class reports its dotted binary name, a primitive its Java name and an
+    /// array the JDK's descriptor form with dots (`[I`, `[[I`, `[Ljava.lang.String;`).
+    pub fn class_ref_name(&self, class_ref: &ClassRef) -> Result<String, VmError> {
+        match class_ref {
+            ClassRef::Named(class) => {
+                let entry = self.entry(*class).ok_or_else(|| {
+                    VmError::Loader(format!("class id {} is not loaded", class.0))
+                })?;
+                Ok(entry.name.replace('/', "."))
+            }
+            ClassRef::Primitive(kind) => Ok(kind.name().to_owned()),
+            ClassRef::Array(array) => self.array_name(array),
+        }
+    }
+
+    /// The `Class.getName()` of an array class.
+    pub fn array_name(&self, array: &ArrayClass) -> Result<String, VmError> {
+        Ok(self.array_descriptor(array)?.replace('/', "."))
+    }
+
+    /// Parse a field descriptor into a [`ClassRef`].
+    ///
+    /// A named component is resolved through `loader`, which is the declaring class's
+    /// loader for a member type and the bootstrap loader for `Class.forName`. Arrays may
+    /// nest (`[[I`, `[[Ljava/lang/String;`); a primitive component is a one-character
+    /// descriptor and `void` is not a legal component. A malformed descriptor is a typed
+    /// error rather than a guessed class.
+    pub fn class_ref_for_descriptor(
+        &self,
+        loader: LoaderId,
+        descriptor: &str,
+    ) -> Result<ClassRef, VmError> {
+        let bytes = descriptor.as_bytes();
+        if bytes.first() == Some(&b'[') {
+            let mut dimensions = 0;
+            while bytes.get(dimensions) == Some(&b'[') {
+                dimensions += 1;
+            }
+            let element = &descriptor[dimensions..];
+            let mut class_ref = match object_descriptor_name(element) {
+                Some(internal) => {
+                    if internal.is_empty() {
+                        return Err(malformed_array_descriptor(descriptor));
+                    }
+                    ClassRef::Named(self.load_class(loader, internal)?)
+                }
+                None => match PrimitiveKind::from_descriptor(element) {
+                    Some(PrimitiveKind::Void) | None => {
+                        return Err(malformed_array_descriptor(descriptor));
+                    }
+                    Some(kind) => ClassRef::Primitive(kind),
+                },
+            };
+            for _ in 0..dimensions {
+                class_ref = ClassRef::array(class_ref);
+            }
+            return Ok(class_ref);
+        }
+        if let Some(internal) = object_descriptor_name(descriptor) {
+            if internal.is_empty() {
+                return Err(malformed_descriptor(descriptor));
+            }
+            return Ok(ClassRef::Named(self.load_class(loader, internal)?));
+        }
+        PrimitiveKind::from_descriptor(descriptor)
+            .map(ClassRef::Primitive)
+            .ok_or_else(|| malformed_descriptor(descriptor))
+    }
+
+    fn validate_class_ref(&self, class_ref: &ClassRef) -> Result<(), VmError> {
+        match class_ref {
+            ClassRef::Named(class) => {
+                if self.entry(*class).is_none() {
+                    return Err(VmError::Loader(format!(
+                        "class id {} is not loaded",
+                        class.0
+                    )));
+                }
+                Ok(())
+            }
+            ClassRef::Primitive(_) => Ok(()),
+            ClassRef::Array(array) => self.validate_class_ref(&array.component),
+        }
     }
 
     /// The value of a static field, including the primitive wrapper `TYPE` fields.
@@ -447,11 +602,10 @@ impl Shared {
     /// box reports its boxed class (`java.lang.Integer`), an annotation reports
     /// `java.lang.annotation.Annotation` (its `annotationType()` names the annotation
     /// type), an enum constant reports its enum class, a `StringBuilder` reports
-    /// `java.lang.StringBuilder`, an `ArrayList` reports `java.util.ArrayList` and a
-    /// `HashMap` reports `java.util.HashMap`; those VM-level objects use the bootstrap
-    /// class library as their identity. Array class
-    /// identity (`[I`, `[Ljava/lang/String;`) is not modeled in M2.4, so an array returns
-    /// a typed error instead of a wrong class object.
+    /// `java.lang.StringBuilder`, an `ArrayList` reports `java.util.ArrayList`, a
+    /// `HashMap` reports `java.util.HashMap` and an array reports its cached array class
+    /// (`int[]`, `String[][]`); those VM-level objects use the bootstrap class library as
+    /// their identity.
     pub fn get_class(&self, reference: ObjRef) -> Result<ObjRef, VmError> {
         enum Kind {
             Instance(ClassId),
@@ -464,6 +618,7 @@ impl Shared {
             StringBuilder,
             List,
             Map,
+            Array(ClassRef),
         }
 
         let kind = {
@@ -476,6 +631,7 @@ impl Shared {
                 HeapObject::Str(_) => Kind::Str,
                 HeapObject::Class(_) => Kind::Class,
                 HeapObject::PrimitiveClass(_) => Kind::Class,
+                HeapObject::ArrayClass(_) => Kind::Class,
                 HeapObject::Reflect(member) => Kind::Reflect(member.kind),
                 HeapObject::Boxed(boxed) => Kind::Boxed(*boxed),
                 HeapObject::Annotation(_) => Kind::Annotation,
@@ -483,11 +639,7 @@ impl Shared {
                 HeapObject::StringBuilder(_) => Kind::StringBuilder,
                 HeapObject::List(_) => Kind::List,
                 HeapObject::Map(_) => Kind::Map,
-                HeapObject::Array(_) => {
-                    return Err(VmError::Native(
-                        "array class objects are not supported yet (M2.4)".to_owned(),
-                    ));
-                }
+                HeapObject::Array(array) => Kind::Array(array.component.clone()),
             }
         };
 
@@ -526,6 +678,7 @@ impl Shared {
                 let class = self.load_library_class(crate::maps::HASH_MAP_CLASS)?;
                 self.class_object(class)
             }
+            Kind::Array(component) => self.array_class(component),
         }
     }
 
@@ -670,8 +823,9 @@ impl Shared {
     }
 
     /// Collect the VM roots: every non-null class static field, every cached class object
-    /// (a loaded class or a primitive), every reflected member, the references held by a
-    /// heap list or map, plus the roots the given threads' active frames published.
+    /// (a loaded class, a primitive or an array class), every reflected member, the
+    /// references held by a heap list or map, plus the roots the given threads' active
+    /// frames published.
     ///
     /// The class table is snapshotted before any per-class statics lock is taken, and
     /// each statics lock is released before the next class is visited, so this never
@@ -717,6 +871,18 @@ impl Shared {
                 .lock()
                 .expect("primitive-class cache lock poisoned");
             for reference in primitive_classes.values() {
+                if seen.insert(*reference) {
+                    roots.push(*reference);
+                }
+            }
+        }
+
+        {
+            let array_classes = self
+                .array_classes
+                .lock()
+                .expect("array-class cache lock poisoned");
+            for reference in array_classes.values() {
                 if seen.insert(*reference) {
                     roots.push(*reference);
                 }
@@ -825,6 +991,11 @@ impl Shared {
             })?;
         }
         {
+            let _guard = self.array_classes.try_lock().map_err(|_| LockHeld {
+                lock: SharedLock::ArrayClasses,
+            })?;
+        }
+        {
             let _guard = self.reflect_members.try_lock().map_err(|_| LockHeld {
                 lock: SharedLock::ReflectMembers,
             })?;
@@ -907,4 +1078,19 @@ fn push_container_root(roots: &mut Vec<ObjRef>, seen: &mut HashSet<ObjRef>, valu
     if !reference.is_null() && seen.insert(reference) {
         roots.push(reference);
     }
+}
+
+/// The internal name of an object descriptor (`Lname;`), if `descriptor` has that shape.
+fn object_descriptor_name(descriptor: &str) -> Option<&str> {
+    descriptor
+        .strip_prefix('L')
+        .and_then(|rest| rest.strip_suffix(';'))
+}
+
+fn malformed_descriptor(descriptor: &str) -> VmError {
+    VmError::Native(format!("malformed descriptor {descriptor}"))
+}
+
+fn malformed_array_descriptor(descriptor: &str) -> VmError {
+    VmError::Native(format!("malformed array descriptor {descriptor}"))
 }

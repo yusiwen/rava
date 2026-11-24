@@ -10,8 +10,8 @@ use std::path::PathBuf;
 use rava_classfile::{Assembler, ClassBuilder};
 use rava_interp::{InterpError, run_static_method};
 use rava_vm::{
-    ArrayKind, ClassId, FieldLayout, LoaderId, ObjRef, Shared, ThreadState, Value, VmError,
-    reflection,
+    ClassId, ClassRef, FieldLayout, LoaderId, ObjRef, PrimitiveKind, Shared, ThreadState, Value,
+    VmError, reflection,
 };
 
 const ACC_PUBLIC_STATIC: u16 = 0x0009;
@@ -465,28 +465,37 @@ fn object_has_no_superclass_and_strings_report_object() {
 }
 
 #[test]
-fn an_array_has_no_class_object_and_the_error_is_typed() {
+fn an_array_reports_its_cached_array_class() {
     let fixture = fixture();
-    let array = fixture.shared.heap().allocate_array(ArrayKind::Int, 2);
+    let array = fixture
+        .shared
+        .heap()
+        .allocate_array(ClassRef::Primitive(PrimitiveKind::Int), 2);
 
-    match fixture.shared.get_class(array) {
-        Err(VmError::Native(detail)) => {
-            assert!(detail.contains("array class objects"), "{detail}")
-        }
-        other => panic!("expected a typed native error, found {other:?}"),
-    }
-
-    let error = call(
-        &fixture,
-        "className",
-        "(Ljava/lang/Object;)Ljava/lang/String;",
-        Value::Ref(array),
+    let array_class = fixture
+        .shared
+        .get_class(array)
+        .expect("an array has a class object now");
+    let expected = fixture
+        .shared
+        .array_class(ClassRef::Primitive(PrimitiveKind::Int))
+        .expect("int[] has an array class");
+    assert_eq!(
+        array_class, expected,
+        "one cached array class per component"
     );
-    assert!(matches!(
-        error,
-        Err(InterpError::Vm(VmError::Native(ref detail)))
-            if detail.contains("array class objects")
-    ));
+
+    let name = string_value(
+        &fixture.shared,
+        call(
+            &fixture,
+            "className",
+            "(Ljava/lang/Object;)Ljava/lang/String;",
+            Value::Ref(array),
+        )
+        .unwrap(),
+    );
+    assert_eq!(name, "[I", "getClass().getName() on an int[] is [I");
 }
 
 #[test]

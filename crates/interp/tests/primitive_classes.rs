@@ -18,8 +18,8 @@ use std::path::PathBuf;
 use rava_classfile::{Assembler, ClassBuilder};
 use rava_interp::{InterpError, reflect_invoke, run_instance_method, run_static_method};
 use rava_vm::{
-    ArrayKind, ClassId, LoaderId, MemberKind, ObjRef, PrimitiveKind, Shared, ThreadState, Value,
-    VmError, boxed, instance, object, reflection,
+    ClassId, ClassRef, LoaderId, MemberKind, ObjRef, PrimitiveKind, Shared, ThreadState, Value,
+    boxed, instance, object, reflection,
 };
 
 const ACC_PRIVATE: u16 = 0x0002;
@@ -558,8 +558,13 @@ fn primitive(fixture: &Fixture, kind: PrimitiveKind) -> ObjRef {
 }
 
 fn reference_array(shared: &Shared, values: &[ObjRef]) -> ObjRef {
+    let component = ClassRef::Named(
+        shared
+            .load_library_class("java/lang/Object")
+            .expect("Object loads"),
+    );
     let mut heap = shared.heap();
-    let array = heap.allocate_array(ArrayKind::Reference, values.len());
+    let array = heap.allocate_array(component, values.len());
     {
         let array = heap.array_mut(array).expect("a reference array");
         for (slot, value) in array.elements.iter_mut().zip(values) {
@@ -715,16 +720,6 @@ fn member_of(fixture: &Fixture, reference: ObjRef) -> rava_vm::ReflectMember {
         .reflect(reference)
         .expect("a reflected member")
         .clone()
-}
-
-fn assert_native_error(result: Result<Option<Value>, InterpError>, fragment: &str) {
-    match result {
-        Err(InterpError::Vm(VmError::Native(ref detail))) => assert!(
-            detail.contains(fragment),
-            "expected a native error containing {fragment:?}, found {detail:?}"
-        ),
-        other => panic!("expected a native error containing {fragment:?}, found {other:?}"),
-    }
 }
 
 fn assert_decode_error(result: Result<Option<Value>, InterpError>, fragment: &str) {
@@ -904,15 +899,36 @@ fn every_primitive_for_name_is_one_cached_class_object_with_jdk_flags() {
         0
     );
 
-    // Array class names still need the array identity this slice does not have.
-    assert_native_error(
+    // M2.16 turns an array name into the cached array class object, not an error.
+    let int_array = ref_value(
         call_static(
             &fixture,
             "forNameClass",
             "(Ljava/lang/String;)Ljava/lang/Class;",
             vec![name_value(&fixture, "[I")],
+        )
+        .unwrap(),
+    );
+    assert_eq!(
+        int_array,
+        fixture
+            .shared
+            .array_class(ClassRef::Primitive(PrimitiveKind::Int))
+            .unwrap(),
+        "Class.forName(\"[I\") is the cached int[] class object"
+    );
+    assert_eq!(
+        string_value(
+            &fixture.shared,
+            call_static(
+                &fixture,
+                "name",
+                "(Ljava/lang/Class;)Ljava/lang/String;",
+                vec![Value::Ref(int_array)],
+            )
+            .unwrap()
         ),
-        "array class names",
+        "[I"
     );
 }
 
