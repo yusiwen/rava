@@ -19,6 +19,17 @@ pub enum Error {
     PoolSizeMismatch { declared: u16, parsed: usize },
     /// A `CONSTANT_Utf8` payload is not valid modified UTF-8.
     BadModifiedUtf8 { index: u16, offset: usize },
+    /// A typed attribute decoder ([`crate::metadata`]) rejected an attribute payload.
+    ///
+    /// `cause` keeps the underlying diagnosis structured, so a caller can tell a
+    /// truncated payload from a constant-pool reference of the wrong kind or a
+    /// semantically invalid payload.
+    BadAttribute { name: String, cause: Box<Error> },
+    /// A payload whose length is consistent but whose contents are invalid for the
+    /// attribute kind: an unknown `type_annotation` target, a trailing byte, a value out
+    /// of range for its tag. Produced inside a typed decoder and surfaced wrapped in
+    /// [`Error::BadAttribute`].
+    MalformedAttribute { detail: String },
     /// Assembling bytecode failed: an unbound label, or a branch beyond a 16-bit offset.
     InvalidAssembly { detail: String },
     /// A structure this VM does not implement yet.
@@ -53,6 +64,10 @@ impl fmt::Display for Error {
                 f,
                 "entry {index} is not valid modified UTF-8 at byte {offset}"
             ),
+            Self::BadAttribute { name, cause } => {
+                write!(f, "attribute {name}: {cause}")
+            }
+            Self::MalformedAttribute { detail } => write!(f, "malformed attribute: {detail}"),
             Self::InvalidAssembly { detail } => write!(f, "invalid assembly: {detail}"),
             Self::Unsupported { feature, detail } => {
                 write!(f, "unsupported {feature}: {detail}")

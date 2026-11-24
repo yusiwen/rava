@@ -1,0 +1,57 @@
+class demo/Defaults
+version 61.0
+access 0x2600 interface abstract annotation
+super java/lang/Object
+interfaces 1
+  interface java/lang/annotation/Annotation
+source_file Annotations.java
+nest_members 0
+inner_classes 0
+annotations 2
+  @Ljava/lang/annotation/Retention;(value=e:Ljava/lang/annotation/RetentionPolicy;.RUNTIME)
+  @Ljava/lang/annotation/Target;(value=[e:Ljava/lang/annotation/ElementType;.TYPE, e:Ljava/lang/annotation/ElementType;.FIELD, e:Ljava/lang/annotation/ElementType;.METHOD, e:Ljava/lang/annotation/ElementType;.PARAMETER, e:Ljava/lang/annotation/ElementType;.RECORD_COMPONENT, e:Ljava/lang/annotation/ElementType;.ANNOTATION_TYPE])
+fields 0
+methods 14
+  method flag ()Z
+    access 0x0401 public abstract
+    annotation_default Z:true
+  method small ()B
+    access 0x0401 public abstract
+    annotation_default B:7
+  method letter ()C
+    access 0x0401 public abstract
+    annotation_default C:'r'
+  method medium ()S
+    access 0x0401 public abstract
+    annotation_default S:300
+  method count ()I
+    access 0x0401 public abstract
+    annotation_default I:3
+  method big ()J
+    access 0x0401 public abstract
+    annotation_default J:42
+  method ratio32 ()F
+    access 0x0401 public abstract
+    annotation_default F:1.5
+  method ratio ()D
+    access 0x0401 public abstract
+    annotation_default D:2.25
+  method name ()Ljava/lang/String;
+    access 0x0401 public abstract
+    annotation_default s:"anon"
+  method type ()Ljava/lang/Class;
+    access 0x0401 public abstract
+    signature ()Ljava/lang/Class<*>;
+    annotation_default c:Ljava/lang/String;
+  method color ()Ldemo/Color;
+    access 0x0401 public abstract
+    annotation_default e:Ldemo/Color;.RED
+  method nested ()Ldemo/Nested;
+    access 0x0401 public abstract
+    annotation_default @Ldemo/Nested;(value=s:"d")
+  method primes ()[I
+    access 0x0401 public abstract
+    annotation_default [I:2, I:3, I:5]
+  method aliases ()[Ljava/lang/String;
+    access 0x0401 public abstract
+    annotation_default [s:"x"]

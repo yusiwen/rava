@@ -12,8 +12,13 @@ metadata dump fixture, the pinned target lock with the reference application and
 980 classes, 177 fields, 3,626 methods, 1,048 interface methods), and the
 signature-only stub library under `stdlib/classes/` (980 class files) with a
 zero-unresolved link-check. The manifest and stubs regenerate byte-identically, and
-`rava compat check` runs the whole M1 gate. **M2 (C1 metadata, the minimal library
-and the Spring context) is next.**
+`rava compat check` runs the whole M1 gate. **M2.1 is done (2026-11-24):** a typed C1
+metadata model in `rava-classfile` (annotations of every element-value kind, parameter
+and type annotations, generic signatures, records, sealed permits, nestmates, inner and
+enclosing classes, exceptions and parameter names) with every raw attribute payload
+retained, a normalized text dump, committed Java 17 fixtures and golden dumps, plus
+typed errors for malformed payloads. **M2.2 (JDK 17 signature stubs and the zero-diff
+metadata check) is next.**
 
 ## What this project is
 
@@ -97,6 +102,13 @@ only when they pass:
 
 ```sh
 cargo run -p rava-cli -- compat check
+```
+
+The C1 metadata model and its normalized dump are tested against committed Java 17
+fixtures (no JDK needed at test time):
+
+```sh
+cargo test -p rava-classfile --test metadata_model
 ```
 
 It reads the already-fetched `compat/jars/` (the manifest stage scans the pinned

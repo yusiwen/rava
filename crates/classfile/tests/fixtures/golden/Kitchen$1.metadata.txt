@@ -1,0 +1,19 @@
+class demo/Kitchen$1
+version 61.0
+access 0x0020 super
+super java/lang/Object
+interfaces 0
+source_file Kitchen.java
+nest_host demo/Kitchen
+nest_members 0
+inner_classes 1
+  inner demo/Kitchen$1 outer none name none access 0x0000
+enclosing_method demo/Kitchen make()Ljava/lang/Object;
+fields 1
+  field this$0 Ldemo/Kitchen;
+    access 0x1010 final synthetic
+methods 1
+  method <init> (Ldemo/Kitchen;)V
+    access 0x0000
+    parameters 1
+      this$0 flags 0x8010 final mandated

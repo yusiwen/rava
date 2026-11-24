@@ -1,0 +1,15 @@
+class demo/Shapes
+version 61.0
+access 0x0601 public interface abstract
+super java/lang/Object
+interfaces 0
+source_file Shapes.java
+nest_members 0
+permitted_subclasses 2
+  permitted demo/Circle
+  permitted demo/Square
+inner_classes 0
+fields 0
+methods 1
+  method area ()D
+    access 0x0401 public abstract

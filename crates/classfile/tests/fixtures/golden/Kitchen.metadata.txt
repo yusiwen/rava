@@ -1,0 +1,117 @@
+class demo/Kitchen
+version 61.0
+access 0x0021 public super
+super java/lang/Object
+interfaces 1
+  interface java/lang/Comparable
+signature Ljava/lang/Object;Ljava/lang/Comparable<Ldemo/Kitchen;>;
+source_file Kitchen.java
+nest_members 3
+  nest_member demo/Kitchen$1
+  nest_member demo/Kitchen$Entry
+  nest_member demo/Kitchen$Inner
+inner_classes 3
+  inner demo/Kitchen$1 outer none name none access 0x0000
+  inner demo/Kitchen$Entry outer demo/Kitchen name Entry access 0x0009 public static
+  inner demo/Kitchen$Inner outer demo/Kitchen name Inner access 0x0000
+annotations 2
+  @Ldemo/Defaults;(name=s:"kitchen", count=I:9, color=e:Ldemo/Color;.BLUE, type=c:Ljava/lang/String;, nested=@Ldemo/Nested;(value=s:"in"), primes=[I:2, I:3, I:5, I:7], aliases=[s:"k", s:"itchen"], flag=Z:false, letter=C:'k', big=J:9000000000, ratio=D:0.5, ratio32=F:0.25, small=B:12, medium=S:1200)
+  @Ldemo/Tags;(value=[@Ldemo/Tag;(value=s:"a"), @Ldemo/Tag;(value=s:"b")])
+invisible_annotations 1
+  @Ldemo/Hidden;(value=s:"class")
+type_annotations 1
+  0x10 supertype 65535 path=[] @Ldemo/TypeUse;(value=s:"super")
+fields 7
+  field names Ljava/util/List;
+    access 0x0012 private final
+    signature Ljava/util/List<Ljava/lang/String;>;
+    annotations 2
+      @Ldemo/Defaults;(name=s:"field")
+      @Ldemo/TypeUse;(value=s:"field")
+    type_annotations 2
+      0x13 empty path=[TYPE_ARGUMENT(0)] @Ldemo/TypeUse;(value=s:"arg")
+      0x13 empty path=[] @Ldemo/TypeUse;(value=s:"field")
+  field tags [Ljava/lang/String;
+    access 0x0002 private
+    annotations 1
+      @Ldemo/TypeUse;(value=s:"elem")
+    type_annotations 1
+      0x13 empty path=[ARRAY] @Ldemo/TypeUse;(value=s:"elem")
+  field wild Ljava/util/List;
+    access 0x0002 private
+    signature Ljava/util/List<+Ljava/lang/String;>;
+    type_annotations 1
+      0x13 empty path=[TYPE_ARGUMENT(0), WILDCARD] @Ldemo/TypeUse;(value=s:"wild")
+  field nested Ldemo/Kitchen$Inner;
+    access 0x0002 private
+    type_annotations 1
+      0x13 empty path=[INNER_TYPE] @Ldemo/TypeUse;(value=s:"nested")
+  field hidden I
+    access 0x0002 private
+    invisible_annotations 1
+      @Ldemo/Hidden;(value=s:"f")
+  field invisibleType Ljava/lang/String;
+    access 0x0002 private
+    invisible_type_annotations 1
+      0x13 empty path=[] @Ldemo/HiddenType;()
+  field LIMIT I
+    access 0x0018 static final
+    constant_value Integer(4)
+methods 8
+  method <init> (Ljava/lang/String;I)V
+    access 0x0001 public
+    parameters 2
+      name flags 0x0000
+      count flags 0x0000
+    type_annotations 1
+      0x16 formal_parameter 0 path=[] @Ldemo/TypeUse;(value=s:"ctor")
+    parameter_annotations 2
+      parameter 0
+        @Ldemo/TypeUse;(value=s:"ctor")
+      parameter 1
+        @Ldemo/Defaults;(name=s:"param")
+  method pick (Ljava/lang/Comparable;Ljava/lang/Comparable;)Ljava/lang/Comparable;
+    access 0x0001 public
+    signature <T::Ljava/lang/Comparable<TT;>;>(TT;TT;)TT;
+    parameters 2
+      left flags 0x0000
+      right flags 0x0000
+    annotations 1
+      @Ldemo/Defaults;(name=s:"method", color=e:Ldemo/Color;.GREEN)
+    type_annotations 1
+      0x16 formal_parameter 0 path=[] @Ldemo/TypeUse;(value=s:"param")
+    parameter_annotations 2
+      parameter 0
+        @Ldemo/TypeUse;(value=s:"param")
+      parameter 1
+    invisible_parameter_annotations 2
+      parameter 0
+      parameter 1
+        @Ldemo/Hidden;(value=s:"right")
+  method io ()V
+    access 0x0001 public
+    exceptions 1
+      throws java/io/IOException
+    annotations 1
+      @Ldemo/Tags;(value=[@Ldemo/Tag;(value=s:"c")])
+    type_annotations 1
+      0x17 throws 0 path=[] @Ldemo/TypeUse;(value=s:"throws")
+  method varargs ([Ljava/lang/String;)V
+    access 0x0081 public varargs
+    parameters 1
+      rest flags 0x0000
+  method legacy ()V
+    access 0x0001 public
+    deprecated true
+    annotations 1
+      @Ljava/lang/Deprecated;()
+  method make ()Ljava/lang/Object;
+    access 0x0001 public
+  method compareTo (Ldemo/Kitchen;)I
+    access 0x0001 public
+    parameters 1
+      other flags 0x0000
+  method compareTo (Ljava/lang/Object;)I
+    access 0x1041 public bridge synthetic
+    parameters 1
+      other flags 0x1000 synthetic
