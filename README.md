@@ -4,16 +4,18 @@ A Java 17 runtime in Rust, built to run Spring — not just a corpus.
 
 ## Status
 
-**M0, M1 and M2 are complete (2026-11-24); M3 is next.** A pinned Spring
+**M0, M1, M2 and M3 are complete (2026-11-25); M4 is next.** A pinned Spring
 `AnnotationConfigApplicationContext` starts on rava, returns its `hello` bean and exits
-0. The [project ledger](PROJECT.md) owns the per-slice record, commands and evidence.
+0; the C2 gate additionally runs Proxy, CGLIB, Objenesis, Spring AOP and an
+`Unsafe` U0-only call log. The [project ledger](PROJECT.md) owns the per-slice record,
+commands and evidence.
 
 | Milestone | Scope | Status |
 | :--- | :--- | :--- |
 | M0 | Foundation: parser, loader identity, heap, interpreter, verifier skeleton | done |
 | M1 | Target lock, surface manifest, stub library and link-check | done |
 | M2 | C1 metadata, minimal class library, first Spring context | done |
-| M3 | C2 dynamic code: `Proxy`, CGLIB, Objenesis, `Lookup`, `Unsafe` U0 | next |
+| M3 | C2 dynamic code: `Proxy`, CGLIB, Objenesis, `Lookup`, `Unsafe` U0 | done |
 | M4 | C3 resources and jars, `-jar`, non-web Boot | planned |
 | M5 | C3 concurrency and the Java memory model, references, cleaner, Tomcat | planned |
 | M6 | C4 reference web application | planned |
@@ -23,9 +25,12 @@ A Java 17 runtime in Rust, built to run Spring — not just a corpus.
 
 Proven today: `compat check` resolves 1,047 classes and 4,851 member records with 0
 unresolved; the C1 metadata diff is 0 across 1,011 referenced classes; the workspace
-passes 429 tests plus `cargo fmt --all --check` and
-`cargo clippy --workspace --all-targets -- -D warnings`. Known gaps are listed in the
-[M2 history note](docs/notes/M2.md).
+passes 472 tests plus `cargo fmt --all --check` and
+`cargo clippy --workspace --all-targets -- -D warnings`; and
+`RAVA_C2_ACCEPTANCE=1 cargo test -p rava-cli --test c2_gate` exits 0 with real Proxy,
+CGLIB, Objenesis, Spring AOP and an `Unsafe` U0-only log. Known gaps are listed in the
+[M3 history note](docs/notes/M3.md); the local long/double slot bug and
+`Class.getFields` are issues #52 and #53.
 
 ## What this project is
 
@@ -65,7 +70,7 @@ Reactive web (Spring WebFlux) is a later target, not part of the first acceptanc
 - [Open questions](docs/open-questions.md) — the resolved decision record.
 - [ADR index](docs/adr/README.md) — the accepted decision stack.
 - [Explanation index](docs/explanation/README.md) — how the mechanisms run, starting with the C1 metadata diff and the Spring context.
-- [History notes](docs/notes/README.md) — what happened, starting with the M2 blocker chain and lessons.
+- [History notes](docs/notes/README.md) — what happened, including the M2 Spring blocker chain and the M3 CGLIB/AOP lessons.
 - [Project ledger](PROJECT.md) — phase status, milestones, decision log.
 
 Start with the requirements and the ADRs; the open questions are all resolved and
