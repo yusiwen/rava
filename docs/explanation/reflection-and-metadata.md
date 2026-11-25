@@ -73,9 +73,13 @@ class is its declaring class, so the object is stable across repeated queries.
 `Class.getDeclaredFields()`, `getDeclaredMethods()` and
 `getDeclaredConstructors()` filter the class's own fields/methods (constructors are
 `<init>`) and return real heap reference arrays of member objects. They do not include
-superclass members. `getClasses()` returns public member classes from the
-`InnerClasses` metadata, with the superclass walk; `getDeclaredClasses()` reports the
-declared subset.
+superclass members. The inherited arrays are `getFields()` (issue #53), `getMethods()`
+and `getConstructors()`: `getFields` returns the class's public fields in class-file
+order, then its superinterfaces recursively in declaration order, then its superclass
+recursively, deduplicated by `(declaring class, name, descriptor)`; a hidden field is
+kept, a diamond declaration is returned once, and a primitive or array class returns an
+empty array. `getClasses()` returns public member classes from the `InnerClasses`
+metadata, with the superclass walk; `getDeclaredClasses()` reports the declared subset.
 
 The named lookups build the exact descriptor from their `Class[]` argument:
 
@@ -180,6 +184,7 @@ $ cargo test -p rava-classfile --test metadata_model
 $ cargo test -p rava-vm --test c1_runtime
 $ cargo test -p rava-interp --test class_objects
 $ cargo test -p rava-interp --test reflection_members
+$ cargo test -p rava-interp --test fields
 $ cargo test -p rava-interp --test reflection_invoke
 $ cargo test -p rava-interp --test annotations
 $ cargo test -p rava-interp --test generic_types
@@ -200,8 +205,11 @@ The Spring smoke is the integration proof that these layers compose for a real
   (see [`c1-metadata.md`](c1-metadata.md)).
 - No `Parameter`/`getParameters`, `AnnotatedType`, `getGenericExceptionTypes`,
   `getRecordComponents`/`getPermittedSubclasses` or record/sealed reflective views.
-- No `getFields`/`getMethods`/`getConstructors` inherited **arrays**; only the declared
-  arrays and the named inherited lookups exist.
+- The inherited arrays `getFields`/`getMethods`/`getConstructors` exist (issue #53 added
+  `getFields`), but they are queries over the **observed** C1 tree, not the closed JDK
+  hierarchy: a superclass or interface the tree omits ends that branch instead of failing
+  the query. The 69/35/44 closure boundary is in
+  [`c1-metadata.md`](c1-metadata.md#c1-closure).
 - Runtime-visible annotations only; no `getAnnotationsByType`, runtime-invisible
   annotations, parameter/type-annotation reflection objects, access checks or
   `setAccessible` enforcement (the flag is stored but not enforced).

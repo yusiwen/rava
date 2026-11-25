@@ -25,12 +25,14 @@ commands and evidence.
 
 Proven today: `compat check` resolves 1,047 classes and 4,851 member records with 0
 unresolved; the C1 metadata diff is 0 across 1,011 referenced classes; the workspace
-passes 472 tests plus `cargo fmt --all --check` and
+passes 487 tests plus `cargo fmt --all --check` and
 `cargo clippy --workspace --all-targets -- -D warnings`; and
 `RAVA_C2_ACCEPTANCE=1 cargo test -p rava-cli --test c2_gate` exits 0 with real Proxy,
 CGLIB, Objenesis, Spring AOP and an `Unsafe` U0-only log. Known gaps are listed in the
-[M3 history note](docs/notes/M3.md); the local long/double slot bug and
-`Class.getFields` are issues #52 and #53.
+[M3 history note](docs/notes/M3.md); the local long/double slot bug (#52) is fixed, and
+`Class.getFields` (#53) is implemented against the observed C1 tree, whose 69/35/44
+closure boundary is documented in the
+[C1 explanation](docs/explanation/c1-metadata.md#c1-closure).
 
 ## What this project is
 

@@ -192,9 +192,11 @@ the jars skips with a message.
   definitely assigned accesses, but it does not model a wide value's second half as a
   hole or type-check a local load. The interpreter rejects a load of a hole with a typed
   error, so such invalid bytecode fails at run time rather than at verification time.
-- **Reflection is not complete.** `Class.getFields` is not implemented, and the C1 tree
-  is not closed under superclasses (69 referenced owners are absent). Issue #53 tracks
-  both; the VM tolerates an omitted superclass during hierarchy walks.
+- **Reflection is not complete.** `Class.getFields` exists (issue #53), but the C1 tree
+  is not closed under superclasses or interfaces (69 referenced owners are absent), so
+  the inherited arrays see the observed tree rather than a closed JDK hierarchy. The VM
+  ends an omitted superclass/interface branch instead of failing; see
+  [`c1-metadata.md`](c1-metadata.md#c1-closure).
 - **Access control and modules are thin.** There is no access check, `ProtectionDomain`
   is null, the module layer is an empty `ModuleFinder`, and `ClassLoader` resources are
   empty stubs.

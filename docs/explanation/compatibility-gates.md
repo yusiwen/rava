@@ -118,8 +118,9 @@ with `Code` verifies, and the `Unsafe` log contains only U0. The run needs the f
 than silently skipping. The mechanism is explained in
 [`dynamic-code.md`](dynamic-code.md); the blocker chain is in
 [`docs/notes/M3.md`](../notes/M3.md). This does not make every C2 surface complete:
-`Class.getFields`, the mixed long/double local layout (#52) and access checks remain
-open, and the verifier is not a full type verifier.
+Access checks remain open, and the verifier is not a full type verifier. The mixed
+long/double local layout (#52) and `Class.getFields` (#53) are fixed; #53 also documents
+the C1 closure tolerance rather than claiming a closed tree.
 
 **C3** is partially exercised by the Spring smoke:
 

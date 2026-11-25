@@ -114,6 +114,25 @@ its name, `public abstract`, `Object`, version 61 and a marker `SourceFile`, and
 excluded from the C1 diff. The generator fails if the archive and the committed list
 disagree, so the exception list cannot silently grow.
 
+## C1 closure
+
+The C1 tree is not closed under superclasses and superinterfaces, and this document does
+not claim it is. Following every superclass and interface edge in the committed
+`stdlib/c1/classes` tree leaves **69 platform owners absent**: 35 distinct direct
+superclass names account for 44 direct superclass edges (for example
+`java/util/AbstractSequentialList` from `java/util/LinkedList`), and 34 distinct interface
+names account for 70 interface edges. Those are properties of the observed manifest
+tree — the 1,047 owners the 35 pinned jars reference — not differences between the
+committed stubs and `ct.sym`; the metadata diff remains 0.
+
+The runtime tolerates the omission instead of inventing classes. `Class.getFields()`
+(issue #53) and `Class.getMethods()` end a superclass or superinterface branch at
+`VmError::ClassNotFound`, and the inherited-lookup and `Class.getInterfaces()` walks skip
+an omitted interface the same way. A query therefore sees the observed tree, not a
+closed JDK hierarchy: an inherited field or method declared by an absent superclass is
+not reported, and the rest of the query still answers. The C1 gate is a metadata-shape
+gate; it does not promise a complete runtime hierarchy.
+
 ## What is normalized
 
 The check is normalized, but narrowly:
