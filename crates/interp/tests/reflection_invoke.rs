@@ -960,11 +960,14 @@ fn wrong_receivers_static_fields_and_wrong_arguments_are_typed_errors() {
         .expect("an Object instance allocates");
     let empty = reference_array(&fixture.shared, &[]);
 
-    // Method.invoke on a non-instance receiver.
+    // Method.invoke on a receiver of an unrelated class. A string is not an `Instance`
+    // heap object, but it does have a runtime class (`java.lang.String`), so the error is
+    // the assignability mismatch rather than "not an instance"; M3.4 needs that same path
+    // for a `MethodHandles.Lookup` receiver.
     let get_value = member(&fixture, MemberKind::Method, "getValue", "()I");
     assert_native_error(
         method_invoke(&fixture, get_value, Value::Ref(text), empty),
-        "not an instance",
+        "not assignable",
     );
     // Method.invoke on an instance of an unrelated class.
     assert_native_error(

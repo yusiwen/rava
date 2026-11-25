@@ -76,8 +76,10 @@ fn execute(options: &Options) -> Result<(), String> {
         .map_err(|error| format!("cannot register the class library: {error}"))?;
     // `Method.invoke`/`Constructor.newInstance` and
     // `InvocationHandler.invokeDefault` live in the interpreter because they re-enter it;
-    // a runner that wants reflection must install them explicitly.
+    // a runner that wants reflection must install them explicitly. The same is true of
+    // `MethodHandle.invoke*` (M3.4).
     rava_interp::reflect_invoke::register_natives(&shared);
+    rava_interp::method_handles::register_natives(&shared);
     rava_interp::proxy::register_natives(&shared);
     rava_interp::callbacks::register_natives(&shared);
     rava_interp::streams::register_natives(&shared);

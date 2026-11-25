@@ -941,6 +941,68 @@ pub struct LambdaObject {
     pub captured: Vec<Value>,
 }
 
+/// One `java.lang.invoke.MethodHandles.Lookup` (M3.4).
+///
+/// The lookup is identity only: the class it looks up in and the access-mode bit set. The
+/// native ABI does not carry a caller class, so `MethodHandles.lookup()` uses a documented
+/// placeholder class and `MethodHandles.privateLookupIn` replaces it with the target class;
+/// no caller frame is tracked. `modes` is the `Lookup.lookupModes()` bit set (see
+/// [`crate::method_handles`] for the values this VM assigns).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LookupObject {
+    /// The class the lookup resolves members in.
+    pub lookup_class: ClassId,
+    /// The access-mode bit set.
+    pub modes: i32,
+}
+
+/// One `java.lang.invoke.MethodType` (M3.4).
+///
+/// The type is a return type and an ordered parameter list, each a [`ClassRef`], so a
+/// primitive, a loaded class and an array class are all representable and the type can be
+/// turned back into a JVM method descriptor without a class lookup. A `Class` object
+/// converts through `class_object_of(...).class_ref()`. Method types are ordinary heap
+/// objects, not cached: two structural equal types are two objects, and `equals` compares
+/// them structurally (documented deviation from the JDK's interning).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MethodTypeObject {
+    pub return_type: ClassRef,
+    pub parameters: Vec<ClassRef>,
+}
+
+/// How a [`MethodHandleObject`] invokes its target method.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HandleKind {
+    /// A `static` method: the arguments are the method's parameters.
+    Static,
+    /// An instance method with virtual dispatch: the first argument is the receiver and
+    /// dispatch starts at its runtime class.
+    Virtual,
+    /// An instance method without virtual dispatch: the first argument is the receiver
+    /// and the handle's owner declares the method.
+    Special,
+    /// A constructor: the arguments are the constructor's parameters and the result is a
+    /// new instance of the owner.
+    Constructor,
+}
+
+/// One `java.lang.invoke.MethodHandle` (M3.4).
+///
+/// The handle names its target by `(owner, name, descriptor)` rather than a resolved
+/// pointer, so it survives a second definition and never duplicates method metadata.
+/// `method_type` is the handle's *invocation* type, exactly as `MethodHandle.type()`
+/// reports it: it includes the receiver as the first parameter for [`HandleKind::Virtual`]
+/// and [`HandleKind::Special`], and it returns the owner class for
+/// [`HandleKind::Constructor`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MethodHandleObject {
+    pub owner: ClassId,
+    pub name: String,
+    pub descriptor: String,
+    pub kind: HandleKind,
+    pub method_type: MethodTypeObject,
+}
+
 /// A `java.util.List`-family VM object: its runtime class and its elements in index
 /// order.
 ///
@@ -1370,6 +1432,12 @@ pub enum HeapObject {
     /// objects, not permanent roots, and [`crate::Shared::roots`] enumerates their
     /// captured references.
     Lambda(LambdaObject),
+    /// One `java.lang.invoke.MethodHandles.Lookup` (see [`LookupObject`]).
+    Lookup(LookupObject),
+    /// One `java.lang.invoke.MethodType` (see [`MethodTypeObject`]).
+    MethodType(MethodTypeObject),
+    /// One `java.lang.invoke.MethodHandle` (see [`MethodHandleObject`]).
+    MethodHandle(MethodHandleObject),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1886,6 +1954,56 @@ impl Heap {
     /// which is the one creation entry point the metafactory path uses.
     pub fn allocate_lambda(&mut self, lambda: LambdaObject) -> ObjRef {
         self.allocate(HeapObject::Lambda(lambda))
+    }
+
+    /// Allocate one `MethodHandles.Lookup`. Callers go through
+    /// [`crate::method_handles`], which is the one creation entry point.
+    pub fn allocate_lookup(&mut self, lookup: LookupObject) -> ObjRef {
+        self.allocate(HeapObject::Lookup(lookup))
+    }
+
+    /// Allocate one `MethodType`. Method types are ordinary heap objects: no cache owns
+    /// them and a second construction returns a second object.
+    pub fn allocate_method_type(&mut self, method_type: MethodTypeObject) -> ObjRef {
+        self.allocate(HeapObject::MethodType(method_type))
+    }
+
+    /// Allocate one `MethodHandle`, holding its target identity and invocation type.
+    pub fn allocate_method_handle(&mut self, handle: MethodHandleObject) -> ObjRef {
+        self.allocate(HeapObject::MethodHandle(handle))
+    }
+
+    /// The state behind a `MethodHandles.Lookup` reference.
+    pub fn lookup(&self, reference: ObjRef) -> Result<&LookupObject, HeapError> {
+        match self.get(reference)? {
+            HeapObject::Lookup(lookup) => Ok(lookup),
+            _ => Err(HeapError::WrongObjectKind {
+                reference,
+                expected: "a MethodHandles.Lookup",
+            }),
+        }
+    }
+
+    /// The state behind a `MethodType` reference.
+    pub fn method_type(&self, reference: ObjRef) -> Result<&MethodTypeObject, HeapError> {
+        match self.get(reference)? {
+            HeapObject::MethodType(method_type) => Ok(method_type),
+            _ => Err(HeapError::WrongObjectKind {
+                reference,
+                expected: "a MethodType",
+            }),
+        }
+    }
+
+    /// The state behind a `MethodHandle` reference.
+    pub fn method_handle(&self, reference: ObjRef) -> Result<&MethodHandleObject, HeapError> {
+        match self.get(reference)? {
+            HeapObject::MethodHandle(handle) => Ok(handle),
+            _ => Err(HeapError::WrongObjectKind {
+                reference,
+                expected: "a MethodHandle",
+            }),
+        }
     }
 
     /// Every live object, in slot order.

@@ -26,6 +26,7 @@ pub mod maps;
 pub mod math;
 pub mod memory;
 pub mod metadata;
+pub mod method_handles;
 pub mod object;
 pub mod proxy;
 pub mod references;
@@ -45,11 +46,11 @@ pub use error::VmError;
 pub use heap::{
     AnnotationObject, Array, ArrayClass, ArrayKind, AtomicCell, BoxedPrimitive, ClassRef,
     CollectorKind, CollectorObject, ConditionState, EnumConstant, EnumerationObject, FieldLayout,
-    FieldSlot, GenericArrayType, Heap, HeapError, HeapObject, Instance, IteratorObject,
-    LambdaObject, LambdaTarget, LambdaTargetKind, ListObject, MapEntry, MapObject, MemberKind,
-    MessageFormatObject, ObjRef, ParameterizedType, PrimitiveKind, ReflectMember, SetObject,
-    SinkObject, SpliteratorObject, StreamObject, TypeDeclaration, TypeObject, TypeVariableType,
-    WildcardType,
+    FieldSlot, GenericArrayType, HandleKind, Heap, HeapError, HeapObject, Instance, IteratorObject,
+    LambdaObject, LambdaTarget, LambdaTargetKind, ListObject, LookupObject, MapEntry, MapObject,
+    MemberKind, MessageFormatObject, MethodHandleObject, MethodTypeObject, ObjRef,
+    ParameterizedType, PrimitiveKind, ReflectMember, SetObject, SinkObject, SpliteratorObject,
+    StreamObject, TypeDeclaration, TypeObject, TypeVariableType, WildcardType,
 };
 pub use hooks::{ClassUnloadHook, Hooks, ReferenceHook};
 pub use loader::{ClassEntry, ClassId, ClassState, LoaderId};

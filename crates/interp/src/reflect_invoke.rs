@@ -261,17 +261,25 @@ fn constructor_new_instance(
     }
 }
 
-/// Require an instance receiver assignable to the declaring class.
+/// Require a receiver assignable to the declaring class.
+///
+/// An instance reports its defining class. A VM-level object (a string, a box, a
+/// `MethodHandles.Lookup`, a `MethodType`, a `MethodHandle`, ...) has no class-file
+/// instance representation, so it reports the class `Shared::get_class` names for it,
+/// which is the identity `Object.getClass` exposes. That is what lets `Method.invoke`
+/// reach a native declared in such a class's stub — CGLIB obtains
+/// `Lookup.defineClass` reflectively and invokes it on a `Lookup` object.
 fn require_instance(
     shared: &Shared,
     target: ObjRef,
     expected: ClassId,
     operation: &str,
 ) -> Result<(), VmError> {
+    let class_object = shared.get_class(target)?;
     let actual = {
         let heap = shared.heap();
-        match heap.instance(target) {
-            Ok(instance) => instance.class,
+        match heap.class(class_object) {
+            Ok(class) => class,
             Err(error) => {
                 return Err(VmError::Native(format!(
                     "{operation} receiver is not an instance: {error}"
