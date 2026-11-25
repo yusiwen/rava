@@ -16,7 +16,7 @@ commands and evidence.
 | M1 | Target lock, surface manifest, stub library and link-check | done |
 | M2 | C1 metadata, minimal class library, first Spring context | done |
 | M3 | C2 dynamic code: `Proxy`, CGLIB, Objenesis, `Lookup`, `Unsafe` U0 | done |
-| M4 | C3 resources and jars, `-jar`, non-web Boot | planned |
+| M4 | C3 resources and jars, `-jar`, non-web Boot | in progress |
 | M5 | C3 concurrency and the Java memory model, references, cleaner, Tomcat | planned |
 | M6 | C4 reference web application | planned |
 | M7 | Spring test subset | planned |
@@ -25,10 +25,13 @@ commands and evidence.
 
 Proven today: `compat check` resolves 1,047 classes and 4,851 member records with 0
 unresolved; the C1 metadata diff is 0 across 1,011 referenced classes; the workspace
-passes 487 tests plus `cargo fmt --all --check` and
+passes 501 tests plus `cargo fmt --all --check` and
 `cargo clippy --workspace --all-targets -- -D warnings`; and
 `RAVA_C2_ACCEPTANCE=1 cargo test -p rava-cli --test c2_gate` exits 0 with real Proxy,
-CGLIB, Objenesis, Spring AOP and an `Unsafe` U0-only log. Known gaps are listed in the
+CGLIB, Objenesis, Spring AOP and an `Unsafe` U0-only log. M4.1 adds real `file:` and
+`jar:` classpath resources, `ClassLoader`/`Class` resource APIs and URL/stream natives
+(`cargo test -p rava-cli --test resources`); ServiceLoader, `-jar`, nested jars and the
+non-web Boot gate are next. Known gaps are listed in the
 [M3 history note](docs/notes/M3.md); the local long/double slot bug (#52) is fixed, and
 `Class.getFields` (#53) is implemented against the observed C1 tree, whose 69/35/44
 closure boundary is documented in the

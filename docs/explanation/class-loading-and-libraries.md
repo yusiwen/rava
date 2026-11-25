@@ -34,6 +34,9 @@ The abstraction is in [`crates/vm/src/source.rs`](../../crates/vm/src/source.rs)
 ```rust
 pub trait ClassSource: Send + Sync + Debug {
     fn read(&self, binary_name: &str) -> Result<Option<Vec<u8>>, VmError>;
+    fn read_resource(&self, name: &str) -> Result<Option<Vec<u8>>, VmError>;
+    fn resource_urls(&self, name: &str) -> Result<Vec<String>, VmError>;
+    fn resource_names(&self, prefix: &str) -> Result<Vec<String>, VmError>;
 }
 ```
 
@@ -45,9 +48,9 @@ Three implementations exist:
 
 | Source | Behavior |
 | :--- | :--- |
-| `DirectorySource` | Reads `<root>/<binary/name>.class`; a missing file is `None`, other I/O errors are `VmError::Io`. |
-| `JarSource` | Reads the zip central directory once; stored and DEFLATE entries are supported; Zip64 is rejected; `read` converts the binary name to `<name>.class`. `entry_names`/`class_entry_names`/`read_entry` are the scanner-facing views used by the manifest tool. |
-| `ClassPathSource` | An ordered list of directories and jars; the first entry that returns `Some` wins, matching Java classpath order. A nonexistent path fails when the source is built, rather than silently changing the search. |
+| `DirectorySource` | Reads `<root>/<binary/name>.class`; a missing file is `None`, other I/O errors are `VmError::Io`. Resources use a `file:/<absolute-path>` URL and `resource_names` walks files under the prefix. |
+| `JarSource` | Reads the zip central directory once; stored and DEFLATE entries are supported; Zip64 is rejected; `read` converts the binary name to `<name>.class`. Resources use `jar:file:/<absolute-jar>!/<entry>`; `entry_names`/`class_entry_names`/`read_entry` are the scanner-facing views used by the manifest tool. |
+| `ClassPathSource` | An ordered list of directories and jars; the first entry that returns `Some` wins, matching Java classpath order. Resource URLs/names concatenate in that same order. A nonexistent path fails when the source is built, rather than silently changing the search. |
 
 The manifest tool scans jars through `JarSource::class_entry_names`, not through the
 runtime loader; the runner uses `ClassPathSource` as an application source.
@@ -126,6 +129,31 @@ The C1 tree's construction, normalization and 36-placeholder boundary are owned 
 [`stdlib/c1/README.md`](../../stdlib/c1/README.md) and explained in
 [`c1-metadata.md`](c1-metadata.md).
 
+## 5a. Resources and URL streams (M4.1)
+
+A resource is a second view of the same `ClassSource`, not a second source model. The
+loader asks sources **parent-first** (bootstrap, then application/child) and, inside one
+`ClassPathSource`, in classpath order. `ClassLoader.getResource` returns the first URL,
+`getResources` returns an `Enumeration` of every URL, and `getResourceAsStream` returns
+the first bytes as a `java.io.InputStream`. `Class.getResource` strips a leading `/` for
+an absolute name and otherwise prefixes the class's package. The `getSystem*` forms use
+the application loader.
+
+`java.net.URL`, `java.net.URLConnection` and `java.io.InputStream` are real Java objects
+with Rust state in an `ObjRef`-keyed side table: URL components, stream bytes/cursors,
+`ByteArrayOutputStream` buffers and connection state. The table is not a second heap; the
+objects are ordinary class instances, the data is not a Java reference, and
+`Shared::roots` reports the keys so a future collector sees the attachment. `URL` opens
+`file:` and `jar:file:...!/entry` URLs only; there is no network transport. `InputStream`
+returns the unsigned 0..255 byte from `read()` and `-1` at EOF.
+
+The committed `crates/cli/tests/fixtures/resources/` fixture puts a directory and a jar
+with the same resource on the classpath in both orders. `cargo test -p rava-cli --test
+resources` asserts the exact directory-first output, both URL protocols and payloads,
+`getResources` order, missing-resource null and the EOF contract. `ByteArrayOutputStream`,
+`Iterator.remove`, `URLDecoder.decode`, `Properties.load` and `Arrays.stream(Object[])`
+were added because returning real bytes exposed those existing Spring paths.
+
 ## 6. Native dispatch: registry before `Code`
 
 C1 methods generally have **no `Code` and no `ACC_NATIVE`**. The registry is keyed by
@@ -173,9 +201,9 @@ native fallback instead. This is a deliberate C1/M2 boundary, not a JDK-equivale
 
 ## 8. What the runtime does not do yet
 
-- No resource API (`getResource`/`getResources`/`getResourceAsStream`) on `ClassLoader`
-  or `Class`; the manifest scanner has jar entry enumeration, but the runtime loader does
-  not expose resources.
+- Resources are `file:` and `jar:file:...!/entry` only. There is no network transport,
+  no URLConnection headers/content type/dates, no nested jars (M4.4), no custom
+  `URLStreamHandler`, and no charset table (`URLDecoder` decodes UTF-8).
 - No module layer, multi-release selection, nested jars, manifest `Class-Path`, `-jar`,
   wildcard/remote classpath or class unloading.
 - Parent-first only; there is no child-first/OSGi-style loader yet.
@@ -192,6 +220,7 @@ native fallback instead. This is a deliberate C1/M2 boundary, not a JDK-equivale
 $ cargo test -p rava-vm --test loader_identity      # (loader, name) identity and delegation
 $ cargo test -p rava-vm --test c1_runtime           # C1 tree as bootstrap, metadata without Code
 $ cargo test -p rava-cli --test classpath_run       # directory/jar/order/missing main
+$ cargo test -p rava-cli --test resources          # classpath resources, URLs and streams
 $ cargo run -p rava-cli -- compat check             # manifest + synthetic link tree
 $ RAVA_SPRING_ACCEPTANCE=1 cargo test -p rava-cli --test spring_context
 ```

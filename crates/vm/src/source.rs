@@ -13,8 +13,27 @@ use flate2::read::DeflateDecoder;
 use crate::error::VmError;
 
 /// A source of class bytes, addressed by binary name.
+///
+/// The resource methods are a second view of the same source, not a second source model:
+/// a directory and a jar answer both from the bytes they already own. The defaults keep
+/// a source that only supplies classes compiling, and report "no such resource".
 pub trait ClassSource: Send + Sync + std::fmt::Debug {
     fn read(&self, binary_name: &str) -> Result<Option<Vec<u8>>, VmError>;
+
+    /// The bytes of one non-class resource, or `None` when the source does not have it.
+    fn read_resource(&self, _name: &str) -> Result<Option<Vec<u8>>, VmError> {
+        Ok(None)
+    }
+
+    /// The external URL forms of one resource, in this source's own order.
+    fn resource_urls(&self, _name: &str) -> Result<Vec<String>, VmError> {
+        Ok(Vec::new())
+    }
+
+    /// Every resource name under `prefix`, in a stable order.
+    fn resource_names(&self, _prefix: &str) -> Result<Vec<String>, VmError> {
+        Ok(Vec::new())
+    }
 }
 
 /// A classpath searched in order: a list of directories and jars.
@@ -90,6 +109,43 @@ impl ClassSource for ClassPathSource {
         }
         Ok(None)
     }
+
+    fn read_resource(&self, name: &str) -> Result<Option<Vec<u8>>, VmError> {
+        for entry in &self.entries {
+            let bytes = match entry {
+                ClassPathEntry::Directory(source) => source.read_resource(name)?,
+                ClassPathEntry::Jar(source) => source.read_resource(name)?,
+            };
+            if bytes.is_some() {
+                return Ok(bytes);
+            }
+        }
+        Ok(None)
+    }
+
+    fn resource_urls(&self, name: &str) -> Result<Vec<String>, VmError> {
+        let mut urls = Vec::new();
+        for entry in &self.entries {
+            let found = match entry {
+                ClassPathEntry::Directory(source) => source.resource_urls(name)?,
+                ClassPathEntry::Jar(source) => source.resource_urls(name)?,
+            };
+            urls.extend(found);
+        }
+        Ok(urls)
+    }
+
+    fn resource_names(&self, prefix: &str) -> Result<Vec<String>, VmError> {
+        let mut names = Vec::new();
+        for entry in &self.entries {
+            let found = match entry {
+                ClassPathEntry::Directory(source) => source.resource_names(prefix)?,
+                ClassPathEntry::Jar(source) => source.resource_names(prefix)?,
+            };
+            names.extend(found);
+        }
+        Ok(names)
+    }
 }
 
 /// A directory tree containing `<binary/name>.class` files.
@@ -110,6 +166,56 @@ impl DirectorySource {
     fn relative(binary_name: &str) -> String {
         format!("{}.class", binary_name.replace('.', "/"))
     }
+
+    /// Resolve a resource name under the root, rejecting absolute names and `..` segments
+    /// so a resource lookup cannot walk out of the directory it was given.
+    fn resource_path(&self, name: &str) -> Option<PathBuf> {
+        if name.is_empty() || name.starts_with('/') {
+            return None;
+        }
+        let mut path = self.root.clone();
+        for component in name.split('/') {
+            if component.is_empty() || component == "." || component == ".." {
+                return None;
+            }
+            path.push(component);
+        }
+        Some(path)
+    }
+
+    fn walk(
+        &self,
+        directory: &Path,
+        relative: &str,
+        names: &mut Vec<String>,
+    ) -> Result<(), VmError> {
+        let entries = std::fs::read_dir(directory).map_err(|source| VmError::Io {
+            path: directory.to_path_buf(),
+            source,
+        })?;
+        for entry in entries {
+            let entry = entry.map_err(|source| VmError::Io {
+                path: directory.to_path_buf(),
+                source,
+            })?;
+            let file_name = entry.file_name().to_string_lossy().into_owned();
+            let child_relative = if relative.is_empty() {
+                file_name
+            } else {
+                format!("{relative}/{file_name}")
+            };
+            let file_type = entry.file_type().map_err(|source| VmError::Io {
+                path: entry.path(),
+                source,
+            })?;
+            if file_type.is_dir() {
+                self.walk(&entry.path(), &child_relative, names)?;
+            } else if file_type.is_file() {
+                names.push(child_relative);
+            }
+        }
+        Ok(())
+    }
 }
 
 impl ClassSource for DirectorySource {
@@ -120,6 +226,38 @@ impl ClassSource for DirectorySource {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
             Err(source) => Err(VmError::Io { path, source }),
         }
+    }
+
+    fn read_resource(&self, name: &str) -> Result<Option<Vec<u8>>, VmError> {
+        let Some(path) = self.resource_path(name) else {
+            return Ok(None);
+        };
+        if !path.is_file() {
+            return Ok(None);
+        }
+        match std::fs::read(&path) {
+            Ok(bytes) => Ok(Some(bytes)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(source) => Err(VmError::Io { path, source }),
+        }
+    }
+
+    fn resource_urls(&self, name: &str) -> Result<Vec<String>, VmError> {
+        let Some(path) = self.resource_path(name) else {
+            return Ok(Vec::new());
+        };
+        if !path.is_file() {
+            return Ok(Vec::new());
+        }
+        Ok(vec![file_url(&path)])
+    }
+
+    fn resource_names(&self, prefix: &str) -> Result<Vec<String>, VmError> {
+        let mut names = Vec::new();
+        self.walk(&self.root, "", &mut names)?;
+        names.retain(|name| name.starts_with(prefix));
+        names.sort_unstable();
+        Ok(names)
     }
 }
 
@@ -190,6 +328,11 @@ impl JarSource {
         self.bytes_for(name)
     }
 
+    /// Whether the jar carries an entry with exactly this name.
+    pub fn has_entry(&self, name: &str) -> bool {
+        self.entries.contains_key(name)
+    }
+
     fn relative(binary_name: &str) -> String {
         format!("{}.class", binary_name.replace('.', "/"))
     }
@@ -246,6 +389,67 @@ impl ClassSource for JarSource {
     fn read(&self, binary_name: &str) -> Result<Option<Vec<u8>>, VmError> {
         self.read_entry(&Self::relative(binary_name))
     }
+
+    fn read_resource(&self, name: &str) -> Result<Option<Vec<u8>>, VmError> {
+        self.read_entry(name)
+    }
+
+    fn resource_urls(&self, name: &str) -> Result<Vec<String>, VmError> {
+        if !self.has_entry(name) {
+            return Ok(Vec::new());
+        }
+        let jar = absolute_path(&self.path);
+        let jar = jar.to_string_lossy();
+        let entry = percent_encode_path(name);
+        Ok(vec![format!(
+            "jar:file:{}!/{entry}",
+            percent_encode_path(&jar)
+        )])
+    }
+
+    fn resource_names(&self, prefix: &str) -> Result<Vec<String>, VmError> {
+        Ok(self
+            .entry_names()
+            .into_iter()
+            .filter(|name| name.starts_with(prefix))
+            .map(str::to_owned)
+            .collect())
+    }
+}
+
+/// An absolute path, canonical when the filesystem can provide it.
+fn absolute_path(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path)
+        .or_else(|_| std::path::absolute(path))
+        .unwrap_or_else(|_| path.to_path_buf())
+}
+
+/// A `file:` URL for `path`, absolute and with spaces percent-encoded.
+fn file_url(path: &Path) -> String {
+    format!(
+        "file:{}",
+        percent_encode_path(&absolute_path(path).to_string_lossy())
+    )
+}
+
+/// Percent-encode the bytes a URL path cannot carry literally.
+///
+/// Only spaces are required for the M4.1 fixtures, but `%`, `#` and `?` would change the
+/// meaning of the URL and non-ASCII bytes are not valid in an external form, so all four
+/// classes are escaped. `/` and ordinary punctuation stay literal.
+fn percent_encode_path(text: &str) -> String {
+    let mut encoded = String::with_capacity(text.len());
+    for byte in text.bytes() {
+        match byte {
+            b' ' => encoded.push_str("%20"),
+            b'%' => encoded.push_str("%25"),
+            b'#' => encoded.push_str("%23"),
+            b'?' => encoded.push_str("%3F"),
+            0x21..=0x7E => encoded.push(byte as char),
+            _ => encoded.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    encoded
 }
 
 fn central_directory(bytes: &[u8]) -> Result<HashMap<String, JarEntry>, VmError> {
@@ -360,5 +564,78 @@ mod tests {
         let source = ClassPathSource::from_paths([scratch("missing")]).unwrap();
         assert_eq!(source.len(), 1);
         assert_eq!(source.read("Hello").unwrap(), None);
+    }
+
+    #[test]
+    fn directory_source_reads_lists_and_urls_resources() {
+        let root = scratch("resources");
+        std::fs::create_dir_all(root.join("demo")).unwrap();
+        std::fs::write(root.join("demo/data.txt"), b"payload").unwrap();
+        std::fs::write(root.join("demo/other.txt"), b"other").unwrap();
+
+        let source = DirectorySource::new(&root);
+        assert_eq!(
+            source.read_resource("demo/data.txt").unwrap().as_deref(),
+            Some(&b"payload"[..])
+        );
+        assert_eq!(source.read_resource("demo/missing.txt").unwrap(), None);
+        assert_eq!(source.read_resource("../data.txt").unwrap(), None);
+        assert_eq!(
+            source.resource_names("demo/").unwrap(),
+            vec!["demo/data.txt", "demo/other.txt"]
+        );
+
+        let urls = source.resource_urls("demo/data.txt").unwrap();
+        assert_eq!(urls.len(), 1);
+        assert!(urls[0].starts_with("file:/"));
+        assert!(urls[0].ends_with("/demo/data.txt"));
+        assert!(source.resource_urls("demo/missing.txt").unwrap().is_empty());
+    }
+
+    #[test]
+    fn classpath_concatenates_resource_urls_in_order() {
+        let first = scratch("resources-first");
+        let second = scratch("resources-second");
+        for (root, payload) in [
+            (&first, b"first".as_slice()),
+            (&second, b"second".as_slice()),
+        ] {
+            std::fs::create_dir_all(root.join("demo")).unwrap();
+            std::fs::write(root.join("demo/data.txt"), payload).unwrap();
+        }
+
+        let source = ClassPathSource::from_paths([first, second]).unwrap();
+        assert_eq!(
+            source.read_resource("demo/data.txt").unwrap().as_deref(),
+            Some(&b"first"[..])
+        );
+        let urls = source.resource_urls("demo/data.txt").unwrap();
+        assert_eq!(urls.len(), 2);
+        assert!(urls[0].ends_with("/demo/data.txt"));
+        assert!(urls[0] != urls[1]);
+        assert_eq!(
+            source.resource_names("demo/").unwrap(),
+            vec!["demo/data.txt", "demo/data.txt"]
+        );
+    }
+
+    #[test]
+    fn jar_source_reads_lists_and_urls_resources() {
+        let jar = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/hello.jar");
+        let source = JarSource::open(&jar).unwrap();
+
+        let bytes = source
+            .read_resource("Hello.class")
+            .unwrap()
+            .expect("Hello.class is an entry");
+        assert_eq!(&bytes[..4], &[0xCA, 0xFE, 0xBA, 0xBE]);
+        assert_eq!(source.read_resource("missing.txt").unwrap(), None);
+        assert_eq!(source.resource_names("Hello").unwrap(), vec!["Hello.class"]);
+
+        let urls = source.resource_urls("Hello.class").unwrap();
+        assert_eq!(urls.len(), 1);
+        assert!(urls[0].starts_with("jar:file:/"));
+        assert!(urls[0].ends_with("!/Hello.class"));
+        assert!(source.resource_urls("missing.txt").unwrap().is_empty());
     }
 }

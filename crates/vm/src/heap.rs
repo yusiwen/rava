@@ -1060,6 +1060,11 @@ pub struct IteratorObject {
     pub class: ClassId,
     pub items: Vec<Value>,
     pub position: usize,
+    /// The list or set the snapshot was taken from, for `Iterator.remove`.
+    ///
+    /// A stream or empty iterator has no mutable source and stores null; removing from
+    /// one is a typed error rather than a silent no-op.
+    pub source: ObjRef,
 }
 
 /// One `java.util.Map.Entry`: a key and a value copied out of a map.
@@ -1708,10 +1713,25 @@ impl Heap {
 
     /// Allocate an iterator over a snapshot of `items`.
     pub fn allocate_iterator(&mut self, class: ClassId, items: Vec<Value>) -> ObjRef {
+        self.allocate_iterator_with_source(class, items, ObjRef::NULL)
+    }
+
+    /// Allocate an iterator that remembers the collection its snapshot came from.
+    ///
+    /// `Iterator.remove()` removes the last returned element from `source` and from the
+    /// snapshot, which is what Spring's `AnnotationMetadata.getAnnotatedMethods` set
+    /// expects while selecting a `@Bean` method.
+    pub fn allocate_iterator_with_source(
+        &mut self,
+        class: ClassId,
+        items: Vec<Value>,
+        source: ObjRef,
+    ) -> ObjRef {
         self.allocate(HeapObject::Iterator(IteratorObject {
             class,
             items,
             position: 0,
+            source,
         }))
     }
 

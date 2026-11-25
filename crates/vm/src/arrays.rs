@@ -75,6 +75,34 @@ pub fn register_natives(shared: &Shared) {
         "([Ljava/lang/Object;)Ljava/lang/String;",
         arrays_to_string,
     );
+    // `SpringFactoriesLoader` now reads `META-INF/spring.factories` through the M4.1
+    // resources and turns the factory names into a stream. The eager stream shape already
+    // exists in the heap, so this is only the array entry point.
+    shared.register_native(
+        ARRAYS_CLASS,
+        "stream",
+        "([Ljava/lang/Object;)Ljava/util/stream/Stream;",
+        arrays_stream,
+    );
+}
+
+/// `Arrays.stream(Object[])`: an eager stream over the array's current elements.
+fn arrays_stream(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let array = array_argument(args, 0, "Arrays.stream")?;
+    let elements = {
+        let heap = shared.heap();
+        let array = heap.array(array).map_err(heap_error)?;
+        array.elements.clone()
+    };
+    Ok(Some(Value::Ref(
+        shared.heap().allocate_stream(elements, false),
+    )))
 }
 
 fn heap_error(error: crate::HeapError) -> VmError {

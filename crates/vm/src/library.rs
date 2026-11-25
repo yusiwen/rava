@@ -25,7 +25,7 @@ use crate::value::Value;
 use crate::{
     annotation, arrays, atomic, bitset, boxed, class_loader, collections, direct_buffer,
     exceptions, format, generic, instance, jul, locks, maps, math, method_handles, modules, object,
-    proxy, references, reflection, regex, string, system, thread_natives,
+    proxy, references, reflection, regex, resources, string, system, thread_natives,
 };
 
 /// `java.lang.System`'s binary-stable internal name.
@@ -66,9 +66,12 @@ pub fn register_all(shared: &Shared) -> Result<(), VmError> {
     format::register_natives(shared);
     thread_natives::register_natives(shared);
     // `java.lang.ClassLoader` owns the loader hierarchy and `defineClass` (M3.3):
-    // `getSystemClassLoader`, `loadClass`, the three `defineClass` overloads and the
-    // resource stubs are all installed here.
+    // `getSystemClassLoader`, `loadClass` and the three `defineClass` overloads are
+    // installed here. Its resource methods call the M4.1 lookup in `Shared`.
     class_loader::register_natives(shared);
+    // `java.net.URL`, `java.net.URLConnection` and `java.io.InputStream` are M4.1. The
+    // URL's text and a stream's bytes live in the VM side table, not in heap objects.
+    resources::register_natives(shared);
     // `Proxy`/`InvocationHandler` are M3.2: the `Proxy` natives plus the runtime-private
     // `rava/proxy/ProxySupport` helper class the generated proxy classes call.
     proxy::register_natives(shared);
