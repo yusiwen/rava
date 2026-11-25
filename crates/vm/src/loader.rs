@@ -232,6 +232,39 @@ impl ClassTable {
         Ok(id)
     }
 
+    /// Every URL for `name`, parent-first and then in classpath order inside each source.
+    pub(crate) fn resource_urls(
+        &self,
+        loader: LoaderId,
+        name: &str,
+    ) -> Result<Vec<String>, VmError> {
+        self.require_loader(loader)?;
+        let chain = self.chain(loader);
+        let mut urls = Vec::new();
+        for candidate in chain.iter().rev() {
+            let source = self.loaders[candidate.index()].source.clone();
+            urls.extend(source.resource_urls(name)?);
+        }
+        Ok(urls)
+    }
+
+    /// The bytes of the first resource, parent-first.
+    pub(crate) fn read_resource(
+        &self,
+        loader: LoaderId,
+        name: &str,
+    ) -> Result<Option<Vec<u8>>, VmError> {
+        self.require_loader(loader)?;
+        let chain = self.chain(loader);
+        for candidate in chain.iter().rev() {
+            let source = self.loaders[candidate.index()].source.clone();
+            if let Some(bytes) = source.read_resource(name)? {
+                return Ok(Some(bytes));
+            }
+        }
+        Ok(None)
+    }
+
     fn require_loader(&self, loader: LoaderId) -> Result<(), VmError> {
         if loader.index() >= self.loaders.len() {
             return Err(VmError::Loader(format!(

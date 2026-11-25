@@ -9,8 +9,11 @@
 //! `loadClass` is parent-first through [`crate::Shared::load_class`]; `defineClass` records
 //! the class under the receiver's own loader, which is what lets Spring's
 //! `OverridingClassLoader` and CGLIB's fallback define a class without a class file on the
-//! classpath. Resources and packages are not modelled (M4): `getResource` is null and
-//! `getResources` is an empty `java.util.Enumeration`.
+//! classpath.
+//!
+//! Resource lookup is M4.1: `getResource` returns the first URL, `getResources` every URL
+//! parent-first, and `getResourceAsStream` a `java.io.InputStream` over the first bytes.
+//! The `getSystem*` forms always use the application loader. Packages remain unmodelled.
 
 use rava_classfile::ClassFile;
 
@@ -106,32 +109,32 @@ pub fn register_natives(shared: &Shared) {
         (
             "getResource",
             "(Ljava/lang/String;)Ljava/net/URL;",
-            class_loader_null,
+            class_loader_get_resource,
         ),
         (
             "getResources",
             "(Ljava/lang/String;)Ljava/util/Enumeration;",
-            class_loader_empty_enumeration,
+            class_loader_get_resources,
         ),
         (
             "getSystemResource",
             "(Ljava/lang/String;)Ljava/net/URL;",
-            class_loader_null,
+            class_loader_get_system_resource,
         ),
         (
             "getSystemResources",
             "(Ljava/lang/String;)Ljava/util/Enumeration;",
-            class_loader_empty_enumeration,
+            class_loader_get_system_resources,
         ),
         (
             "getResourceAsStream",
             "(Ljava/lang/String;)Ljava/io/InputStream;",
-            class_loader_null,
+            class_loader_get_resource_as_stream,
         ),
         (
             "getSystemResourceAsStream",
             "(Ljava/lang/String;)Ljava/io/InputStream;",
-            class_loader_null,
+            class_loader_get_system_resource_as_stream,
         ),
     ] {
         shared.register_native(CLASS_LOADER_CLASS, name, descriptor, function);
@@ -345,30 +348,116 @@ fn class_loader_true(
     Ok(Some(Value::Int(1)))
 }
 
-fn class_loader_null(
-    _shared: &Shared,
-    _thread: &ThreadState,
-    _loader: LoaderId,
-    _receiver: ObjRef,
-    _args: &[Value],
-) -> Result<Option<Value>, VmError> {
-    Ok(Some(Value::Ref(ObjRef::NULL)))
+/// The URL objects for `urls`, in order.
+fn url_values(shared: &Shared, urls: &[String]) -> Result<Vec<Value>, VmError> {
+    let mut values = Vec::with_capacity(urls.len());
+    for url in urls {
+        values.push(Value::Ref(crate::resources::url_object(shared, url)?));
+    }
+    Ok(values)
 }
 
-/// `ClassLoader.getResources(String)`: an empty enumeration.
-///
-/// There is no resource model until M4, so the only truthful answer is an enumeration
-/// with no elements. The C1 `java.util.Enumeration` natives already serve it.
-fn class_loader_empty_enumeration(
+/// A `String` resource name argument.
+fn resource_name(shared: &Shared, args: &[Value], method: &str) -> Result<String, VmError> {
+    string_argument(shared, args, 0, method)
+}
+
+/// `ClassLoader.getResource(String)`: the first URL, or null.
+fn class_loader_get_resource(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let loader = shared.loader_id_for(receiver)?;
+    let name = resource_name(shared, args, "ClassLoader.getResource")?;
+    match shared.resource_urls(loader, &name)?.first() {
+        Some(url) => Ok(Some(Value::Ref(crate::resources::url_object(shared, url)?))),
+        None => Ok(Some(Value::Ref(ObjRef::NULL))),
+    }
+}
+
+/// `ClassLoader.getResources(String)`: every URL, parent-first.
+fn class_loader_get_resources(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let loader = shared.loader_id_for(receiver)?;
+    let name = resource_name(shared, args, "ClassLoader.getResources")?;
+    let urls = shared.resource_urls(loader, &name)?;
+    let values = url_values(shared, &urls)?;
+    Ok(Some(Value::Ref(shared.heap().allocate_enumeration(values))))
+}
+
+/// `ClassLoader.getResourceAsStream(String)`: a stream over the first bytes, or null.
+fn class_loader_get_resource_as_stream(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let loader = shared.loader_id_for(receiver)?;
+    let name = resource_name(shared, args, "ClassLoader.getResourceAsStream")?;
+    match shared.read_resource(loader, &name)? {
+        Some(bytes) => Ok(Some(Value::Ref(crate::resources::stream_object(
+            shared, bytes,
+        )?))),
+        None => Ok(Some(Value::Ref(ObjRef::NULL))),
+    }
+}
+
+/// `ClassLoader.getSystemResource(String)`: the application loader's first URL.
+fn class_loader_get_system_resource(
     shared: &Shared,
     _thread: &ThreadState,
     _loader: LoaderId,
     _receiver: ObjRef,
-    _args: &[Value],
+    args: &[Value],
 ) -> Result<Option<Value>, VmError> {
-    Ok(Some(Value::Ref(
-        shared.heap().allocate_enumeration(Vec::new()),
-    )))
+    let name = resource_name(shared, args, "ClassLoader.getSystemResource")?;
+    match shared
+        .resource_urls(shared.application_loader(), &name)?
+        .first()
+    {
+        Some(url) => Ok(Some(Value::Ref(crate::resources::url_object(shared, url)?))),
+        None => Ok(Some(Value::Ref(ObjRef::NULL))),
+    }
+}
+
+/// `ClassLoader.getSystemResources(String)`: the application loader's URLs.
+fn class_loader_get_system_resources(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let name = resource_name(shared, args, "ClassLoader.getSystemResources")?;
+    let urls = shared.resource_urls(shared.application_loader(), &name)?;
+    let values = url_values(shared, &urls)?;
+    Ok(Some(Value::Ref(shared.heap().allocate_enumeration(values))))
+}
+
+/// `ClassLoader.getSystemResourceAsStream(String)`: the application loader's first bytes.
+fn class_loader_get_system_resource_as_stream(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let name = resource_name(shared, args, "ClassLoader.getSystemResourceAsStream")?;
+    match shared.read_resource(shared.application_loader(), &name)? {
+        Some(bytes) => Ok(Some(Value::Ref(crate::resources::stream_object(
+            shared, bytes,
+        )?))),
+        None => Ok(Some(Value::Ref(ObjRef::NULL))),
+    }
 }
 
 /// `ClassLoader.defineClass(String, byte[], int, int)`: the named overload.

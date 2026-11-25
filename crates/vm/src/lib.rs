@@ -36,6 +36,7 @@ pub mod proxy;
 pub mod references;
 pub mod reflection;
 pub mod regex;
+pub mod resources;
 pub mod shared;
 pub mod source;
 pub mod string;

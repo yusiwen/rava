@@ -202,13 +202,13 @@ pub fn register_natives(shared: &Shared) {
         "java/lang/Class",
         "getResource",
         "(Ljava/lang/String;)Ljava/net/URL;",
-        class_null_resource,
+        class_get_resource,
     );
     shared.register_native(
         "java/lang/Class",
         "getResourceAsStream",
         "(Ljava/lang/String;)Ljava/io/InputStream;",
-        class_null_resource,
+        class_get_resource_as_stream,
     );
     register_modifier_natives(shared);
     for owner in [
@@ -999,15 +999,79 @@ fn instance_class_object(shared: &Shared, reference: ObjRef) -> Result<ClassObje
     }
 }
 
-/// `Class.getResource`/`getResourceAsStream`: no resource model until M4.
-fn class_null_resource(
-    _shared: &Shared,
+/// The loader and resolved resource name behind `Class.getResource`/`getResourceAsStream`.
+///
+/// An absolute name (`/x`) is relative to the loader's root; a relative name is resolved
+/// against the class's package. A bootstrap, primitive or array class has an empty package
+/// and the bootstrap loader, whose source is the class library.
+fn class_resource_target(
+    shared: &Shared,
+    receiver: ObjRef,
+    args: &[Value],
+    method: &str,
+) -> Result<(LoaderId, String), VmError> {
+    let name = match args.first().copied() {
+        Some(Value::Ref(reference)) if !reference.is_null() => {
+            let heap = shared.heap();
+            heap.string(reference).map_err(heap_error)?.to_owned()
+        }
+        _ => {
+            return Err(VmError::Native(format!(
+                "{method} expects a non-null String argument"
+            )));
+        }
+    };
+    let (loader, binary_name) = match class_object_of(shared, receiver)? {
+        ClassObject::Named(class) => {
+            let entry = shared
+                .entry(class)
+                .ok_or_else(|| VmError::Loader(format!("class id {} is not loaded", class.0)))?;
+            (entry.loader, entry.name.clone())
+        }
+        ClassObject::Primitive(_) | ClassObject::Array(_) => (LoaderId::BOOTSTRAP, String::new()),
+    };
+    let resolved = if let Some(absolute) = name.strip_prefix('/') {
+        absolute.to_owned()
+    } else {
+        match binary_name.rfind('/') {
+            Some(index) => format!("{}/{}", &binary_name[..index], name),
+            None => name,
+        }
+    };
+    Ok((loader, resolved))
+}
+
+/// `Class.getResource(String)`: the first URL from the defining loader, or null.
+fn class_get_resource(
+    shared: &Shared,
     _thread: &ThreadState,
     _loader: LoaderId,
-    _receiver: ObjRef,
-    _args: &[Value],
+    receiver: ObjRef,
+    args: &[Value],
 ) -> Result<Option<Value>, VmError> {
-    Ok(Some(Value::Ref(ObjRef::NULL)))
+    let (loader, name) = class_resource_target(shared, receiver, args, "Class.getResource")?;
+    match shared.resource_urls(loader, &name)?.first() {
+        Some(url) => Ok(Some(Value::Ref(crate::resources::url_object(shared, url)?))),
+        None => Ok(Some(Value::Ref(ObjRef::NULL))),
+    }
+}
+
+/// `Class.getResourceAsStream(String)`: a stream over the first bytes, or null.
+fn class_get_resource_as_stream(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let (loader, name) =
+        class_resource_target(shared, receiver, args, "Class.getResourceAsStream")?;
+    match shared.read_resource(loader, &name)? {
+        Some(bytes) => Ok(Some(Value::Ref(crate::resources::stream_object(
+            shared, bytes,
+        )?))),
+        None => Ok(Some(Value::Ref(ObjRef::NULL))),
+    }
 }
 
 /// A reflected member's identity hash: the same tuple `equals` compares.

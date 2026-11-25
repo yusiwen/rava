@@ -102,6 +102,14 @@ pub fn register_natives(shared: &Shared) {
         "(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/Object;",
         properties_set,
     );
+    // `SpringFactoriesLoader` now finds `META-INF/spring.factories` through the M4.1
+    // resource lookup, so the properties parser it uses must exist.
+    shared.register_native(
+        PROPERTIES_CLASS,
+        "load",
+        "(Ljava/io/InputStream;)V",
+        properties_load,
+    );
     // `LinkedHashMap` inherits the `HashMap` surface, so the `HashMap` entries serve it
     // through the ordinary superclass walk; only its constructors are distinct.
     shared.register_native(LINKED_HASH_MAP_CLASS, "<init>", "()V", map_init);
@@ -964,6 +972,168 @@ fn entry_set_value(
     Ok(Some(previous))
 }
 
+fn properties_load(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let stream = reference_argument(args, 0, "Properties.load")?;
+    let bytes = crate::resources::read_stream_to_end(shared, stream)?;
+    let text = String::from_utf8_lossy(&bytes);
+    let parsed = parse_properties(&text);
+    let incoming: Vec<(ObjRef, ObjRef)> = parsed
+        .iter()
+        .map(|(key, value)| (shared.intern_string(key), shared.intern_string(value)))
+        .collect();
+    let positions: Vec<Option<usize>> = {
+        let heap = shared.heap();
+        let existing = entries(&heap, receiver, "Properties.load")?;
+        incoming
+            .iter()
+            .map(|(key, _)| find_key(&heap, existing, Value::Ref(*key)).map_err(heap_error))
+            .collect::<Result<Vec<_>, _>>()?
+    };
+    let mut heap = shared.heap();
+    let entries = entries_mut(&mut heap, receiver)?;
+    for ((key, value), position) in incoming.into_iter().zip(positions) {
+        match position {
+            Some(position) => entries[position].1 = Value::Ref(value),
+            None => entries.push((Value::Ref(key), Value::Ref(value))),
+        }
+    }
+    Ok(None)
+}
+
+/// Parse the subset of `java.util.Properties` text this VM needs.
+///
+/// The format is line based, with `#`/`!` comments, `\` continuation and the usual
+/// `=`/`:`/whitespace key separator. Escapes in keys and values are decoded; `\uXXXX`
+/// is accepted. The loader has no charset table, so non-ASCII text is read as UTF-8.
+fn parse_properties(text: &str) -> Vec<(String, String)> {
+    let mut logical_lines: Vec<String> = Vec::new();
+    let mut pending = String::new();
+    for physical in text.lines() {
+        let physical = physical.strip_suffix('\r').unwrap_or(physical);
+        if pending.is_empty() && (physical.trim().is_empty() || is_properties_comment(physical)) {
+            continue;
+        }
+        let continued = ends_with_continuation(physical);
+        let fragment = if continued {
+            &physical[..physical.len() - 1]
+        } else {
+            physical
+        };
+        pending.push_str(fragment.trim_start());
+        if !continued {
+            logical_lines.push(std::mem::take(&mut pending));
+        }
+    }
+    if !pending.is_empty() {
+        logical_lines.push(pending);
+    }
+
+    let mut entries: Vec<(String, String)> = Vec::new();
+    for line in logical_lines {
+        let (raw_key, raw_value) = split_property(&line);
+        let key = unescape_property(raw_key);
+        let value = unescape_property(raw_value.trim_start());
+        if let Some(existing) = entries.iter_mut().find(|(candidate, _)| *candidate == key) {
+            existing.1 = value;
+        } else {
+            entries.push((key, value));
+        }
+    }
+    entries
+}
+
+fn is_properties_comment(line: &str) -> bool {
+    let trimmed = line.trim_start();
+    trimmed.starts_with('#') || trimmed.starts_with('!')
+}
+
+fn ends_with_continuation(line: &str) -> bool {
+    let mut backslashes = 0;
+    for character in line.chars().rev() {
+        if character == '\\' {
+            backslashes += 1;
+        } else {
+            break;
+        }
+    }
+    backslashes % 2 == 1
+}
+
+/// Split one logical properties line into its key and value.
+///
+/// The first unescaped `=`, `:`, or whitespace ends the key. The value starts after any
+/// whitespace and after the optional `=`/`:` separator, so `a=b`, `a: b` and `a b` all
+/// produce `("a", "b")`.
+fn split_property(line: &str) -> (&str, &str) {
+    let mut escaped = false;
+    let mut separator = None;
+    for (index, character) in line.char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        match character {
+            '\\' => escaped = true,
+            '=' | ':' | ' ' | '\t' | '\u{c}' => {
+                separator = Some(index);
+                break;
+            }
+            _ => {}
+        }
+    }
+    let Some(index) = separator else {
+        return (line, "");
+    };
+    let rest = line[index..].trim_start_matches([' ', '\t', '\u{c}']);
+    let rest = rest
+        .strip_prefix('=')
+        .or_else(|| rest.strip_prefix(':'))
+        .unwrap_or(rest);
+    (
+        &line[..index],
+        rest.trim_start_matches([' ', '\t', '\u{c}']),
+    )
+}
+
+fn unescape_property(text: &str) -> String {
+    let mut decoded = String::with_capacity(text.len());
+    let mut characters = text.chars();
+    while let Some(character) = characters.next() {
+        if character != '\\' {
+            decoded.push(character);
+            continue;
+        }
+        match characters.next() {
+            Some('t') => decoded.push('\t'),
+            Some('n') => decoded.push('\n'),
+            Some('r') => decoded.push('\r'),
+            Some('f') => decoded.push('\u{c}'),
+            Some('u') => {
+                let mut hex = String::new();
+                for _ in 0..4 {
+                    if let Some(digit) = characters.next() {
+                        hex.push(digit);
+                    }
+                }
+                if let Ok(code) = u32::from_str_radix(&hex, 16) {
+                    if let Some(character) = char::from_u32(code) {
+                        decoded.push(character);
+                    }
+                }
+            }
+            Some(other) => decoded.push(other),
+            None => decoded.push('\\'),
+        }
+    }
+    decoded
+}
+
 fn properties_get(
     shared: &Shared,
     _thread: &ThreadState,
@@ -1026,5 +1196,58 @@ fn properties_set(
                 .push((Value::Ref(key), Value::Ref(value)));
             Ok(Some(Value::Ref(ObjRef::NULL)))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_properties;
+
+    fn entries(text: &str) -> Vec<(String, String)> {
+        parse_properties(text)
+    }
+
+    #[test]
+    fn properties_separator_forms_all_produce_a_value_without_the_separator() {
+        let parsed = entries("a=b\nc: d\ne f\n");
+        assert_eq!(
+            parsed,
+            vec![
+                ("a".to_owned(), "b".to_owned()),
+                ("c".to_owned(), "d".to_owned()),
+                ("e".to_owned(), "f".to_owned()),
+            ]
+        );
+    }
+
+    #[test]
+    fn properties_skip_whitespace_around_the_separator() {
+        let parsed = entries("a = b\nc\t:\td\ne  value\n");
+        assert_eq!(
+            parsed,
+            vec![
+                ("a".to_owned(), "b".to_owned()),
+                ("c".to_owned(), "d".to_owned()),
+                ("e".to_owned(), "value".to_owned()),
+            ]
+        );
+    }
+
+    #[test]
+    fn properties_comments_and_continuations_are_handled() {
+        let parsed = entries("# comment\n! bang\ng=one\\\ntwo\nh = first \\\n second\n");
+        assert_eq!(
+            parsed,
+            vec![
+                ("g".to_owned(), "onetwo".to_owned()),
+                ("h".to_owned(), "first second".to_owned()),
+            ]
+        );
+    }
+
+    #[test]
+    fn properties_escaped_separator_stays_in_the_key() {
+        let parsed = entries("d\\=e=f\n");
+        assert_eq!(parsed, vec![("d=e".to_owned(), "f".to_owned())]);
     }
 }

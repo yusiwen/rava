@@ -1809,7 +1809,7 @@ fn set_iterator(
         let heap = shared.heap();
         set_elements(&heap, receiver, "Set.iterator")?.to_vec()
     };
-    let iterator = new_iterator(shared, items)?;
+    let iterator = new_iterator(shared, items, receiver)?;
     Ok(Some(Value::Ref(iterator)))
 }
 
@@ -1871,14 +1871,16 @@ fn list_iterator(
         }
         heap.list(receiver).map_err(heap_error)?.to_vec()
     };
-    let iterator = new_iterator(shared, items)?;
+    let iterator = new_iterator(shared, items, receiver)?;
     Ok(Some(Value::Ref(iterator)))
 }
 
-/// Allocate an iterator over `items` with the `java.util.Iterator` identity.
-fn new_iterator(shared: &Shared, items: Vec<Value>) -> Result<ObjRef, VmError> {
+/// Allocate an iterator over `items`, remembering `source` for `Iterator.remove`.
+fn new_iterator(shared: &Shared, items: Vec<Value>, source: ObjRef) -> Result<ObjRef, VmError> {
     let class = shared.load_library_class(ITERATOR_CLASS)?;
-    Ok(shared.heap().allocate_iterator(class, items))
+    Ok(shared
+        .heap()
+        .allocate_iterator_with_source(class, items, source))
 }
 
 /// The elements of a collection argument, which may be a list or a set.
@@ -1987,17 +1989,93 @@ fn iterator_next(
     Ok(Some(value))
 }
 
-/// `Iterator.remove()`: not modelled, because the iterator holds a snapshot.
+/// `Iterator.remove()`: remove the last element returned from its list or set source.
+///
+/// The iterator is still a snapshot, so the last-returned value is resolved by position in
+/// the snapshot and then removed from both the source and the snapshot. A stream iterator
+/// (or the empty iterator) has no mutable source and reports a typed error.
 fn iterator_remove(
-    _shared: &Shared,
+    shared: &Shared,
     _thread: &ThreadState,
     _loader: LoaderId,
-    _receiver: ObjRef,
+    receiver: ObjRef,
     _args: &[Value],
 ) -> Result<Option<Value>, VmError> {
-    Err(VmError::Native(
-        "Iterator.remove is not implemented: iterators iterate over a snapshot".to_owned(),
-    ))
+    let (value, source, index) = {
+        let heap = shared.heap();
+        let iterator = match heap.get(receiver).map_err(heap_error)? {
+            HeapObject::Iterator(iterator) => iterator,
+            _ => {
+                return Err(VmError::Native(format!("{receiver} is not a vm iterator")));
+            }
+        };
+        if iterator.position == 0 {
+            return Err(VmError::Native(
+                "Iterator.remove called before next()".to_owned(),
+            ));
+        }
+        let index = iterator.position - 1;
+        let value = *iterator
+            .items
+            .get(index)
+            .ok_or_else(|| VmError::Native("iterator snapshot is inconsistent".to_owned()))?;
+        (value, iterator.source, index)
+    };
+    if source.is_null() {
+        return Err(VmError::Native(
+            "Iterator.remove is not supported by this iterator".to_owned(),
+        ));
+    }
+    let mut heap = shared.heap();
+    match heap.get(source).map_err(heap_error)? {
+        HeapObject::List(list) => {
+            // The snapshot index is the list index unless the list changed after the
+            // iterator was created; falling back to equality keeps the common case exact.
+            let matches = list
+                .elements
+                .get(index)
+                .is_some_and(|candidate| values_equal(&heap, *candidate, value).unwrap_or(false));
+            let index = if matches {
+                index
+            } else {
+                let mut found = None;
+                for (position, candidate) in list.elements.iter().enumerate() {
+                    if values_equal(&heap, *candidate, value).unwrap_or(false) {
+                        found = Some(position);
+                        break;
+                    }
+                }
+                found.ok_or_else(|| {
+                    VmError::Native("Iterator.remove value is no longer in the list".to_owned())
+                })?
+            };
+            heap.list_mut(source).map_err(heap_error)?.remove(index);
+        }
+        HeapObject::Set(set) => {
+            let mut found = None;
+            for (position, candidate) in set.elements.iter().enumerate() {
+                if values_equal(&heap, *candidate, value).unwrap_or(false) {
+                    found = Some(position);
+                    break;
+                }
+            }
+            let index = found.ok_or_else(|| {
+                VmError::Native("Iterator.remove value is no longer in the set".to_owned())
+            })?;
+            heap.set_mut(source).map_err(heap_error)?.remove(index);
+        }
+        _ => {
+            return Err(VmError::Native(
+                "Iterator.remove source is not a list or set".to_owned(),
+            ));
+        }
+    }
+    let iterator = heap.iterator_mut(receiver).map_err(heap_error)?;
+    if index < iterator.position {
+        iterator.items.remove(index);
+        iterator.position -= 1;
+    }
+    Ok(None)
 }
 
 /// Install `Collections.EMPTY_SET`, `EMPTY_LIST` and `EMPTY_MAP`.
@@ -2809,7 +2887,7 @@ fn abstract_collection_iterator(
     let items = match any_collection(shared, receiver, "Collection.iterator")? {
         AnyCollection::List(values) | AnyCollection::Set(values) => values,
     };
-    let iterator = new_iterator(shared, items)?;
+    let iterator = new_iterator(shared, items, receiver)?;
     Ok(Some(Value::Ref(iterator)))
 }
 

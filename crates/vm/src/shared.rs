@@ -55,6 +55,8 @@ pub enum SharedLock {
     /// The `Unsafe` U0 call log. A native appends one entry per call and releases the
     /// lock before returning, so it is never held across a Java call.
     UnsafeCalls,
+    /// The URL, URL-connection and input-stream side table (M4.1).
+    Resources,
 }
 
 impl fmt::Display for SharedLock {
@@ -76,6 +78,7 @@ impl fmt::Display for SharedLock {
             Self::Stdout => write!(f, "stdout"),
             Self::Stderr => write!(f, "stderr"),
             Self::UnsafeCalls => write!(f, "Unsafe call log"),
+            Self::Resources => write!(f, "resource side table"),
         }
     }
 }
@@ -177,6 +180,12 @@ pub struct Shared {
     accessible: Mutex<HashSet<ObjRef>>,
     /// The detail message of each throwable a constructor created.
     throwable_messages: Mutex<HashMap<ObjRef, String>>,
+    /// The Rust text and bytes attached to the `java.net.URL`, `java.net.URLConnection`
+    /// and `java.io.InputStream` objects this VM allocates. The data is not a Java
+    /// reference, so it is a side table keyed by [`ObjRef`] rather than a new
+    /// [`HeapObject`] variant. [`Shared::roots`] reports the keys, so the attachment is
+    /// a strong owner until a collector defines its lifetime.
+    resources: Mutex<crate::resources::ResourceState>,
     hooks: Hooks,
 }
 
@@ -240,6 +249,7 @@ impl Shared {
             object_loaders: Mutex::new(HashMap::new()),
             accessible: Mutex::new(HashSet::new()),
             throwable_messages: Mutex::new(HashMap::new()),
+            resources: Mutex::new(crate::resources::ResourceState::default()),
             hooks: Hooks::default(),
         }
     }
@@ -1490,6 +1500,36 @@ impl Shared {
         self.heap.lock().expect("heap lock poisoned")
     }
 
+    /// Lock the resource side table for a short, scoped operation.
+    ///
+    /// The guard must be released before a Java call or an allocation that loads a class;
+    /// every native in [`crate::resources`] does that.
+    pub(crate) fn resource_state(&self) -> MutexGuard<'_, crate::resources::ResourceState> {
+        self.resources
+            .lock()
+            .expect("resource side-table lock poisoned")
+    }
+
+    /// Every URL for a resource, parent-first through the loader chain.
+    ///
+    /// The bootstrap source is consulted first, then the application or child loader; the
+    /// order inside one source is the source's own classpath order. A child loader with an
+    /// empty source contributes nothing, which is the Java delegation contract.
+    pub fn resource_urls(&self, loader: LoaderId, name: &str) -> Result<Vec<String>, VmError> {
+        self.classes
+            .read()
+            .expect("class table lock poisoned")
+            .resource_urls(loader, name)
+    }
+
+    /// The bytes of the first resource, parent-first, or `None` when no source has it.
+    pub fn read_resource(&self, loader: LoaderId, name: &str) -> Result<Option<Vec<u8>>, VmError> {
+        self.classes
+            .read()
+            .expect("class table lock poisoned")
+            .read_resource(loader, name)
+    }
+
     pub fn thread_state(&self, id: u64) -> ThreadState {
         ThreadState::new(id)
     }
@@ -1621,6 +1661,20 @@ impl Shared {
         }
 
         {
+            // A URL, connection or input stream owns Rust text/bytes in the side table;
+            // reporting the keys here keeps that attachment a strong owner until M5.
+            let resources = self
+                .resources
+                .lock()
+                .expect("resource side-table lock poisoned");
+            for reference in resources.references() {
+                if seen.insert(reference) {
+                    roots.push(reference);
+                }
+            }
+        }
+
+        {
             let loader_objects = self
                 .loader_objects
                 .lock()
@@ -1698,6 +1752,9 @@ impl Shared {
                     HeapObject::Iterator(iterator) => {
                         for value in &iterator.items {
                             push_container_root(&mut roots, &mut seen, *value);
+                        }
+                        if !iterator.source.is_null() && seen.insert(iterator.source) {
+                            roots.push(iterator.source);
                         }
                     }
                     HeapObject::MapEntry(entry) => {
@@ -1863,6 +1920,11 @@ impl Shared {
         {
             let _guard = self.unsafe_calls.try_lock().map_err(|_| LockHeld {
                 lock: SharedLock::UnsafeCalls,
+            })?;
+        }
+        {
+            let _guard = self.resources.try_lock().map_err(|_| LockHeld {
+                lock: SharedLock::Resources,
             })?;
         }
         Ok(())
