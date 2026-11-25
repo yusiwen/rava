@@ -279,6 +279,12 @@ pub fn register_natives(shared: &Shared) {
     );
     shared.register_native(
         "java/lang/Class",
+        "getFields",
+        "()[Ljava/lang/reflect/Field;",
+        class_get_fields,
+    );
+    shared.register_native(
+        "java/lang/Class",
         "getDeclaredConstructors",
         "()[Ljava/lang/reflect/Constructor;",
         class_get_declared_constructors,
@@ -1474,6 +1480,107 @@ fn interface_classes(shared: &Shared, class: ClassId) -> Result<Vec<ClassId>, Vm
         }
     }
     Ok(interfaces)
+}
+
+/// `Class.getFields()`: the public fields of the class, its superinterfaces and its
+/// superclasses, in the JDK's order and with each declaration counted once.
+///
+/// The order is the JDK's `privateGetPublicFields`: this class's declared public fields
+/// in class-file order, then each direct superinterface recursively in declaration
+/// order, then the superclass recursively. Deduplication is by `(declaring class, name,
+/// descriptor)`, which is `Field.equals`: a subclass field that hides a superclass field
+/// is a different declaration and both are returned, while one interface declaration
+/// reached twice through a diamond is returned once.
+///
+/// This is the JDK's query, not [`class_get_declared_fields`]. Spring's bean and AOP
+/// introspection ask for the inherited public field view. A primitive or array class has
+/// no class file and reports an empty array. The committed C1 tree is a subset of the
+/// JDK, so an omitted superclass or superinterface ends that branch instead of failing
+/// the query; that tolerance is documented in `docs/explanation/c1-metadata.md`.
+fn class_get_fields(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    _args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let objects = match class_object_of(shared, receiver)? {
+        ClassObject::Named(class) => public_field_objects(shared, class)?,
+        ClassObject::Primitive(_) | ClassObject::Array(_) => Vec::new(),
+    };
+    let component = shared.load_library_class(MemberKind::Field.class_name())?;
+    let array = allocate_reference_array(shared, ClassRef::Named(component), &objects)?;
+    Ok(Some(Value::Ref(array)))
+}
+
+/// The public fields [`class_get_fields`] returns, in JDK order.
+fn public_field_objects(shared: &Shared, class: ClassId) -> Result<Vec<ObjRef>, VmError> {
+    let mut visited = HashSet::new();
+    let mut seen: HashSet<(ClassId, String, String)> = HashSet::new();
+    let mut objects = Vec::new();
+    collect_public_fields(shared, class, &mut visited, &mut seen, &mut objects)?;
+    Ok(objects)
+}
+
+/// Append `class`'s public fields, then its superinterfaces', then its superclass'.
+///
+/// `visited` bounds the walk to one visit per class, so a repeated interface (a diamond)
+/// cannot recurse twice and a malformed cyclic interface graph cannot loop. `seen` is the
+/// JDK's `Field.equals` identity, which keeps declarations from different classes apart.
+fn collect_public_fields(
+    shared: &Shared,
+    class: ClassId,
+    visited: &mut HashSet<ClassId>,
+    seen: &mut HashSet<(ClassId, String, String)>,
+    objects: &mut Vec<ObjRef>,
+) -> Result<(), VmError> {
+    if !visited.insert(class) {
+        return Ok(());
+    }
+    let entry = shared
+        .entry(class)
+        .ok_or_else(|| VmError::Loader(format!("class id {} is not loaded", class.0)))?;
+    let metadata = entry.metadata()?;
+    let is_interface = metadata.is_interface();
+    let loader = entry.loader;
+    for field in &metadata.fields {
+        if field.access_flags & ACC_PUBLIC == 0 {
+            continue;
+        }
+        let key = (class, field.name.clone(), field.descriptor.clone());
+        if !seen.insert(key) {
+            continue;
+        }
+        objects.push(shared.reflect_member(
+            class,
+            MemberKind::Field,
+            &field.name,
+            &field.descriptor,
+        )?);
+    }
+    for interface_name in &metadata.interfaces {
+        match shared.load_class(loader, interface_name) {
+            Ok(interface) => collect_public_fields(shared, interface, visited, seen, objects)?,
+            // The C1 tree omits some transitive interfaces; they contribute no fields.
+            Err(VmError::ClassNotFound { .. }) => {}
+            Err(error) => return Err(error),
+        }
+    }
+    // An interface's class file names `Object` as its superclass, but the JDK inherits no
+    // class fields into an interface.
+    if !is_interface {
+        match shared.resolution_superclass(class) {
+            Ok(Some(super_class)) => {
+                collect_public_fields(shared, super_class, visited, seen, objects)?
+            }
+            Ok(None) => {}
+            // The C1 tree omits some superclasses; the branch ends here instead of
+            // failing the query.
+            Err(VmError::ClassNotFound { .. }) => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
 }
 
 fn class_get_declared_constructors(

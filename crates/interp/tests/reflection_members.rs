@@ -1404,29 +1404,42 @@ fn primitive_and_array_descriptors_are_class_objects() {
 }
 
 #[test]
-fn inherited_member_array_queries_cover_methods_and_constructors() {
+fn inherited_member_array_queries_cover_fields_methods_and_constructors() {
     let fixture = fixture();
     let class_class = fixture
         .shared
         .load_library_class("java/lang/Class")
         .unwrap();
 
-    // M3.7 added `getMethods` and `getConstructors`; `getFields` is still absent and
-    // reaches the abstract C1 stub.
-    let result = run_instance_method(
-        &fixture.shared,
-        &fixture.thread,
-        class_class,
-        "getFields",
-        "()[Ljava/lang/reflect/Field;",
-        fixture.string_object,
-        Vec::new(),
+    // Issue #53 added `getFields`. `String` declares one public field
+    // (`CASE_INSENSITIVE_ORDER`) and inherits no public fields from `Object` or its
+    // interfaces, so the array is exactly that declaration.
+    let array = ref_value(
+        run_instance_method(
+            &fixture.shared,
+            &fixture.thread,
+            class_class,
+            "getFields",
+            "()[Ljava/lang/reflect/Field;",
+            fixture.string_object,
+            Vec::new(),
+        )
+        .unwrap(),
     );
-    let unsupported = matches!(
-        &result,
-        Err(InterpError::NativeOrAbstract { name, .. }) if name == "getFields"
-    );
-    assert!(unsupported, "getFields: {result:?}");
+    let elements = {
+        let heap = fixture.shared.heap();
+        let array = heap.array(array).expect("a real reference array");
+        assert_eq!(array.kind, ArrayKind::Reference);
+        array.elements.clone()
+    };
+    assert_eq!(elements.len(), 1, "String declares one public field");
+    let Value::Ref(reference) = elements[0] else {
+        panic!("a fields array holds references, found {:?}", elements[0]);
+    };
+    let member = fixture.shared.heap().reflect(reference).unwrap().clone();
+    assert_eq!(member.kind, MemberKind::Field);
+    assert_eq!(member.name, "CASE_INSENSITIVE_ORDER");
+    assert_eq!(member.class, fixture.string_class);
 
     // `getMethods` returns public methods of the class and its superclasses, so a
     // method `String` declares (`charAt`) and one it inherits (`Object.getClass`) both
