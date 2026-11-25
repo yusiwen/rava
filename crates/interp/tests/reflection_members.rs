@@ -1404,36 +1404,117 @@ fn primitive_and_array_descriptors_are_class_objects() {
 }
 
 #[test]
-fn inherited_member_array_queries_are_typed_unsupported() {
+fn inherited_member_array_queries_cover_methods_and_constructors() {
     let fixture = fixture();
     let class_class = fixture
         .shared
         .load_library_class("java/lang/Class")
         .unwrap();
 
-    // M2.14 added the named lookups (`getField`, `getMethod`, `getConstructor`); the
-    // array-valued inherited queries are still absent and reach the abstract C1 stub.
-    for (name, descriptor) in [
-        ("getFields", "()[Ljava/lang/reflect/Field;"),
-        ("getMethods", "()[Ljava/lang/reflect/Method;"),
-        ("getConstructors", "()[Ljava/lang/reflect/Constructor;"),
-    ] {
-        let result = run_instance_method(
+    // M3.7 added `getMethods` and `getConstructors`; `getFields` is still absent and
+    // reaches the abstract C1 stub.
+    let result = run_instance_method(
+        &fixture.shared,
+        &fixture.thread,
+        class_class,
+        "getFields",
+        "()[Ljava/lang/reflect/Field;",
+        fixture.string_object,
+        Vec::new(),
+    );
+    let unsupported = matches!(
+        &result,
+        Err(InterpError::NativeOrAbstract { name, .. }) if name == "getFields"
+    );
+    assert!(unsupported, "getFields: {result:?}");
+
+    // `getMethods` returns public methods of the class and its superclasses, so a
+    // method `String` declares (`charAt`) and one it inherits (`Object.getClass`) both
+    // appear, each as a `Method` member of the class that declares it.
+    let array = ref_value(
+        run_instance_method(
             &fixture.shared,
             &fixture.thread,
             class_class,
-            name,
-            descriptor,
+            "getMethods",
+            "()[Ljava/lang/reflect/Method;",
             fixture.string_object,
             Vec::new(),
+        )
+        .unwrap(),
+    );
+    let elements = {
+        let heap = fixture.shared.heap();
+        let array = heap.array(array).expect("a real reference array");
+        assert_eq!(array.kind, ArrayKind::Reference);
+        array.elements.clone()
+    };
+    assert!(!elements.is_empty(), "String has public methods");
+    let mut names = Vec::new();
+    let mut object_method = false;
+    for value in &elements {
+        let Value::Ref(reference) = value else {
+            panic!("a methods array holds references, found {value:?}");
+        };
+        let member = fixture.shared.heap().reflect(*reference).unwrap().clone();
+        assert_eq!(member.kind, MemberKind::Method);
+        if member.name == "getClass" {
+            object_method = true;
+            assert_eq!(
+                fixture
+                    .shared
+                    .entry(member.class)
+                    .map(|entry| entry.name.clone()),
+                Some("java/lang/Object".to_owned()),
+                "the inherited Method is declared on the class that declares it"
+            );
+        }
+        names.push(member.name);
+    }
+    assert!(
+        names.iter().any(|name| name == "charAt"),
+        "String declares charAt: {names:?}"
+    );
+    assert!(object_method, "Object.getClass is inherited: {names:?}");
+
+    // `getConstructors` is `getDeclaredConstructors` restricted to public members.
+    let array = ref_value(
+        run_instance_method(
+            &fixture.shared,
+            &fixture.thread,
+            class_class,
+            "getConstructors",
+            "()[Ljava/lang/reflect/Constructor;",
+            fixture.string_object,
+            Vec::new(),
+        )
+        .unwrap(),
+    );
+    let elements = {
+        let heap = fixture.shared.heap();
+        let array = heap.array(array).expect("a real reference array");
+        assert_eq!(array.kind, ArrayKind::Reference);
+        array.elements.clone()
+    };
+    for value in &elements {
+        let Value::Ref(reference) = value else {
+            panic!("a constructors array holds references, found {value:?}");
+        };
+        let member = fixture.shared.heap().reflect(*reference).unwrap().clone();
+        assert_eq!(member.kind, MemberKind::Constructor);
+        let metadata = fixture
+            .shared
+            .entry(member.class)
+            .unwrap()
+            .metadata()
+            .unwrap();
+        let method = metadata
+            .method(&member.name, &member.descriptor)
+            .expect("the constructor has metadata");
+        assert_ne!(
+            method.access_flags & 0x0001,
+            0,
+            "getConstructors is public-only"
         );
-        let unsupported = matches!(
-            &result,
-            Err(InterpError::NativeOrAbstract {
-                name: found_name,
-                ..
-            }) if found_name.as_str() == name
-        );
-        assert!(unsupported, "{name}: {result:?}");
     }
 }

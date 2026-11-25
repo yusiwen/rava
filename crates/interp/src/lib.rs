@@ -1126,6 +1126,9 @@ fn invoke_instance(
     run_instance_method(shared, thread, entry.id, name, descriptor, receiver, args)
 }
 
+/// `ACC_INTERFACE` (JVMS §4.1): an interface has no superclass to walk for fields.
+const ACC_INTERFACE: u16 = 0x0200;
+
 /// Resolve a `getstatic`/`putstatic` owner to the class that declares the field.
 ///
 /// Both opcodes share the field-resolution walk; a field that resolves to an instance
@@ -1176,29 +1179,10 @@ fn resolve_field(
     name: &str,
     descriptor: &str,
 ) -> Result<(ClassId, bool), InterpError> {
-    let mut target = resolve_from(shared, current, owner)?;
+    let target = resolve_from(shared, current, owner)?;
     let mut mismatch: Option<(String, String)> = None;
-    loop {
-        let entry = shared
-            .entry(target)
-            .ok_or_else(|| InterpError::Decode("field owner vanished".to_owned()))?;
-        for field in &entry.file.fields {
-            let field_name = entry.file.field_name(field)?;
-            if field_name != name {
-                continue;
-            }
-            let field_descriptor = entry.file.field_descriptor(field)?;
-            if field_descriptor == descriptor {
-                return Ok((target, field.access_flags & ACC_STATIC != 0));
-            }
-            if mismatch.is_none() {
-                mismatch = Some((entry.name.clone(), field_descriptor.to_owned()));
-            }
-        }
-        let Some(super_class) = shared.resolution_superclass(target)? else {
-            break;
-        };
-        target = super_class;
+    if let Some(found) = find_field(shared, target, name, descriptor, &mut mismatch)? {
+        return Ok(found);
     }
     match mismatch {
         Some((class, found)) => Err(InterpError::FieldDescriptorMismatch {
@@ -1211,6 +1195,72 @@ fn resolve_field(
             name: name.to_owned(),
             descriptor: descriptor.to_owned(),
         }),
+    }
+}
+
+/// Search one class and then its hierarchy in JVMS §5.4.3.2 order: the class's own
+/// fields, its superinterfaces (recursively), then its superclass.
+///
+/// The superinterface step is what resolves a constant a class inherits from an
+/// interface it implements, such as `Advisor.EMPTY_ADVICE` reached through
+/// `StaticMethodMatcherPointcutAdvisor`: the `getstatic` names the subclass, the field is
+/// declared on the interface. An interface's class file names `Object` as its superclass,
+/// but interface fields are not inherited from `Object`, so an interface ends the walk.
+fn find_field(
+    shared: &Shared,
+    class: ClassId,
+    name: &str,
+    descriptor: &str,
+    mismatch: &mut Option<(String, String)>,
+) -> Result<Option<(ClassId, bool)>, InterpError> {
+    let (loader, is_interface, interfaces) = {
+        let entry = shared
+            .entry(class)
+            .ok_or_else(|| InterpError::Decode("field owner vanished".to_owned()))?;
+        for field in &entry.file.fields {
+            let field_name = entry.file.field_name(field)?;
+            if field_name != name {
+                continue;
+            }
+            let field_descriptor = entry.file.field_descriptor(field)?;
+            if field_descriptor == descriptor {
+                return Ok(Some((class, field.access_flags & ACC_STATIC != 0)));
+            }
+            if mismatch.is_none() {
+                *mismatch = Some((entry.name.clone(), field_descriptor.to_owned()));
+            }
+        }
+        (
+            entry.loader,
+            entry.file.access_flags & ACC_INTERFACE != 0,
+            entry
+                .file
+                .interface_names()?
+                .into_iter()
+                .map(str::to_owned)
+                .collect::<Vec<_>>(),
+        )
+    };
+    for interface_name in &interfaces {
+        match shared.load_class(loader, interface_name) {
+            Ok(interface) => {
+                if let Some(found) = find_field(shared, interface, name, descriptor, mismatch)? {
+                    return Ok(Some(found));
+                }
+            }
+            // The C1 tree omits a few transitive interfaces; they cannot declare a
+            // field the VM shipped, so they contribute nothing to the walk.
+            Err(VmError::ClassNotFound { .. }) => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    if is_interface {
+        return Ok(None);
+    }
+    match shared.resolution_superclass(class) {
+        Ok(Some(super_class)) => find_field(shared, super_class, name, descriptor, mismatch),
+        Ok(None) => Ok(None),
+        Err(error) => Err(error.into()),
     }
 }
 
@@ -1507,7 +1557,7 @@ fn execute_numeric(frame: &mut Frame, instruction: &Instr) -> Result<(), InterpE
             let value = int(frame.pop()?)?;
             frame.push(Value::Int(value.wrapping_neg()))?;
         }
-        LAdd | LSub | LMul | LDiv | LRem | LAnd | LOr | LXor | LShl | LShr | LUShr => {
+        LAdd | LSub | LMul | LDiv | LRem | LAnd | LOr | LXor => {
             let right = long(frame.pop()?)?;
             let left = long(frame.pop()?)?;
             let result = match instruction {
@@ -1523,6 +1573,17 @@ fn execute_numeric(frame: &mut Frame, instruction: &Instr) -> Result<(), InterpE
                 LAnd => left & right,
                 LOr => left | right,
                 LXor => left ^ right,
+                _ => unreachable!(),
+            };
+            frame.push(Value::Long(result))?;
+        }
+        // JVMS §6.5.lshl: the shift distance is an `int`, not a `long`; only the value
+        // being shifted is category 2. ASM's frame computation shifts a packed long by a
+        // small int constant, so treating both operands as `long` fails it.
+        LShl | LShr | LUShr => {
+            let right = int(frame.pop()?)?;
+            let left = long(frame.pop()?)?;
+            let result = match instruction {
                 LShl => left.wrapping_shl((right as u32) & 0x3f),
                 LShr => left.wrapping_shr((right as u32) & 0x3f),
                 LUShr => ((left as u64) >> ((right as u32) & 0x3f)) as i64,

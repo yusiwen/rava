@@ -37,6 +37,25 @@ fn add_class() -> Vec<u8> {
         Some((2, 2, twice.finish().unwrap())),
     );
 
+    // `lshl` pops a category-2 value and a category-1 distance (JVMS §6.5.lshl); the
+    // distance must be read as an `int` even though the value is a `long`. The distance
+    // is a constant here because this interpreter stores one `Value` per local slot (the
+    // PROJECT.md boundary), so a second `int` parameter of a `(JI)J` method would land
+    // in local 1 while javac emits `iload 2`.
+    for (name, distance) in [("shiftLeft40", 40u8), ("shiftLeft70", 70u8)] {
+        let mut shift_left = Assembler::new();
+        shift_left.lload(0);
+        shift_left.op(0x10, &[distance]);
+        shift_left.op(0x79, &[]);
+        shift_left.op(0xad, &[]);
+        builder.method(
+            ACC_PUBLIC_STATIC,
+            name,
+            "(J)J",
+            Some((3, 2, shift_left.finish().unwrap())),
+        );
+    }
+
     builder.build()
 }
 
@@ -65,6 +84,33 @@ fn runs_integer_arithmetic_through_a_frame() {
     .unwrap();
     assert_eq!(result, Some(Value::Int(5)));
     assert!(thread.polls() > 0, "the frame polls the safepoint");
+}
+
+#[test]
+fn shifts_a_long_by_an_int_distance() {
+    let (shared, class, thread) = fixture();
+    let shifted = run_static_method(
+        &shared,
+        &thread,
+        class,
+        "shiftLeft40",
+        "(J)J",
+        vec![Value::Long(1)],
+    )
+    .unwrap();
+    assert_eq!(shifted, Some(Value::Long(1_i64 << 40)));
+
+    // The JVM masks a long's shift distance to six bits, so 70 shifts by six.
+    let wrapped = run_static_method(
+        &shared,
+        &thread,
+        class,
+        "shiftLeft70",
+        "(J)J",
+        vec![Value::Long(1)],
+    )
+    .unwrap();
+    assert_eq!(wrapped, Some(Value::Long(1_i64 << 6)));
 }
 
 #[test]

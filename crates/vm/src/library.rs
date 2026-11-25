@@ -48,6 +48,7 @@ pub fn register_all(shared: &Shared) -> Result<(), VmError> {
     instance::register_natives(shared);
     string::register_natives(shared);
     collections::register_natives(shared);
+    collections::install_empty_constants(shared)?;
     maps::register_natives(shared);
     boxed::register_natives(shared);
     reflection::register_natives(shared);

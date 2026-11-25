@@ -5,9 +5,9 @@
 **License:** MIT
 **Started:** 2026-11-22
 
-> Ledger. P0 and P1 were accepted on 2026-11-23. M0, M1 and M2 are complete; M3
-> (C2 dynamic code: Proxy, CGLIB, Objenesis, `Lookup`, `Unsafe` U0) is in progress.
-> M3.1 defines generated classes through the verifier before insertion. M2.30
+> Ledger. P0 and P1 were accepted on 2026-11-23. M0, M1, M2 and M3 are complete; the
+> C2 gate (`RAVA_C2_ACCEPTANCE=1 cargo test -p rava-cli --test c2_gate`) exits 0 with
+> real Proxy, CGLIB, Objenesis, Spring AOP and an Unsafe U0-only call log. M2.30
 > completed the JDK's lookup-miss exceptions and the Spring rerun then reached
 > `hello\n`, so M2.23 is done and the M2 gate is claimed. Keep this file honest and
 > terse.
@@ -38,7 +38,7 @@ release process, if wanted, becomes its own phase.
 | M0 | Foundation: parser/model, loader/ClassSource, heap/IR, Shared/ThreadState, safepoints, verifier skeleton, native registry, MemoryRegion | Hello + small corpus; metadata dump; loader identity; no-lock invariant | done |
 | M1 | Surface manifest, target lock, `link-check` | Manifest reproducible; unresolved = 0 | done |
 | M2 | C1 metadata, minimal library, Spring context | Metadata diff 0; bean graph starts | done |
-| M3 | C2 dynamic code: Proxy, CGLIB, Objenesis, `Lookup`, `Unsafe` U0 | C2 suite exits 0 | in-progress |
+| M3 | C2 dynamic code: Proxy, CGLIB, Objenesis, `Lookup`, `Unsafe` U0 | C2 suite exits 0 | done |
 | M4 | C3 resources/jars, `-jar`, non-web Boot | Boot non-web application starts | todo |
 | M5 | C3 concurrency, JMM, references, cleaner, Tomcat | Tomcat concurrent; JCStress 0 | todo |
 | M6 | C4 reference web application | HTTP suite exits 0 | todo |
@@ -98,19 +98,19 @@ release process, if wanted, becomes its own phase.
 | M3.4 | `MethodHandles.Lookup`, `MethodType`/`MethodHandle`, `Lookup.defineClass` | R4 | `cargo test -p rava-cli --test c2_lookup` exits 0 | done |
 | M3.5 | `Unsafe` U0, VM-installed static reflection, direct buffers and the U0 call log | R4, R12 | `cargo test -p rava-cli --test c2_unsafe` exits 0 | done |
 | M3.6 | Unmodified Spring CGLIB enhancement and Objenesis instantiation | R4 | `RAVA_C2_ACCEPTANCE=1 cargo test -p rava-cli --test c2_cglib` exits 0 | done |
+| M3.7 | Spring AOP proxies (JDK and CGLIB) and the C2 gate | R4, R12 | `RAVA_C2_ACCEPTANCE=1 cargo test -p rava-cli --test c2_gate` exits 0 | done |
 
-P0 and P1 are accepted; P2 is done because the M2 and M3.1 increments are sliced. All
-M0, M1 and M2 slices are done, and all three gate reviews passed. M2.30 made the six
-named `Class` lookups raise the JDK's `NoSuchFieldException`/`NoSuchMethodException`, and
-the Spring acceptance then printed `hello` and exited 0, so M2.23 is done and the M2 gate
-is claimed (see the M2.23 and M2.30 boundaries). M3 is in progress: M3.1 closed the
-definition/verifier seam, M3.2 adds a real generated proxy class over the existing
-interpreter and reflection paths, and M3.3 turns the placeholder loader object into a
-real per-loader identity with `defineClass`, and M3.4 adds the `MethodHandles.Lookup`
-path CGLIB uses to define a generated class, and M3.5 makes the audited `Unsafe` U0
-surface honest and Objenesis-reachable. M3.6 runs the unmodified repackaged CGLIB/ASM
-against the pinned spring-core jar and defines its generated subclass through the M3.1
-verifier.
+P0 and P1 are accepted; P2 is done because the M0–M3 increments are sliced. All
+M0, M1, M2 and M3 slices are done, and the gate reviews passed. M2.30 made the six
+named `Class` lookups raise the JDK's `NoSuchFieldException`/`NoSuchMethodException`,
+and the Spring acceptance then printed `hello` and exited 0, so M2.23 is done and the
+M2 gate is claimed (see the M2.23 and M2.30 boundaries).
+
+M3 is complete. M3.1 closed the definition/verifier seam; M3.2 added a real generated
+proxy class; M3.3 made each loader a real identity with `defineClass`; M3.4 added the
+`MethodHandles.Lookup` path CGLIB uses; M3.5 made the audited `Unsafe` U0 surface honest
+and Objenesis-reachable; M3.6 ran the unmodified repackaged CGLIB/ASM against the pinned
+spring-core jar; and M3.7 ran Spring AOP's JDK and CGLIB proxies plus the C2 gate.
 
 ## Slice log
 
@@ -164,6 +164,7 @@ verifier.
 | M3.4 | `cargo test -p rava-cli --test c2_lookup` | 0 | 2026-11-25 | `HeapObject::{Lookup,MethodType,MethodHandle}` make the method-handle objects real heap shapes; `crates/vm/src/method_handles.rs` implements `MethodHandles.lookup`/`publicLookup`/`privateLookupIn`, the `Lookup` queries, `defineClass`, `findStatic`/`findVirtual`/`findSpecial`/`findConstructor`, `unreflect`/`unreflectConstructor`, and the `MethodType` factories/accessors, while `crates/interp/src/method_handles.rs` implements the real `(Object[])Object` `invokeExact`/`invoke`/`invokeWithArguments` natives by re-entering `run_static_method`/`run_instance_method`. `Lookup.defineClass` requires the defined class to be in the lookup class's package and defines it in that loader; parse/verify/package/duplicate failures leave no entry. The committed `fixtures/lookup` fixture and `c2_lookup` (8 tests) cover the fixture stdout, `lookup`→`privateLookupIn`→`methodType`→`findStatic`→`invokeWithArguments`, virtual dispatch, generated-class definition and duplicate rejection, the exact CGLIB reflective bootstrap (`Class.getMethod("privateLookupIn", ...)` and `Method.invoke` on `Lookup.defineClass`), package mismatch, unreflect/findSpecial/public lookup and `asType`. `cargo test --workspace` passes 458 tests; `cargo fmt --all --check` and `cargo clippy --workspace --all-targets -- -D warnings` exit 0; `RAVA_SPRING_ACCEPTANCE=1 cargo test -p rava-cli --test spring_context` still exits 0 with `hello\n`. Caller-sensitive lookup, access checks, signature-polymorphic call sites, `asType` conversions, varargs/field handles/hidden classes remain later work. |
 | M3.5 | `cargo test -p rava-cli --test c2_unsafe` | 0 | 2026-11-25 | `crates/interp/src/unsafe_natives.rs` installs the `sun.misc.Unsafe` singleton and serves U0: `getUnsafe`, `allocateInstance` (class initialization then allocation without a constructor), `invokeCleaner` (no-op), plus `jdk.internal.misc.Unsafe`'s `ensureClassInitialized`/`shouldBeInitialized`/`allocateInstance`; every served call is recorded in `Shared::unsafe_calls`, and a U1+ method still fails loudly. The C1 stubs omit private members, so `Class.getDeclaredFields`/`getDeclaredField` also expose VM-installed statics (the C1-metadata-free `theUnsafe`), `Field.get(null)`/`Field.set(null, ...)` support static fields, and the installed field reports private static final; `Class.cast` returns or throws a real `ClassCastException`. `crates/vm/src/direct_buffer.rs` serves `ByteBuffer.allocateDirect` with an ordinary `java/nio/DirectByteBuffer` shape (no address or storage) and `isDirect`, so Tomcat's `ByteBufferUtils` static initializer reaches its next blocker. The committed `fixtures/unsafe` fixture and `c2_unsafe` (7 tests) cover the singleton identity, constructor-skipping allocation and class initialization, the jdk initialization queries, direct buffers and the no-op cleaner, the U0-only call log, and the exact Objenesis reflection (`getDeclaredField("theUnsafe")` → `setAccessible(true)` → `get(null)`). A `/tmp` probe against spring-core 6.2.19 ran `ObjenesisStd` through `Unsafe.allocateInstance` and printed `value=0`, `marker=7`. `cargo test --workspace` passes 465 tests; `cargo fmt --all --check` and `cargo clippy --workspace --all-targets -- -D warnings` exit 0; `RAVA_SPRING_ACCEPTANCE=1 cargo test -p rava-cli --test spring_context` still exits 0 with `hello\n`. U1–U4, address/layout fidelity, `ReflectionFactory` and direct-buffer storage remain later work. |
 | M3.6 | `RAVA_C2_ACCEPTANCE=1 cargo test -p rava-cli --test c2_cglib` | 0 | 2026-11-25 | The unmodified repackaged CGLIB/ASM in `compat/jars/spring-core-6.2.19.jar` now generates a real `demo/CglibProbe$Bean$$EnhancerByCGLIB$$<hash>` subclass at run time, defines it through `Lookup.defineClass` in the application loader, and every generated method with `Code` passes `verify_method`; the interceptor's `intercepted:hello`, `5` and marker `true` are the captured stdout. `ObjenesisStd` takes the `Unsafe.allocateInstance` path (`value=0`, `marker=7`) and the U0 call log confirms it. A final-class rejection stays CGLIB's real `IllegalArgumentException` and defines no class. Getting there fixed the real blockers in order: `StringBuilder.append(CharSequence,int,int)`, `WeakHashMap`, `FutureTask(Callable)`, a `REF_getField` bootstrap static argument, record `ObjectMethods`/`AbstractList.hashCode`, the native-image property that made CGLIB refuse enhancement (replaced by a generated empty `SystemModuleFinder`), declared-static defaults/`ConstantValue`, `Method.getExceptionTypes`, omitted-superclass tolerance for the non-closed C1 tree, primitive `Arrays.sort`, and `BitSet` set/get. `crates/cli/tests/c2_cglib.rs` (3 tests) runs on a 64 MiB probe thread and skips only when the fetched jar is absent; the milestone command sets `RAVA_C2_ACCEPTANCE=1`, which makes a missing jar a failure. `cargo test --workspace` passes 469 tests; `cargo fmt --all --check` and `cargo clippy --workspace --all-targets -- -D warnings` exit 0; `RAVA_SPRING_ACCEPTANCE=1 cargo test -p rava-cli --test spring_context` still exits 0 with `hello\n`. Record `equals`/`toString`, `FutureTask.cancel`/timed get, the rest of `BitSet`/`ModuleFinder`, and a real `ProtectionDomain` remain later work. |
+| M3.7 | `RAVA_C2_ACCEPTANCE=1 cargo test -p rava-cli --test c2_gate` | 0 | 2026-11-25 | `crates/cli/tests/fixtures/aop` (`demo.C2Gate`, `javac --release 17`) runs a real Spring `AnnotationConfigApplicationContext` with `proxyBeanMethods=true` (the `Config` bean is a `$$SpringCGLIB$$` subclass and `greeting()` calls the enhanced `hello()` bean), a bare CGLIB `Enhancer`, `ObjenesisStd`, a JDK `Proxy`, and Spring AOP `ProxyFactory` proxies in both JDK (`Proxy.isProxyClass`) and CGLIB (`setProxyTargetClass(true)`, `$$SpringCGLIB$$`) modes; the captured stdout is byte-identical to stock JDK 25 on the same classpath. `c2_gate` asserts that stdout, finds the generated classes in the application loader, verifies every method with `Code`, and checks the Unsafe log contains only U0 (`allocateInstance` twice from Objenesis). Getting there fixed general gaps: JVMS §5.4.3.2 field resolution through superinterfaces, `long` shift distances read as `int`, virtual `Method.invoke` with interface-default fallback, `Class.getMethods`/`getConstructors`/`Method.isDefault`, polymorphic `Collection` natives and the `Collections.EMPTY_*` constants, and `FileNotFoundException`. `c2_gate` sets `RAVA_C2_ACCEPTANCE=1` to make a missing fetched jar a failure. `cargo test --workspace` passes 472 tests; `cargo fmt --all --check` and `cargo clippy --workspace --all-targets -- -D warnings` exit 0; `RAVA_SPRING_ACCEPTANCE=1 cargo test -p rava-cli --test spring_context` still exits 0 with `hello\n`. `Class.getFields`, advice chains/pointcuts, `@AspectJ` auto-proxying and the mixed long/int local-slot interpreter bug remain later work. |
 M0.6 boundary: the reference and class-unloading hooks are registration points only.
 M0 has no collector, so no weak/soft/phantom reference is cleared and no class is
 unloaded; M5 (ADR-0008) implements them on this seam. `MemoryRegion` is a VM-owned
@@ -1218,8 +1219,11 @@ A fresh session should:
     switches and `wide`, with a generated-class suite. M3.2 then added a real generated
     `java.lang.reflect.Proxy` class, handler dispatch, boxing/unboxing and
     `InvocationHandler.invokeDefault`; M3.3 then made each loader a real identity with
-    `defineClass` and loader-aware `Class.forName`. M3 is still in progress and the next
-    slice is the Spring AOP proxy and the C2 gate.
+    `defineClass` and loader-aware `Class.forName`. M3.4 added `MethodHandles.Lookup`,
+    M3.5 Unsafe U0, M3.6 CGLIB/Objenesis and M3.7 the Spring AOP/C2 gate, so M3 is
+    **done**. The next milestone is M4 (resources, nested jars, `ServiceLoader` and the
+    non-web Boot application); its known boundaries include `Class.getFields` and the
+    mixed long/int local-slot interpreter bug.
 4. Do not write runtime code outside a defined slice.
 
 ## Open decisions
