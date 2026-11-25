@@ -23,7 +23,10 @@
 //! arguments. M2.19 adds `invokeinterface` and the lambda path: a `LambdaMetafactory`
 //! bootstrap creates a [`rava_vm::LambdaObject`] (the interface, target and captured
 //! values), and an interface call on that object runs the target through this crate's
-//! existing static/instance machinery. The decoded form and the frame are the contracts a
+//! existing static/instance machinery. M3.4 adds the `MethodHandle.invoke*` natives in
+//! [`method_handles`]: a handle records its target by `(owner, name, descriptor)` and
+//! invokes it through the same static/instance machinery, with a virtual handle dispatching
+//! on the receiver's runtime class. The decoded form and the frame are the contracts a
 //! later JIT consumes; there is no second frame model.
 
 #![forbid(unsafe_code)]
@@ -33,6 +36,7 @@ mod error;
 mod frame;
 mod instr;
 mod lambda;
+pub mod method_handles;
 pub mod proxy;
 pub mod reflect_invoke;
 pub mod streams;
@@ -1867,6 +1871,9 @@ fn runtime_class_ref(shared: &Shared, reference: ObjRef) -> Result<ClassRef, Int
             }
             HeapObject::Lambda(lambda) => RuntimeKind::Named(lambda.interface),
             HeapObject::Type(ty) => RuntimeKind::Type(ty.class_name()),
+            HeapObject::Lookup(_) => RuntimeKind::Library("java/lang/invoke/MethodHandles$Lookup"),
+            HeapObject::MethodType(_) => RuntimeKind::Library("java/lang/invoke/MethodType"),
+            HeapObject::MethodHandle(_) => RuntimeKind::Library("java/lang/invoke/MethodHandle"),
         }
     };
 
@@ -2016,7 +2023,7 @@ fn resolve_from(shared: &Shared, current: ClassId, name: &str) -> Result<ClassId
 /// through the caller's loader. An array instance dispatches from `java/lang/Object` (its
 /// `getClass` native reports the array class); any other method fails resolution
 /// normally.
-fn dispatch_class(
+pub(crate) fn dispatch_class(
     shared: &Shared,
     current: ClassId,
     reference: ObjRef,
@@ -2101,6 +2108,15 @@ fn dispatch_class(
             HeapObject::Array(_) => ReceiverKind::Array,
             HeapObject::Lambda(lambda) => ReceiverKind::Lambda(lambda.interface),
             HeapObject::Type(ty) => ReceiverKind::Type(ty.class_name()),
+            HeapObject::Lookup(_) => ReceiverKind::Named(
+                shared.load_library_class("java/lang/invoke/MethodHandles$Lookup")?,
+            ),
+            HeapObject::MethodType(_) => {
+                ReceiverKind::Named(shared.load_library_class("java/lang/invoke/MethodType")?)
+            }
+            HeapObject::MethodHandle(_) => {
+                ReceiverKind::Named(shared.load_library_class("java/lang/invoke/MethodHandle")?)
+            }
         }
     };
 
@@ -2125,7 +2141,7 @@ fn dispatch_class(
 /// resolves an instance method. Returns the declaring class and whether the declaration
 /// is `ACC_NATIVE`; the caller consults the native registry before the flag, because the
 /// C1 stubs declare no `Code` and do not set `ACC_NATIVE`.
-fn resolve_virtual(
+pub(crate) fn resolve_virtual(
     shared: &Shared,
     start: ClassId,
     name: &str,

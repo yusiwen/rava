@@ -1,9 +1,9 @@
 //! One entry point that installs the runtime's native class library.
 //!
 //! The natives live with the feature that owns them (`object`, `string`, `collections`,
-//! `maps`, `boxed`, `annotation`, `reflection`, `instance`). A runner calls
-//! [`register_all`] instead of repeating that list, so a new native is installed once
-//! here and every caller gets it.
+//! `maps`, `boxed`, `annotation`, `reflection`, `instance`, `method_handles`). A runner
+//! calls [`register_all`] instead of repeating that list, so a new native is installed
+//! once here and every caller gets it.
 //!
 //! `Method.invoke` and `Constructor.newInstance` are deliberately absent: they re-enter
 //! the interpreter, so they live in `rava-interp::reflect_invoke`, and a runner that
@@ -24,8 +24,8 @@ use crate::thread::ThreadState;
 use crate::value::Value;
 use crate::{
     annotation, arrays, atomic, boxed, class_loader, collections, exceptions, format, generic,
-    instance, jul, locks, maps, math, object, proxy, references, reflection, regex, string, system,
-    thread_natives,
+    instance, jul, locks, maps, math, method_handles, object, proxy, references, reflection, regex,
+    string, system, thread_natives,
 };
 
 /// `java.lang.System`'s binary-stable internal name.
@@ -71,6 +71,10 @@ pub fn register_all(shared: &Shared) -> Result<(), VmError> {
     // `Proxy`/`InvocationHandler` are M3.2: the `Proxy` natives plus the runtime-private
     // `rava/proxy/ProxySupport` helper class the generated proxy classes call.
     proxy::register_natives(shared);
+    // `java.lang.invoke` is M3.4: `MethodHandles`/`Lookup`, `MethodType` and the
+    // non-re-entrant `MethodHandle` queries. `MethodHandle.invoke*` lives in the
+    // interpreter, like `Method.invoke`, because it re-enters the frame machinery.
+    method_handles::register_natives(shared);
     register_print_stream(shared);
     install_system_streams(shared)?;
     proxy::install_support(shared)?;

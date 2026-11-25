@@ -924,9 +924,11 @@ impl Shared {
     /// `java.lang.annotation.Annotation` (its `annotationType()` names the annotation
     /// type), an enum constant reports its enum class, a `StringBuilder` reports
     /// `java.lang.StringBuilder`, an `ArrayList` reports `java.util.ArrayList`, a
-    /// `HashMap` reports `java.util.HashMap`, a lambda reports its functional interface
-    /// and an array reports its cached array class (`int[]`, `String[][]`); those
-    /// VM-level objects use the bootstrap class library as their identity.
+    /// `HashMap` reports `java.util.HashMap`, a lambda reports its functional interface, a
+    /// `MethodHandles.Lookup`, a `MethodType` and a `MethodHandle` report their
+    /// `java.lang.invoke` class, and an array reports its cached array class (`int[]`,
+    /// `String[][]`); those VM-level objects use the bootstrap class library as their
+    /// identity.
     pub fn get_class(&self, reference: ObjRef) -> Result<ObjRef, VmError> {
         enum Kind {
             Instance(ClassId),
@@ -955,6 +957,9 @@ impl Shared {
             Collector,
             Optional,
             Sink,
+            Lookup,
+            MethodType,
+            MethodHandle,
         }
 
         let kind = {
@@ -997,6 +1002,9 @@ impl Shared {
                 HeapObject::Array(array) => Kind::Array(array.component.clone()),
                 HeapObject::Lambda(lambda) => Kind::Lambda(lambda.interface),
                 HeapObject::Type(ty) => Kind::Type(ty.class_name()),
+                HeapObject::Lookup(_) => Kind::Lookup,
+                HeapObject::MethodType(_) => Kind::MethodType,
+                HeapObject::MethodHandle(_) => Kind::MethodHandle,
             }
         };
 
@@ -1088,6 +1096,18 @@ impl Shared {
             }
             Kind::Sink => {
                 let class = self.load_library_class("java/util/function/Consumer")?;
+                self.class_object(class)
+            }
+            Kind::Lookup => {
+                let class = self.load_library_class("java/lang/invoke/MethodHandles$Lookup")?;
+                self.class_object(class)
+            }
+            Kind::MethodType => {
+                let class = self.load_library_class("java/lang/invoke/MethodType")?;
+                self.class_object(class)
+            }
+            Kind::MethodHandle => {
+                let class = self.load_library_class("java/lang/invoke/MethodHandle")?;
                 self.class_object(class)
             }
         }

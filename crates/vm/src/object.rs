@@ -352,6 +352,7 @@ pub(crate) fn runtime_binary_name(shared: &Shared, receiver: ObjRef) -> Result<S
         Collector,
         Optional,
         Sink,
+        Library(&'static str),
     }
 
     let kind = {
@@ -396,6 +397,9 @@ pub(crate) fn runtime_binary_name(shared: &Shared, receiver: ObjRef) -> Result<S
             HeapObject::Array(array) => Kind::Array(array.component.clone()),
             HeapObject::Lambda(lambda) => Kind::Lambda(lambda.interface),
             HeapObject::Type(ty) => Kind::Type(ty.class_name()),
+            HeapObject::Lookup(_) => Kind::Library("java.lang.invoke.MethodHandles.Lookup"),
+            HeapObject::MethodType(_) => Kind::Library("java.lang.invoke.MethodType"),
+            HeapObject::MethodHandle(_) => Kind::Library("java.lang.invoke.MethodHandle"),
         }
     };
 
@@ -446,6 +450,7 @@ pub(crate) fn runtime_binary_name(shared: &Shared, receiver: ObjRef) -> Result<S
         Kind::Collector => Ok("java.util.stream.Collector".to_owned()),
         Kind::Optional => Ok("java.util.Optional".to_owned()),
         Kind::Sink => Ok("java.util.function.Consumer".to_owned()),
+        Kind::Library(name) => Ok(name.to_owned()),
     }
 }
 
