@@ -46,6 +46,7 @@ pub enum SharedLock {
     TypeObjects,
     EnumConstants,
     InternedStrings,
+    ProxyClasses,
     NativeRegistry,
     Stdout,
     Stderr,
@@ -63,6 +64,7 @@ impl fmt::Display for SharedLock {
             Self::TypeObjects => write!(f, "generic-type cache"),
             Self::EnumConstants => write!(f, "enum-constant cache"),
             Self::InternedStrings => write!(f, "interned-string table"),
+            Self::ProxyClasses => write!(f, "generated-proxy cache"),
             Self::NativeRegistry => write!(f, "native registry"),
             Self::Stdout => write!(f, "stdout"),
             Self::Stderr => write!(f, "stderr"),
@@ -115,6 +117,11 @@ pub struct Shared {
     /// are never freed while `Shared` lives and are reported as roots by
     /// [`Shared::roots`].
     interned_strings: Mutex<HashMap<String, ObjRef>>,
+    /// One generated `java.lang.reflect.Proxy` class per `(defining loader, interfaces)`
+    /// tuple. The cache stores [`ClassId`]s rather than heap roots, because a generated
+    /// proxy class is an ordinary class-table entry; its class object is owned by
+    /// [`Shared::class_object`] and reported as a root there.
+    proxy_classes: Mutex<HashMap<(LoaderId, Vec<ClassId>), ClassId>>,
     natives: RwLock<HashMap<NativeKey, NativeFn>>,
     stdout: Mutex<Vec<u8>>,
     stderr: Mutex<Vec<u8>>,
@@ -200,6 +207,7 @@ impl Shared {
             type_objects: Mutex::new(HashMap::new()),
             enum_constants: Mutex::new(HashMap::new()),
             interned_strings: Mutex::new(HashMap::new()),
+            proxy_classes: Mutex::new(HashMap::new()),
             natives: RwLock::new(HashMap::new()),
             stdout: Mutex::new(Vec::new()),
             stderr: Mutex::new(Vec::new()),
@@ -627,6 +635,34 @@ impl Shared {
             });
         cache.insert(key, reference);
         Ok(reference)
+    }
+
+    /// The generated proxy class for a defining loader and interface list, if it was
+    /// already created.
+    ///
+    /// The key is the defining loader plus the deduplicated interface identities, so
+    /// `Proxy.getProxyClass` returns one class object per interface list and repeated
+    /// calls observe the same `Class`. The value is a [`ClassId`], not a heap reference:
+    /// the class table owns the entry and [`Shared::class_object`] owns its class object.
+    ///
+    /// Lock order is this cache alone; no heap lock is taken while it is held.
+    pub fn proxy_class(&self, loader: LoaderId, interfaces: &[ClassId]) -> Option<ClassId> {
+        self.proxy_classes
+            .lock()
+            .expect("generated-proxy cache lock poisoned")
+            .get(&(loader, interfaces.to_vec()))
+            .copied()
+    }
+
+    /// Record a generated proxy class for a defining loader and interface list.
+    ///
+    /// The caller has already defined the class through [`Shared::define_class`], so the
+    /// verified class table entry exists before the cache can name it.
+    pub fn record_proxy_class(&self, loader: LoaderId, interfaces: Vec<ClassId>, class: ClassId) {
+        self.proxy_classes
+            .lock()
+            .expect("generated-proxy cache lock poisoned")
+            .insert((loader, interfaces), class);
     }
 
     /// Record `AccessibleObject.setAccessible`'s flag for one member.
@@ -1509,6 +1545,11 @@ impl Shared {
         {
             let _guard = self.interned_strings.try_lock().map_err(|_| LockHeld {
                 lock: SharedLock::InternedStrings,
+            })?;
+        }
+        {
+            let _guard = self.proxy_classes.try_lock().map_err(|_| LockHeld {
+                lock: SharedLock::ProxyClasses,
             })?;
         }
         {

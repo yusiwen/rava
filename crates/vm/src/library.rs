@@ -24,7 +24,8 @@ use crate::thread::ThreadState;
 use crate::value::Value;
 use crate::{
     annotation, arrays, atomic, boxed, collections, exceptions, format, generic, instance, jul,
-    locks, maps, math, object, references, reflection, regex, string, system, thread_natives,
+    locks, maps, math, object, proxy, references, reflection, regex, string, system,
+    thread_natives,
 };
 
 /// `java.lang.System`'s binary-stable internal name.
@@ -63,8 +64,12 @@ pub fn register_all(shared: &Shared) -> Result<(), VmError> {
     regex::register_natives(shared);
     format::register_natives(shared);
     thread_natives::register_natives(shared);
+    // `Proxy`/`InvocationHandler` are M3.2: the `Proxy` natives plus the runtime-private
+    // `rava/proxy/ProxySupport` helper class the generated proxy classes call.
+    proxy::register_natives(shared);
     register_print_stream(shared);
     install_system_streams(shared)?;
+    proxy::install_support(shared)?;
     jul::install_levels(shared)?;
     boxed::install_booleans(shared)?;
     thread_natives::install_thread_states(shared)

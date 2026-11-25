@@ -89,8 +89,9 @@ fn method_is_static(shared: &Shared, member: &ReflectMember) -> Result<bool, VmE
 ///
 /// A null array is accepted only for a zero-parameter method, as the JDK documents for
 /// `Method.invoke` and `Constructor.newInstance`. The elements stay `Value`s until the
-/// caller applies [`boxed::unbox_argument`] with each parameter descriptor.
-fn argument_array(
+/// caller applies [`boxed::unbox_argument`] with each parameter descriptor. The
+/// `InvocationHandler.invokeDefault` native reuses this convention.
+pub(crate) fn argument_array(
     shared: &Shared,
     args: &[Value],
     position: usize,
@@ -132,7 +133,7 @@ fn argument_array(
 }
 
 /// Convert the boxed arguments according to the member's parameter descriptors.
-fn unbox_arguments(
+pub(crate) fn unbox_arguments(
     shared: &Shared,
     descriptors: &[&str],
     values: Vec<Value>,
