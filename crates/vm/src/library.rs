@@ -23,8 +23,8 @@ use crate::shared::Shared;
 use crate::thread::ThreadState;
 use crate::value::Value;
 use crate::{
-    annotation, arrays, atomic, boxed, collections, exceptions, format, generic, instance, jul,
-    locks, maps, math, object, proxy, references, reflection, regex, string, system,
+    annotation, arrays, atomic, boxed, class_loader, collections, exceptions, format, generic,
+    instance, jul, locks, maps, math, object, proxy, references, reflection, regex, string, system,
     thread_natives,
 };
 
@@ -64,6 +64,10 @@ pub fn register_all(shared: &Shared) -> Result<(), VmError> {
     regex::register_natives(shared);
     format::register_natives(shared);
     thread_natives::register_natives(shared);
+    // `java.lang.ClassLoader` owns the loader hierarchy and `defineClass` (M3.3):
+    // `getSystemClassLoader`, `loadClass`, the three `defineClass` overloads and the
+    // resource stubs are all installed here.
+    class_loader::register_natives(shared);
     // `Proxy`/`InvocationHandler` are M3.2: the `Proxy` natives plus the runtime-private
     // `rava/proxy/ProxySupport` helper class the generated proxy classes call.
     proxy::register_natives(shared);

@@ -9,6 +9,7 @@ pub mod annotation;
 pub mod arrays;
 pub mod atomic;
 pub mod boxed;
+pub mod class_loader;
 pub mod collections;
 pub mod error;
 pub mod exceptions;

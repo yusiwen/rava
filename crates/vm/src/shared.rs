@@ -47,6 +47,8 @@ pub enum SharedLock {
     EnumConstants,
     InternedStrings,
     ProxyClasses,
+    LoaderObjects,
+    ObjectLoaders,
     NativeRegistry,
     Stdout,
     Stderr,
@@ -65,6 +67,8 @@ impl fmt::Display for SharedLock {
             Self::EnumConstants => write!(f, "enum-constant cache"),
             Self::InternedStrings => write!(f, "interned-string table"),
             Self::ProxyClasses => write!(f, "generated-proxy cache"),
+            Self::LoaderObjects => write!(f, "loader-object cache"),
+            Self::ObjectLoaders => write!(f, "object-to-loader map"),
             Self::NativeRegistry => write!(f, "native registry"),
             Self::Stdout => write!(f, "stdout"),
             Self::Stderr => write!(f, "stderr"),
@@ -145,8 +149,15 @@ pub struct Shared {
     /// One value per `java.lang.ThreadLocal` object. There is one thread until M5, so the
     /// map is the thread-local storage.
     thread_locals: Mutex<HashMap<ObjRef, Value>>,
-    /// The one `ClassLoader` object reported for application classes.
-    class_loader: Mutex<Option<ObjRef>>,
+    /// One `java.lang.ClassLoader` object per [`LoaderId`]. The cache owns the objects,
+    /// which are never freed while `Shared` lives and are reported as roots by
+    /// [`Shared::roots`]. A user `ClassLoader` subclass instance is the object for the
+    /// child loader [`Shared::loader_id_for`] created for it.
+    loader_objects: Mutex<HashMap<LoaderId, ObjRef>>,
+    /// The inverse of [`Shared::loader_objects`]: the loader an object represents. Both
+    /// maps are needed because a `Class.getClassLoader` lookup is object-to-loader and a
+    /// `ClassLoader` native starts from its receiver object.
+    object_loaders: Mutex<HashMap<ObjRef, LoaderId>>,
     /// Members whose `AccessibleObject.setAccessible(true)` was called.
     ///
     /// The VM performs no access-control check, so this flag only answers
@@ -218,7 +229,8 @@ impl Shared {
             references: Mutex::new(HashMap::new()),
             main_thread: Mutex::new(None),
             thread_locals: Mutex::new(HashMap::new()),
-            class_loader: Mutex::new(None),
+            loader_objects: Mutex::new(HashMap::new()),
+            object_loaders: Mutex::new(HashMap::new()),
             accessible: Mutex::new(HashSet::new()),
             throwable_messages: Mutex::new(HashMap::new()),
             hooks: Hooks::default(),
@@ -235,7 +247,28 @@ impl Shared {
         Self::with_bootstrap(Arc::new(DirectorySource::new(root)))
     }
 
+    /// Add a loader parented to `parent` and make it the application loader.
+    ///
+    /// A runner calls this once for its classpath. The VM's own child loaders (for a user
+    /// `ClassLoader` instance) are added through [`Shared::add_child_loader`] and do not
+    /// replace the application loader.
     pub fn add_loader(
+        &self,
+        parent: LoaderId,
+        source: Arc<dyn ClassSource>,
+    ) -> Result<LoaderId, VmError> {
+        self.classes
+            .write()
+            .expect("class table lock poisoned")
+            .add_application_loader(parent, source)
+    }
+
+    /// Add a child loader without making it the application loader.
+    ///
+    /// [`Shared::loader_id_for`] uses this for a `java.lang.ClassLoader` subclass instance
+    /// that no native had seen yet. The child has an empty source: it defines only classes
+    /// handed to its `defineClass`, and delegates every `loadClass` lookup to its parent.
+    pub(crate) fn add_child_loader(
         &self,
         parent: LoaderId,
         source: Arc<dyn ClassSource>,
@@ -246,18 +279,52 @@ impl Shared {
             .add_loader(parent, source)
     }
 
-    /// The deepest loader in the table: the application loader a runner added, or the
-    /// bootstrap loader when none was added.
+    /// The application loader: the loader a runner added last, or the bootstrap loader
+    /// when none was added.
     ///
-    /// `Class.forName` needs a loader but its native ABI receives the *declaring* class's
-    /// loader (`java.lang.Class` is a bootstrap class), not the caller's. In this VM there
-    /// is one application loader, so resolving through the deepest loader is the same
-    /// parent-first lookup the caller's loader would perform.
+    /// `Class.forName(String)` needs a loader but its native ABI receives the *declaring*
+    /// class's loader (`java.lang.Class` is a bootstrap class), not the caller's. In this
+    /// VM there is one application loader, so resolving through it is the same parent-first
+    /// lookup the caller's loader would perform.
     pub fn application_loader(&self) -> LoaderId {
         self.classes
             .read()
             .expect("class table lock poisoned")
-            .last_loader()
+            .application_loader()
+    }
+
+    /// The parent loader of `loader`, if it has one.
+    ///
+    /// The bootstrap loader has no parent. The application loader's parent is the
+    /// bootstrap loader; [`crate::class_loader`] maps that to a null `ClassLoader.getParent`
+    /// because this VM has no separate platform loader.
+    pub fn loader_parent(&self, loader: LoaderId) -> Option<LoaderId> {
+        self.classes
+            .read()
+            .expect("class table lock poisoned")
+            .parent(loader)
+    }
+
+    /// A stable display name for a loader.
+    ///
+    /// The application loader and the bootstrap loader are both `"rava"`: this VM has no
+    /// platform loader, and a `ClassLoader` object is only ever allocated for a non-bootstrap
+    /// loader. A child loader created for a user `ClassLoader` instance is
+    /// `"rava-child-<loader id>"`, which is stable for the life of the `Shared` because a
+    /// loader id is never reused.
+    pub fn loader_name(&self, loader: LoaderId) -> String {
+        if loader == self.application_loader() || loader == LoaderId::BOOTSTRAP {
+            "rava".to_owned()
+        } else {
+            format!("rava-child-{}", loader.0)
+        }
+    }
+
+    pub fn loader_exists(&self, loader: LoaderId) -> bool {
+        self.classes
+            .read()
+            .expect("class table lock poisoned")
+            .has_loader(loader)
     }
 
     pub fn load_class(&self, loader: LoaderId, name: &str) -> Result<ClassId, VmError> {
@@ -1355,21 +1422,24 @@ impl Shared {
         }
 
         {
+            let loader_objects = self
+                .loader_objects
+                .lock()
+                .expect("loader-object cache lock poisoned");
+            for reference in loader_objects.values() {
+                if seen.insert(*reference) {
+                    roots.push(*reference);
+                }
+            }
+        }
+
+        {
             // Spring keeps one logger per class name and a `LogRecord` may carry a
             // throwable; both are permanent roots.
             let jul = self.jul.lock().expect("jul lock poisoned");
             for reference in jul.loggers.values() {
                 if seen.insert(*reference) {
                     roots.push(*reference);
-                }
-            }
-            if let Some(reference) = *self
-                .class_loader
-                .lock()
-                .expect("class-loader lock poisoned")
-            {
-                if seen.insert(reference) {
-                    roots.push(reference);
                 }
             }
             if let Some(reference) = self.main_thread() {
@@ -1553,6 +1623,16 @@ impl Shared {
             })?;
         }
         {
+            let _guard = self.loader_objects.try_lock().map_err(|_| LockHeld {
+                lock: SharedLock::LoaderObjects,
+            })?;
+        }
+        {
+            let _guard = self.object_loaders.try_lock().map_err(|_| LockHeld {
+                lock: SharedLock::ObjectLoaders,
+            })?;
+        }
+        {
             let _guard = self.natives.try_write().map_err(|_| LockHeld {
                 lock: SharedLock::NativeRegistry,
             })?;
@@ -1630,26 +1710,122 @@ impl Shared {
             .cloned()
     }
 
-    /// The `ClassLoader` object reported for a non-bootstrap class.
+    /// The `java.lang.ClassLoader` object that represents `loader`, allocated on first use.
     ///
-    /// The VM has no user-visible loader hierarchy; one opaque object stands for the
-    /// application loader so `getClassLoader` is non-null for Spring's own classes and
-    /// `ClassLoader.getResources` has a receiver.
-    pub fn class_loader_object(&self) -> Result<ObjRef, VmError> {
-        if let Some(reference) = *self
-            .class_loader
-            .lock()
-            .expect("class-loader lock poisoned")
+    /// One opaque `java.lang.ClassLoader` instance stands for each non-bootstrap loader, so
+    /// `Class.getClassLoader`, `getParent` and `getSystemClassLoader` can compare loader
+    /// identity by object identity. The cache is the owner of the objects: they are never
+    /// freed while `Shared` lives and [`Shared::roots`] reports them as roots.
+    ///
+    /// A user `ClassLoader` subclass instance is not replaced by an opaque stand-in:
+    /// [`Shared::loader_id_for`] records that instance as the object for the child loader it
+    /// creates, so `getClassLoader` returns the actual object the Java program made.
+    ///
+    /// Lock order is cache, then heap, matching [`Shared::class_object`]. No Java call is
+    /// made while the cache lock is held.
+    pub fn loader_object(&self, loader: LoaderId) -> Result<ObjRef, VmError> {
+        if !self.loader_exists(loader) {
+            return Err(VmError::Loader(format!(
+                "loader {} does not exist",
+                loader.0
+            )));
+        }
         {
-            return Ok(reference);
+            let cache = self
+                .loader_objects
+                .lock()
+                .expect("loader-object cache lock poisoned");
+            if let Some(reference) = cache.get(&loader) {
+                return Ok(*reference);
+            }
         }
         let class = self.load_library_class("java/lang/ClassLoader")?;
-        let reference = self.allocate_instance(class)?;
-        *self
-            .class_loader
+        let mut cache = self
+            .loader_objects
             .lock()
-            .expect("class-loader lock poisoned") = Some(reference);
+            .expect("loader-object cache lock poisoned");
+        // A concurrent caller may have allocated the object while this one loaded the
+        // class. The VM is single-threaded until M5, but the recheck keeps the cache shape
+        // independent of that assumption.
+        if let Some(reference) = cache.get(&loader) {
+            return Ok(*reference);
+        }
+        let reference = self.allocate_instance(class)?;
+        cache.insert(loader, reference);
+        drop(cache);
+        self.object_loaders
+            .lock()
+            .expect("object-to-loader map lock poisoned")
+            .insert(reference, loader);
         Ok(reference)
+    }
+
+    /// The `ClassLoader` object reported for the application loader.
+    ///
+    /// This is the object `getSystemClassLoader`/`getPlatformClassLoader` return and the one
+    /// `Class.getClassLoader` reports for an application class.
+    pub fn class_loader_object(&self) -> Result<ObjRef, VmError> {
+        self.loader_object(self.application_loader())
+    }
+
+    /// The loader a `java.lang.ClassLoader` receiver denotes.
+    ///
+    /// A receiver the VM allocated as a loader stand-in is already mapped. A subclass
+    /// instance a Java program created with `new` is not: this creates a child loader under
+    /// the application loader with an empty class source, binds the instance to it, and
+    /// returns it. The child delegates every lookup to its parent and only defines the
+    /// classes its `defineClass` calls provide, which is exactly the `ClassLoader` contract
+    /// `OverridingClassLoader` and CGLIB's fallback rely on.
+    pub fn loader_id_for(&self, receiver: ObjRef) -> Result<LoaderId, VmError> {
+        if let Some(loader) = self
+            .object_loaders
+            .lock()
+            .expect("object-to-loader map lock poisoned")
+            .get(&receiver)
+            .copied()
+        {
+            return Ok(loader);
+        }
+        if receiver.is_null() {
+            return Err(VmError::Native(
+                "a null reference is not a java.lang.ClassLoader".to_owned(),
+            ));
+        }
+        let class = {
+            let heap = self.heap();
+            heap.object_class(receiver).map_err(|_| {
+                VmError::Native(format!("{receiver} is not a java.lang.ClassLoader"))
+            })?
+        };
+        let class_loader = self.load_library_class("java/lang/ClassLoader")?;
+        let mut current = Some(class);
+        let mut is_class_loader = false;
+        while let Some(id) = current {
+            if id == class_loader {
+                is_class_loader = true;
+                break;
+            }
+            current = self.resolution_superclass(id)?;
+        }
+        if !is_class_loader {
+            return Err(VmError::Native(format!(
+                "{receiver} is not a java.lang.ClassLoader"
+            )));
+        }
+
+        let loader = self.add_child_loader(
+            self.application_loader(),
+            Arc::new(crate::source::ClassPathSource::empty()),
+        )?;
+        self.loader_objects
+            .lock()
+            .expect("loader-object cache lock poisoned")
+            .insert(loader, receiver);
+        self.object_loaders
+            .lock()
+            .expect("object-to-loader map lock poisoned")
+            .insert(receiver, loader);
+        Ok(loader)
     }
 
     /// The value stored in a `ThreadLocal`, if it was set.
