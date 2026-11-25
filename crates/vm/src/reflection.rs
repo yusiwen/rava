@@ -188,12 +188,6 @@ pub fn register_natives(shared: &Shared) {
         class_null_resource,
     );
     register_modifier_natives(shared);
-    shared.register_native(
-        "java/lang/reflect/Proxy",
-        "isProxyClass",
-        "(Ljava/lang/Class;)Z",
-        proxy_is_proxy_class,
-    );
     for owner in [
         "java/lang/reflect/Field",
         "java/lang/reflect/Method",
@@ -894,17 +888,6 @@ fn class_null_resource(
     _args: &[Value],
 ) -> Result<Option<Value>, VmError> {
     Ok(Some(Value::Ref(ObjRef::NULL)))
-}
-
-/// `Proxy.isProxyClass(Class)`: this VM creates no JDK proxy classes (M3).
-fn proxy_is_proxy_class(
-    _shared: &Shared,
-    _thread: &ThreadState,
-    _loader: LoaderId,
-    _receiver: ObjRef,
-    _args: &[Value],
-) -> Result<Option<Value>, VmError> {
-    Ok(Some(Value::Int(0)))
 }
 
 /// A reflected member's identity hash: the same tuple `equals` compares.
@@ -1862,7 +1845,7 @@ fn member_value(
 /// reports no superclass for an interface, so the chain does not follow that edge; the
 /// interface's own `interfaces` list is still visited. [`ClassId`]s are visited once, so
 /// a cyclic or diamond interface graph cannot loop.
-fn lookup_order(shared: &Shared, start: ClassId) -> Result<Vec<ClassId>, VmError> {
+pub(crate) fn lookup_order(shared: &Shared, start: ClassId) -> Result<Vec<ClassId>, VmError> {
     let mut order = Vec::new();
     let mut visited = HashSet::new();
     collect_lookup_order(shared, start, &mut visited, &mut order)?;

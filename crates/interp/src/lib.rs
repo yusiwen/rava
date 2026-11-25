@@ -33,6 +33,7 @@ mod error;
 mod frame;
 mod instr;
 mod lambda;
+pub mod proxy;
 pub mod reflect_invoke;
 pub mod streams;
 

@@ -26,6 +26,7 @@ pub mod math;
 pub mod memory;
 pub mod metadata;
 pub mod object;
+pub mod proxy;
 pub mod references;
 pub mod reflection;
 pub mod regex;

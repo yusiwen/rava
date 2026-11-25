@@ -74,9 +74,11 @@ fn execute(options: &Options) -> Result<(), String> {
         .map_err(|error| format!("cannot create the application loader: {error}"))?;
     library::register_all(&shared)
         .map_err(|error| format!("cannot register the class library: {error}"))?;
-    // `Method.invoke`/`Constructor.newInstance` live in the interpreter because they
-    // re-enter it; a runner that wants reflection must install them explicitly.
+    // `Method.invoke`/`Constructor.newInstance` and
+    // `InvocationHandler.invokeDefault` live in the interpreter because they re-enter it;
+    // a runner that wants reflection must install them explicitly.
     rava_interp::reflect_invoke::register_natives(&shared);
+    rava_interp::proxy::register_natives(&shared);
     rava_interp::callbacks::register_natives(&shared);
     rava_interp::streams::register_natives(&shared);
 
