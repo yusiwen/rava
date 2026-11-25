@@ -163,7 +163,8 @@ fn class_with_non_static_main() -> Vec<u8> {
         ACC_PUBLIC,
         "main",
         MAIN_DESCRIPTOR,
-        Some((0, 1, body.finish().expect("assemble main"))),
+        // A non-static `main` has `this` and the arguments array as its two locals.
+        Some((0, 2, body.finish().expect("assemble main"))),
     );
     builder.build()
 }

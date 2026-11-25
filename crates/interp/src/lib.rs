@@ -276,7 +276,7 @@ fn execute(
                     InterpError::Decode(format!("local {index} is outside the frame"))
                 })?;
                 let value = slot.as_int().ok_or(InterpError::WrongValue)?;
-                *slot = Value::Int(value.wrapping_add(i32::from(increment)));
+                *slot = Value::Int(value.wrapping_add(increment));
             }
             Instr::ILoad(index)
             | Instr::LLoad(index)

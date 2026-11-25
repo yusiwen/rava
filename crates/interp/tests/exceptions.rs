@@ -226,6 +226,17 @@ fn catcher_bytes() -> Vec<u8> {
         Some((1, 0, non_ref.finish().unwrap())),
     );
 
+    builder.build()
+}
+
+/// The malformed handler tables `a_malformed_handler_table_is_a_decode_error` decodes
+/// directly.
+///
+/// Definition-time verification rejects an invalid exception table before a class enters
+/// the table, so these methods cannot live in `Catcher`.
+fn malformed_handler_bytes() -> Vec<u8> {
+    let mut builder = ClassBuilder::new("BadHandlerTable", "java/lang/Object", 61);
+
     // iconst_1; bipush 1; ireturn, with `start_pc = 2`, which is inside `bipush`.
     builder.method_with_handlers(
         ACC_PUBLIC_STATIC,
@@ -420,8 +431,8 @@ fn athrow_of_null_and_of_a_non_reference_are_typed_errors() {
 
 #[test]
 fn a_malformed_handler_table_is_a_decode_error() {
-    let bytes = catcher_bytes();
-    let file = ClassFile::parse(&bytes).expect("Catcher parses");
+    let bytes = malformed_handler_bytes();
+    let file = ClassFile::parse(&bytes).expect("the fixture parses");
 
     for (name, expected) in [
         ("badHandler", "start_pc"),

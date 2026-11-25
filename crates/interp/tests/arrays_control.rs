@@ -89,6 +89,10 @@ fn probe_bytes() -> Vec<u8> {
     let mut sum = Assembler::new();
     let sum_loop = sum.label();
     let sum_done = sum.label();
+    sum.iconst(0);
+    sum.istore(1);
+    sum.iconst(0);
+    sum.istore(2);
     sum.place(sum_loop);
     sum.iload(1);
     sum.iload(0);

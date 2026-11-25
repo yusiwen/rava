@@ -86,7 +86,9 @@ fn probe_bytes() -> Vec<u8> {
         ACC_PUBLIC,
         "<init>",
         "(BSIJFD)V",
-        Some((4, 7, init.finish().unwrap())),
+        // JVM slots: `this` plus B/S/I/J(2)/F/D(2) is nine; the frame itself places the
+        // six argument values at locals 1..=6.
+        Some((4, 9, init.finish().unwrap())),
     );
 
     // BoxProbe(char c, boolean z) { super(); this.c = c; this.z = z; }

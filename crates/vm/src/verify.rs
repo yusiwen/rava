@@ -5,12 +5,12 @@
 //! targets, and seeds exception handlers with a one-slot stack. It does not type-check
 //! operands: the full verifier for generated classes lands at M3 on top of this shape.
 //!
-//! Opcodes covered: constants, local loads/stores, array loads/stores, stack
-//! manipulation, integer/long/float/double arithmetic and conversions, comparisons and
-//! conditional/unconditional branches, field access, method invocation, object and array
-//! creation, `athrow`, monitors, and all return forms. `jsr`/`ret`, `wide`,
-//! `tableswitch`/`lookupswitch`, and reserved opcodes return
-//! [`VerifyError::UnsupportedOpcode`] rather than being treated as no-ops.
+//! Opcodes covered: constants, local loads/stores (including the `wide` forms),
+//! array loads/stores, stack manipulation, integer/long/float/double arithmetic and
+//! conversions, comparisons and conditional/unconditional branches,
+//! `tableswitch`/`lookupswitch`, field access, method invocation, object and array
+//! creation, `athrow`, monitors, and all return forms. `jsr`/`ret` and reserved opcodes
+//! return [`VerifyError::UnsupportedOpcode`] rather than being treated as no-ops.
 //!
 //! Effects are slot counts, not Java types: `dup` needs one slot and pushes two, `dup2`
 //! needs two and pushes four. That is conservative and sufficient for the M0
@@ -384,17 +384,23 @@ enum LocalAccess {
     Increment { index: u16 },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum Flow {
     Fallthrough,
     /// Conditional branch: the target and the next instruction are both successors.
     Branch(i64),
     Goto(i64),
+    /// `tableswitch`/`lookupswitch`: every case target and the default are successors,
+    /// and control cannot fall through to the next instruction.
+    Switch {
+        default: i64,
+        targets: Vec<i64>,
+    },
     Return,
     Throw,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct Instruction {
     len: usize,
     effect: Effect,
@@ -555,7 +561,47 @@ fn decode(
             0xa7 => {
                 flow = Flow::Goto(pc as i64 + i64::from(operand_i2(bytes, &mut next, pc, opcode)?));
             }
-            0xaa | 0xab | 0xc4 => return Err(VerifyError::UnsupportedOpcode { pc, opcode }),
+            0xaa => {
+                let (default, targets) = decode_tableswitch(bytes, &mut next, pc, opcode)?;
+                effect = Effect::pop(1);
+                flow = Flow::Switch { default, targets };
+            }
+            0xab => {
+                let (default, targets) = decode_lookupswitch(bytes, &mut next, pc, opcode)?;
+                effect = Effect::pop(1);
+                flow = Flow::Switch { default, targets };
+            }
+            0xc4 => {
+                let modified = operand_u1(bytes, &mut next, pc, opcode)?;
+                match modified {
+                    0x15..=0x19 => {
+                        let index = operand_u2(bytes, &mut next, pc, opcode)?;
+                        let slots = load_slots(modified);
+                        local = LocalAccess::Load { index, slots };
+                        effect = Effect::push(slots);
+                    }
+                    0x36..=0x3a => {
+                        let index = operand_u2(bytes, &mut next, pc, opcode)?;
+                        let slots = store_slots(modified);
+                        local = LocalAccess::Store { index, slots };
+                        effect = Effect::pop(slots);
+                    }
+                    0x84 => {
+                        let index = operand_u2(bytes, &mut next, pc, opcode)?;
+                        let _increment = operand_i2(bytes, &mut next, pc, opcode)?;
+                        local = LocalAccess::Increment { index };
+                    }
+                    // `ret` and every other `wide`-modified opcode stay unsupported, so
+                    // the method is rejected instead of executing the local-variable
+                    // semantics the verifier does not model.
+                    _ => {
+                        return Err(VerifyError::UnsupportedOpcode {
+                            pc,
+                            opcode: modified,
+                        });
+                    }
+                }
+            }
             0xac | 0xae | 0xb0 => {
                 effect = Effect::pop(1);
                 flow = Flow::Return;
@@ -668,6 +714,123 @@ fn store_slots(opcode: u8) -> u16 {
         0x37 | 0x39 => 2,
         _ => 1,
     }
+}
+
+/// Skips the padding between a switch opcode and its first operand.
+///
+/// JVMS §6.5 aligns the operand on a four-byte boundary measured from the start of the
+/// code array and requires the padding bytes to be zero; a non-zero byte is malformed,
+/// not something to ignore.
+fn skip_switch_padding(
+    bytes: &[u8],
+    next: &mut usize,
+    pc: usize,
+    opcode: u8,
+) -> Result<(), VerifyError> {
+    let padding = (4 - (*next % 4)) % 4;
+    for _ in 0..padding {
+        let value = operand_u1(bytes, next, pc, opcode)?;
+        if value != 0 {
+            return Err(VerifyError::MalformedCode {
+                detail: format!(
+                    "opcode 0x{opcode:02x} at pc {pc} has non-zero padding byte 0x{value:02x}"
+                ),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Decodes a `tableswitch` operand block into the default and per-case target offsets.
+///
+/// The targets are absolute byte offsets; [`branch_target`] validates every one against
+/// the instruction boundaries afterwards.
+fn decode_tableswitch(
+    bytes: &[u8],
+    next: &mut usize,
+    pc: usize,
+    opcode: u8,
+) -> Result<(i64, Vec<i64>), VerifyError> {
+    skip_switch_padding(bytes, next, pc, opcode)?;
+    let default = operand_i4(bytes, next, pc, opcode)?;
+    let low = operand_i4(bytes, next, pc, opcode)?;
+    let high = operand_i4(bytes, next, pc, opcode)?;
+    if high < low {
+        return Err(VerifyError::MalformedCode {
+            detail: format!("tableswitch at pc {pc} has high {high} below low {low}"),
+        });
+    }
+    let count = i64::from(high) - i64::from(low) + 1;
+    let available = bytes.len().saturating_sub(*next);
+    let needed = count * 4; // count is at most 2^32, so this cannot overflow i64
+    if needed > available as i64 {
+        return Err(truncated(
+            pc,
+            opcode,
+            usize::try_from(needed).unwrap_or(usize::MAX),
+            available,
+        ));
+    }
+    let count = usize::try_from(count).map_err(|_| VerifyError::MalformedCode {
+        detail: format!("tableswitch at pc {pc} has a jump table too large to index"),
+    })?;
+    let mut targets = Vec::with_capacity(count);
+    for _ in 0..count {
+        let offset = operand_i4(bytes, next, pc, opcode)?;
+        targets.push(pc as i64 + i64::from(offset));
+    }
+    Ok((pc as i64 + i64::from(default), targets))
+}
+
+/// Decodes a `lookupswitch` operand block into the default and per-case target offsets.
+///
+/// The `(match, offset)` pairs must be strictly ascending by `match`
+/// (JVMS §6.5.lookupswitch); an unsorted or duplicate key is malformed.
+fn decode_lookupswitch(
+    bytes: &[u8],
+    next: &mut usize,
+    pc: usize,
+    opcode: u8,
+) -> Result<(i64, Vec<i64>), VerifyError> {
+    skip_switch_padding(bytes, next, pc, opcode)?;
+    let default = operand_i4(bytes, next, pc, opcode)?;
+    let pairs = operand_i4(bytes, next, pc, opcode)?;
+    if pairs < 0 {
+        return Err(VerifyError::MalformedCode {
+            detail: format!("lookupswitch at pc {pc} has a negative pair count {pairs}"),
+        });
+    }
+    let available = bytes.len().saturating_sub(*next);
+    let needed = i64::from(pairs) * 8; // pairs is non-negative and at most 2^31
+    if needed > available as i64 {
+        return Err(truncated(
+            pc,
+            opcode,
+            usize::try_from(needed).unwrap_or(usize::MAX),
+            available,
+        ));
+    }
+    let pairs = usize::try_from(pairs).map_err(|_| VerifyError::MalformedCode {
+        detail: format!("lookupswitch at pc {pc} has a pair count too large to index"),
+    })?;
+    let mut previous: Option<i32> = None;
+    let mut targets = Vec::with_capacity(pairs);
+    for _ in 0..pairs {
+        let key = operand_i4(bytes, next, pc, opcode)?;
+        if let Some(previous) = previous {
+            if key <= previous {
+                return Err(VerifyError::MalformedCode {
+                    detail: format!(
+                        "lookupswitch at pc {pc} has key {key} after {previous}: keys must be strictly ascending"
+                    ),
+                });
+            }
+        }
+        previous = Some(key);
+        let offset = operand_i4(bytes, next, pc, opcode)?;
+        targets.push(pc as i64 + i64::from(offset));
+    }
+    Ok((pc as i64 + i64::from(default), targets))
 }
 
 fn array_load_slots(opcode: u8) -> u16 {
@@ -987,7 +1150,7 @@ fn dataflow(
             stack,
             locals: locals.clone(),
         };
-        match instruction.flow {
+        match &instruction.flow {
             Flow::Fallthrough => {
                 let next = pc + instruction.len;
                 if next == code.bytes.len() {
@@ -995,30 +1158,32 @@ fn dataflow(
                         detail: format!("control falls off the end after pc {pc}"),
                     });
                 }
-                merge(&mut frames, &mut worklist, next, outgoing)?;
+                merge(&mut frames, &mut worklist, next, outgoing.clone())?;
             }
             Flow::Branch(target) => {
-                let target = branch_target(pc, target, code, instructions)?;
-                merge(
-                    &mut frames,
-                    &mut worklist,
-                    target,
-                    VerifyFrame {
-                        stack,
-                        locals: locals.clone(),
-                    },
-                )?;
+                let target = branch_target(pc, *target, code, instructions)?;
+                merge(&mut frames, &mut worklist, target, outgoing.clone())?;
                 let next = pc + instruction.len;
                 if next == code.bytes.len() {
                     return Err(VerifyError::MalformedCode {
                         detail: format!("conditional branch at pc {pc} falls off the end"),
                     });
                 }
-                merge(&mut frames, &mut worklist, next, outgoing)?;
+                merge(&mut frames, &mut worklist, next, outgoing.clone())?;
             }
             Flow::Goto(target) => {
-                let target = branch_target(pc, target, code, instructions)?;
-                merge(&mut frames, &mut worklist, target, outgoing)?;
+                let target = branch_target(pc, *target, code, instructions)?;
+                merge(&mut frames, &mut worklist, target, outgoing.clone())?;
+            }
+            Flow::Switch { default, targets } => {
+                // A switch has no fallthrough successor: the default and every case
+                // target receive the same outgoing frame.
+                let default = branch_target(pc, *default, code, instructions)?;
+                merge(&mut frames, &mut worklist, default, outgoing.clone())?;
+                for target in targets {
+                    let target = branch_target(pc, *target, code, instructions)?;
+                    merge(&mut frames, &mut worklist, target, outgoing.clone())?;
+                }
             }
             Flow::Return | Flow::Throw => {}
         }

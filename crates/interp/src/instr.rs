@@ -43,6 +43,11 @@
 //! default and case targets become instruction indices through the same two-pass
 //! boundary map as every other branch. A `lookupswitch` whose keys are not strictly
 //! ascending is a decode error, as is a target that is not an instruction boundary.
+//!
+//! M3.1 adds `wide` (`0xc4`) for the local load/store forms and `iinc`: its modified
+//! opcode selects a two-byte local index (and, for `iinc`, a two-byte increment). The
+//! local instructions therefore carry a `u16` index even in their one-byte forms.
+//! `wide ret` and every other modified opcode remain decode errors.
 
 use std::collections::HashMap;
 
@@ -115,20 +120,21 @@ pub enum Instr {
     Pop,
     /// `pop2`: discard one category-2 value or two category-1 values.
     Pop2,
-    ILoad(u8),
+    ILoad(u16),
     /// `lload`/`lload_<n>`.
-    LLoad(u8),
+    LLoad(u16),
     /// `fload`/`fload_<n>`.
-    FLoad(u8),
+    FLoad(u16),
     /// `dload`/`dload_<n>`.
-    DLoad(u8),
-    ALoad(u8),
-    IStore(u8),
-    LStore(u8),
-    FStore(u8),
-    DStore(u8),
-    AStore(u8),
-    Iinc(u8, i8),
+    DLoad(u16),
+    ALoad(u16),
+    IStore(u16),
+    LStore(u16),
+    FStore(u16),
+    DStore(u16),
+    AStore(u16),
+    /// `iinc`/`wide iinc`: local index and signed increment.
+    Iinc(u16, i32),
     AconstNull,
     New {
         class: String,
@@ -431,65 +437,65 @@ pub fn decode(file: &ClassFile, attribute_data: &[u8]) -> Result<DecodedMethod, 
                 Instr::Iconst(i32::from(value))
             }
             0x15 => {
-                let index = byte(code, pc)?;
+                let index = u16::from(byte(code, pc)?);
                 pc += 1;
                 Instr::ILoad(index)
             }
             0x16 => {
-                let index = byte(code, pc)?;
+                let index = u16::from(byte(code, pc)?);
                 pc += 1;
                 Instr::LLoad(index)
             }
             0x17 => {
-                let index = byte(code, pc)?;
+                let index = u16::from(byte(code, pc)?);
                 pc += 1;
                 Instr::FLoad(index)
             }
             0x18 => {
-                let index = byte(code, pc)?;
+                let index = u16::from(byte(code, pc)?);
                 pc += 1;
                 Instr::DLoad(index)
             }
             0x19 => {
-                let index = byte(code, pc)?;
+                let index = u16::from(byte(code, pc)?);
                 pc += 1;
                 Instr::ALoad(index)
             }
-            0x1a..=0x1d => Instr::ILoad(opcode - 0x1a),
-            0x1e..=0x21 => Instr::LLoad(opcode - 0x1e),
-            0x22..=0x25 => Instr::FLoad(opcode - 0x22),
-            0x26..=0x29 => Instr::DLoad(opcode - 0x26),
-            0x2a..=0x2d => Instr::ALoad(opcode - 0x2a),
+            0x1a..=0x1d => Instr::ILoad(u16::from(opcode - 0x1a)),
+            0x1e..=0x21 => Instr::LLoad(u16::from(opcode - 0x1e)),
+            0x22..=0x25 => Instr::FLoad(u16::from(opcode - 0x22)),
+            0x26..=0x29 => Instr::DLoad(u16::from(opcode - 0x26)),
+            0x2a..=0x2d => Instr::ALoad(u16::from(opcode - 0x2a)),
             0x36 => {
-                let index = byte(code, pc)?;
+                let index = u16::from(byte(code, pc)?);
                 pc += 1;
                 Instr::IStore(index)
             }
             0x37 => {
-                let index = byte(code, pc)?;
+                let index = u16::from(byte(code, pc)?);
                 pc += 1;
                 Instr::LStore(index)
             }
             0x38 => {
-                let index = byte(code, pc)?;
+                let index = u16::from(byte(code, pc)?);
                 pc += 1;
                 Instr::FStore(index)
             }
             0x39 => {
-                let index = byte(code, pc)?;
+                let index = u16::from(byte(code, pc)?);
                 pc += 1;
                 Instr::DStore(index)
             }
             0x3a => {
-                let index = byte(code, pc)?;
+                let index = u16::from(byte(code, pc)?);
                 pc += 1;
                 Instr::AStore(index)
             }
-            0x3b..=0x3e => Instr::IStore(opcode - 0x3b),
-            0x3f..=0x42 => Instr::LStore(opcode - 0x3f),
-            0x43..=0x46 => Instr::FStore(opcode - 0x43),
-            0x47..=0x4a => Instr::DStore(opcode - 0x47),
-            0x4b..=0x4e => Instr::AStore(opcode - 0x4b),
+            0x3b..=0x3e => Instr::IStore(u16::from(opcode - 0x3b)),
+            0x3f..=0x42 => Instr::LStore(u16::from(opcode - 0x3f)),
+            0x43..=0x46 => Instr::FStore(u16::from(opcode - 0x43)),
+            0x47..=0x4a => Instr::DStore(u16::from(opcode - 0x47)),
+            0x4b..=0x4e => Instr::AStore(u16::from(opcode - 0x4b)),
             0x57 => Instr::Pop,
             0x58 => Instr::Pop2,
             0x59 => Instr::Dup,
@@ -551,10 +557,39 @@ pub fn decode(file: &ClassFile, attribute_data: &[u8]) -> Result<DecodedMethod, 
             0x92 => Instr::I2C,
             0x93 => Instr::I2S,
             0x84 => {
-                let index = byte(code, pc)?;
+                let index = u16::from(byte(code, pc)?);
                 let increment = i8::from_be_bytes([byte(code, pc + 1)?]);
                 pc += 2;
-                Instr::Iinc(index, increment)
+                Instr::Iinc(index, i32::from(increment))
+            }
+            0xc4 => {
+                let modified = byte(code, pc)?;
+                pc += 1;
+                let index = u16::from_be_bytes([byte(code, pc)?, byte(code, pc + 1)?]);
+                pc += 2;
+                match modified {
+                    // The two-byte local index forms of the load and store opcodes.
+                    0x15 => Instr::ILoad(index),
+                    0x16 => Instr::LLoad(index),
+                    0x17 => Instr::FLoad(index),
+                    0x18 => Instr::DLoad(index),
+                    0x19 => Instr::ALoad(index),
+                    0x36 => Instr::IStore(index),
+                    0x37 => Instr::LStore(index),
+                    0x38 => Instr::FStore(index),
+                    0x39 => Instr::DStore(index),
+                    0x3a => Instr::AStore(index),
+                    0x84 => {
+                        let increment = i16::from_be_bytes([byte(code, pc)?, byte(code, pc + 1)?]);
+                        pc += 2;
+                        Instr::Iinc(index, i32::from(increment))
+                    }
+                    other => {
+                        return Err(InterpError::Decode(format!(
+                            "unsupported wide opcode 0x{other:02x}"
+                        )));
+                    }
+                }
             }
             0x2e..=0x35 => Instr::ArrayLoad(array_element(opcode)),
             0x4f..=0x56 => Instr::ArrayStore(array_element(opcode)),

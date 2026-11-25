@@ -113,7 +113,23 @@ fn setter(
     load(&mut body);
     body.putstatic(field);
     body.return_();
-    static_method(builder, name, descriptor, 1, max_locals, body);
+    static_method(
+        builder,
+        name,
+        descriptor,
+        field_slots(descriptor),
+        max_locals,
+        body,
+    );
+}
+
+/// The operand-stack slots of a `long`/`double` field, or one for every other field.
+fn field_slots(descriptor: &str) -> u16 {
+    if descriptor.contains(['J', 'D']) {
+        2
+    } else {
+        1
+    }
 }
 
 /// A static getter over one static field, given the return instruction.
@@ -127,7 +143,7 @@ fn getter(
     let mut body = Assembler::new();
     body.getstatic(field);
     ret(&mut body);
-    static_method(builder, name, descriptor, 1, 0, body);
+    static_method(builder, name, descriptor, field_slots(descriptor), 0, body);
 }
 
 fn animal_bytes() -> Vec<u8> {
@@ -186,8 +202,7 @@ fn lookupswitch_operand(default: i32, pairs: &[(i32, i32)]) -> Vec<u8> {
     bytes
 }
 
-/// `BytecodeProbe`: every instruction shape this slice claims, plus the malformed switch
-/// methods the decode-error tests call.
+/// `BytecodeProbe`: every instruction shape this slice claims.
 fn probe_bytes() -> Vec<u8> {
     let mut builder = ClassBuilder::new("BytecodeProbe", "java/lang/Object", 61);
 
@@ -373,14 +388,16 @@ fn probe_bytes() -> Vec<u8> {
     static_method(&mut builder, "missingField", "()V", 1, 0, missing);
 
     let mut wrong_descriptor = Assembler::new();
-    wrong_descriptor.iconst(1);
+    // The descriptor names a `long`, so the verifier expects two slots. The runtime
+    // rejects the mismatch before it reads the value.
+    wrong_descriptor.op(0x09, &[]); // lconst_0
     wrong_descriptor.putstatic(counter_as_long);
     wrong_descriptor.return_();
     static_method(
         &mut builder,
         "wrongDescriptor",
         "()V",
-        1,
+        2,
         0,
         wrong_descriptor,
     );
@@ -552,20 +569,20 @@ fn probe_bytes() -> Vec<u8> {
     let mut long_body = Assembler::new();
     long_body.ldc2_w(long_constant);
     long_body.lreturn();
-    static_method(&mut builder, "longConstant", "()J", 1, 0, long_body);
+    static_method(&mut builder, "longConstant", "()J", 2, 0, long_body);
 
     let double_constant = builder.double(2.25);
     let mut double_body = Assembler::new();
     double_body.ldc2_w(double_constant);
     double_body.dreturn();
-    static_method(&mut builder, "doubleConstant", "()D", 1, 0, double_body);
+    static_method(&mut builder, "doubleConstant", "()D", 2, 0, double_body);
 
     // static long echoLong(long value) { return value; } -- one local slot, see the
     // boundary in PROJECT.md.
     let mut echo_long = Assembler::new();
     echo_long.lload(0);
     echo_long.lreturn();
-    static_method(&mut builder, "echoLong", "(J)J", 1, 2, echo_long);
+    static_method(&mut builder, "echoLong", "(J)J", 2, 2, echo_long);
 
     let mut echo_float = Assembler::new();
     echo_float.fload(0);
@@ -575,7 +592,7 @@ fn probe_bytes() -> Vec<u8> {
     let mut echo_double = Assembler::new();
     echo_double.dload(0);
     echo_double.dreturn();
-    static_method(&mut builder, "echoDouble", "(D)D", 1, 2, echo_double);
+    static_method(&mut builder, "echoDouble", "(D)D", 2, 2, echo_double);
 
     let long_seven = builder.long(7);
     let long_nine = builder.long(9);
@@ -584,7 +601,7 @@ fn probe_bytes() -> Vec<u8> {
     long_compare.ldc2_w(long_nine);
     long_compare.lcmp();
     long_compare.ireturn();
-    static_method(&mut builder, "longCompare", "()I", 2, 0, long_compare);
+    static_method(&mut builder, "longCompare", "()I", 4, 0, long_compare);
 
     let float_one = builder.float(1.5);
     let float_two = builder.float(2.5);
@@ -617,7 +634,7 @@ fn probe_bytes() -> Vec<u8> {
     double_compare.ldc2_w(double_two);
     double_compare.dcmpl();
     double_compare.ireturn();
-    static_method(&mut builder, "doubleCompare", "()I", 2, 0, double_compare);
+    static_method(&mut builder, "doubleCompare", "()I", 4, 0, double_compare);
 
     let double_nan = builder.double(f64::NAN);
     let mut double_nan_l = Assembler::new();
@@ -625,14 +642,32 @@ fn probe_bytes() -> Vec<u8> {
     double_nan_l.ldc2_w(double_one);
     double_nan_l.dcmpl();
     double_nan_l.ireturn();
-    static_method(&mut builder, "doubleNaNL", "()I", 2, 0, double_nan_l);
+    static_method(&mut builder, "doubleNaNL", "()I", 4, 0, double_nan_l);
 
     let mut double_nan_g = Assembler::new();
     double_nan_g.ldc2_w(double_nan);
     double_nan_g.ldc2_w(double_one);
     double_nan_g.dcmpg();
     double_nan_g.ireturn();
-    static_method(&mut builder, "doubleNaNG", "()I", 2, 0, double_nan_g);
+    static_method(&mut builder, "doubleNaNG", "()I", 4, 0, double_nan_g);
+
+    // `ldc2_w` may not carry an `int` constant.
+    let bad_ldc_index = builder.integer(1);
+    let mut bad_ldc = Assembler::new();
+    bad_ldc.op(0x14, &bad_ldc_index.to_be_bytes());
+    bad_ldc.return_();
+    static_method(&mut builder, "badLdc2Int", "()V", 1, 0, bad_ldc);
+
+    builder.build()
+}
+
+/// The malformed switch bodies the decode-error test examines directly.
+///
+/// They cannot live in `BytecodeProbe`: definition-time verification rejects a malformed
+/// switch before a class enters the table, so the test parses this class and decodes each
+/// method's `Code` attribute without defining it.
+fn malformed_switch_bytes() -> Vec<u8> {
+    let mut builder = ClassBuilder::new("MalformedSwitches", "java/lang/Object", 61);
 
     // Malformed switches, each at code offset 0 so the padding is exactly three bytes.
     let mut bad_unsorted = Assembler::new();
@@ -681,13 +716,6 @@ fn probe_bytes() -> Vec<u8> {
     bad_target.op(0xaa, &tableswitch_operand(19, 0, 0, &[20]));
     bad_target.return_();
     static_method(&mut builder, "badTarget", "()V", 1, 0, bad_target);
-
-    // `ldc2_w` may not carry an `int` constant.
-    let bad_ldc_index = builder.integer(1);
-    let mut bad_ldc = Assembler::new();
-    bad_ldc.op(0x14, &bad_ldc_index.to_be_bytes());
-    bad_ldc.return_();
-    static_method(&mut builder, "badLdc2Int", "()V", 1, 0, bad_ldc);
 
     builder.build()
 }
@@ -1519,36 +1547,31 @@ fn numeric_constants_compare() {
 
 #[test]
 fn malformed_switches_are_decode_errors() {
-    let fixture = fixture();
+    let bytes = malformed_switch_bytes();
+    let file = ClassFile::parse(&bytes).expect("the fixture parses");
 
-    assert_decode_error(
-        call(&fixture, "badUnsorted", "()V", Vec::new()),
-        "keys must be strictly ascending",
-    );
-    assert_decode_error(
-        call(&fixture, "badDuplicate", "()V", Vec::new()),
-        "key 10 after 10",
-    );
-    assert_decode_error(
-        call(&fixture, "badPadding", "()V", Vec::new()),
-        "non-zero padding byte",
-    );
-    assert_decode_error(
-        call(&fixture, "badTruncated", "()V", Vec::new()),
-        "truncated operand",
-    );
-    assert_decode_error(
-        call(&fixture, "badRange", "()V", Vec::new()),
-        "high 1 below low 2",
-    );
-    assert_decode_error(
-        call(&fixture, "badNegativePairs", "()V", Vec::new()),
-        "negative pair count",
-    );
-    assert_decode_error(
-        call(&fixture, "badTarget", "()V", Vec::new()),
-        "switch target byte 19 is not an instruction boundary",
-    );
+    for (name, fragment) in [
+        ("badUnsorted", "keys must be strictly ascending"),
+        ("badDuplicate", "key 10 after 10"),
+        ("badPadding", "non-zero padding byte"),
+        ("badTruncated", "truncated operand"),
+        ("badRange", "high 1 below low 2"),
+        ("badNegativePairs", "negative pair count"),
+        (
+            "badTarget",
+            "switch target byte 19 is not an instruction boundary",
+        ),
+    ] {
+        let method = file
+            .find_method(name, "()V")
+            .expect("the constant pool resolves")
+            .unwrap_or_else(|| panic!("{name} exists"));
+        let code = file
+            .code(method)
+            .expect("the Code attribute resolves")
+            .unwrap_or_else(|| panic!("{name} has Code"));
+        assert_decode_error(decode(&file, &code.data).map(|_| None::<Value>), fragment);
+    }
 }
 
 #[test]
