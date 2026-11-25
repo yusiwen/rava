@@ -196,25 +196,7 @@ fn run_method(
         }
     }
 
-    let mut locals = vec![Value::Int(0); usize::from(decoded.max_locals)];
-    let base = match receiver {
-        Some(reference) => {
-            let slot = locals
-                .first_mut()
-                .ok_or_else(|| InterpError::Decode("instance method has no local 0".to_owned()))?;
-            *slot = Value::Ref(reference);
-            1
-        }
-        None => 0,
-    };
-    if args.len() + base > locals.len() {
-        return Err(InterpError::Decode(format!(
-            "{} args do not fit in {} locals",
-            args.len(),
-            locals.len() - base
-        )));
-    }
-    locals[base..base + args.len()].copy_from_slice(&args);
+    let locals = vec![Value::Int(0); usize::from(decoded.max_locals)];
     let mut frame = Frame::new(
         class,
         locals,
@@ -222,9 +204,66 @@ fn run_method(
         decoded.handlers,
         decoded.max_stack,
     );
+    bind_arguments(descriptor, receiver, &args, &mut frame)?;
     let guard = thread.enter_frame();
     guard.publish(&frame.roots());
     execute(shared, thread, &mut frame, &guard)
+}
+
+/// Bind argument values to a frame's JVM local slots.
+///
+/// A receiver occupies local 0; a static method's first parameter starts there. Every
+/// parameter starts at the next JVM slot, and `long`/`double` consume two slots: the
+/// second slot is a hole, not a second value. The descriptor, not the number of values
+/// alone, decides the layout, so a compact copy would put `(JI)J`'s `int` at local 1
+/// while the bytecode loads it from local 2.
+fn bind_arguments(
+    descriptor: &str,
+    receiver: Option<ObjRef>,
+    args: &[Value],
+    frame: &mut Frame,
+) -> Result<(), InterpError> {
+    let expected = argument_count(descriptor)?;
+    if args.len() != expected {
+        return Err(InterpError::ArgumentCount {
+            expected,
+            found: args.len(),
+        });
+    }
+
+    let mut slot = 0u16;
+    if let Some(reference) = receiver {
+        frame.set_local(0, Value::Ref(reference))?;
+        slot = 1;
+    }
+    let base = usize::from(slot);
+    let required = base
+        .checked_add(parameter_slots(descriptor)?)
+        .ok_or_else(|| InterpError::Decode("parameter slot count overflows".to_owned()))?;
+    if required > frame.locals.len() {
+        return Err(InterpError::Decode(format!(
+            "method needs {required} local slot(s) for its arguments, max_locals is {}",
+            frame.locals.len()
+        )));
+    }
+
+    let mut next = 0;
+    for_each_parameter(descriptor, |kind| {
+        let value = args.get(next).copied().ok_or(InterpError::ArgumentCount {
+            expected,
+            found: next,
+        })?;
+        next += 1;
+        if matches!(kind, b'J' | b'D') {
+            frame.set_wide_local(slot, value)?;
+            slot += 2;
+        } else {
+            frame.set_local(slot, value)?;
+            slot += 1;
+        }
+        Ok(())
+    })?;
+    Ok(())
 }
 
 fn execute(
@@ -280,32 +319,28 @@ fn execute(
                 frame.push(Value::Ref(reference))?;
             }
             Instr::Iinc(index, increment) => {
-                let slot = frame.locals.get_mut(usize::from(index)).ok_or_else(|| {
-                    InterpError::Decode(format!("local {index} is outside the frame"))
-                })?;
-                let value = slot.as_int().ok_or(InterpError::WrongValue)?;
-                *slot = Value::Int(value.wrapping_add(increment));
+                // `iinc` reads and writes an int local, so a hole is a load of it.
+                let current = frame
+                    .local(index)?
+                    .as_int()
+                    .ok_or(InterpError::WrongValue)?;
+                frame.set_local(index, Value::Int(current.wrapping_add(increment)))?;
             }
             Instr::ILoad(index)
             | Instr::LLoad(index)
             | Instr::FLoad(index)
             | Instr::DLoad(index)
             | Instr::ALoad(index) => {
-                let value = *frame.locals.get(usize::from(index)).ok_or_else(|| {
-                    InterpError::Decode(format!("local {index} is outside the frame"))
-                })?;
+                let value = frame.local(index)?;
                 frame.push(value)?;
             }
-            Instr::IStore(index)
-            | Instr::LStore(index)
-            | Instr::FStore(index)
-            | Instr::DStore(index)
-            | Instr::AStore(index) => {
+            Instr::LStore(index) | Instr::DStore(index) => {
                 let value = frame.pop()?;
-                let slot = frame.locals.get_mut(usize::from(index)).ok_or_else(|| {
-                    InterpError::Decode(format!("local {index} is outside the frame"))
-                })?;
-                *slot = value;
+                frame.set_wide_local(index, value)?;
+            }
+            Instr::IStore(index) | Instr::FStore(index) | Instr::AStore(index) => {
+                let value = frame.pop()?;
+                frame.set_local(index, value)?;
             }
             Instr::NewArray(kind) => {
                 let length = checked_length(int(frame.pop()?)?)?;
@@ -2323,18 +2358,24 @@ pub(crate) fn ensure_initialized(
     result
 }
 
-pub(crate) fn argument_count(descriptor: &str) -> Result<usize, InterpError> {
+/// Visit each parameter of a method descriptor in order, passing its first byte.
+///
+/// `J` and `D` are the wide parameter kinds; `L` and `[` are one operand-stack value and
+/// one local slot. The return descriptor is not visited.
+fn for_each_parameter(
+    descriptor: &str,
+    mut visit: impl FnMut(u8) -> Result<(), InterpError>,
+) -> Result<(), InterpError> {
     let Some((args, _)) = descriptor
         .strip_prefix('(')
         .and_then(|rest| rest.split_once(')'))
     else {
         return Err(InterpError::BadDescriptor(descriptor.to_owned()));
     };
-    let mut count = 0;
     let mut chars = args.chars();
     while let Some(ch) = chars.next() {
         match ch {
-            'I' | 'J' | 'F' | 'D' | 'Z' | 'B' | 'C' | 'S' => count += 1,
+            'I' | 'J' | 'F' | 'D' | 'Z' | 'B' | 'C' | 'S' => visit(ch as u8)?,
             'L' => {
                 // Skip the internal name of an object descriptor; one value.
                 for next in chars.by_ref() {
@@ -2342,7 +2383,7 @@ pub(crate) fn argument_count(descriptor: &str) -> Result<usize, InterpError> {
                         break;
                     }
                 }
-                count += 1;
+                visit(b'L')?;
             }
             '[' => {
                 // An array descriptor is any number of `[` followed by an element
@@ -2367,7 +2408,7 @@ pub(crate) fn argument_count(descriptor: &str) -> Result<usize, InterpError> {
                         )));
                     }
                 }
-                count += 1;
+                visit(b'[')?;
             }
             other => {
                 return Err(InterpError::BadDescriptor(format!(
@@ -2376,5 +2417,31 @@ pub(crate) fn argument_count(descriptor: &str) -> Result<usize, InterpError> {
             }
         }
     }
+    Ok(())
+}
+
+/// The number of operand-stack values a method descriptor's parameters contribute.
+///
+/// This is not the number of local slots: a `long`/`double` parameter is one value but
+/// two slots. Argument binding uses [`parameter_slots`] instead.
+pub(crate) fn argument_count(descriptor: &str) -> Result<usize, InterpError> {
+    let mut count = 0;
+    for_each_parameter(descriptor, |_| {
+        count += 1;
+        Ok(())
+    })?;
     Ok(count)
+}
+
+/// The JVM local slots a method descriptor's parameters occupy.
+///
+/// `long` and `double` parameters consume two slots; every other parameter consumes one.
+/// The instance receiver is not included.
+fn parameter_slots(descriptor: &str) -> Result<usize, InterpError> {
+    let mut slots = 0;
+    for_each_parameter(descriptor, |kind| {
+        slots += if matches!(kind, b'J' | b'D') { 2 } else { 1 };
+        Ok(())
+    })?;
+    Ok(slots)
 }

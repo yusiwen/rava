@@ -191,7 +191,9 @@ documented in [`spring-context.md`](spring-context.md).
 - The interpreter decodes a broad but not complete JVM instruction set; `jsr`/`ret`,
   some `wide` forms, full `MethodHandle`/`VarHandle` and arbitrary `invokedynamic`
   bootstraps are not implemented.
-- Locals use one slot per value; `long`/`double` are not widened to two slots.
+- Locals are JVM slots: a `long`/`double` value stored in a local occupies two, and the
+  second is a hole that no load may read. A load of a hole is a typed interpreter error;
+  the verifier counts slots but does not type-check local loads.
 - `athrow` does not synthesize NPE/ClassCastException/ArrayStoreException objects;
   those paths are typed interpreter errors.
 - `finally`, stack traces and `try-with-resources` lowering are not special-cased;

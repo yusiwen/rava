@@ -73,21 +73,19 @@ fn probe_bytes() -> Vec<u8> {
     init.aload(0);
     init.lload(4);
     init.putfield(field_refs[3]);
-    // The interpreter's frame gives each argument one local slot (a `long`/`double`
-    // occupies one `Value`), so the float and double arguments sit at 5 and 6.
+    // JVM slots after `this`: B at 1, S at 2, I at 3, J at 4..=5, F at 6, D at 7..=8.
     init.aload(0);
-    init.fload(5);
+    init.fload(6);
     init.putfield(field_refs[4]);
     init.aload(0);
-    init.dload(6);
+    init.dload(7);
     init.putfield(field_refs[5]);
     init.return_();
     builder.method(
         ACC_PUBLIC,
         "<init>",
         "(BSIJFD)V",
-        // JVM slots: `this` plus B/S/I/J(2)/F/D(2) is nine; the frame itself places the
-        // six argument values at locals 1..=6.
+        // `this` plus B/S/I/J(2)/F/D(2) is nine JVM local slots.
         Some((4, 9, init.finish().unwrap())),
     );
 

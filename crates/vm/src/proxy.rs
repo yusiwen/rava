@@ -110,13 +110,12 @@ const CLASS_VERSION: u16 = 61;
 /// four, and unboxing a `long`/`double` result pushes two. Six covers every case.
 const PROXY_METHOD_MAX_STACK: u16 = 6;
 
-/// The most compact parameter locals one generated method may address.
+/// The largest local index a one-byte local instruction can address.
 ///
-/// The interpreter stores one local per argument (not two for `long`/`double`), and a
-/// generated method loads those locals by their compact index. A one-byte local index
-/// reaches 255, which is the bound this check enforces; a wider method is rejected instead
-/// of silently truncating an index.
-const MAX_COMPACT_LOCALS: usize = 255;
+/// Generated methods load every parameter with its one-byte opcode, so the last parameter's
+/// JVM slot must fit. A method whose parameter slots exceed the bound is rejected instead of
+/// silently truncating an index.
+const MAX_ONE_BYTE_LOCAL: usize = u8::MAX as usize;
 
 /// The process-local counter that names generated proxy classes.
 static NEXT_PROXY_CLASS: AtomicU32 = AtomicU32::new(1);
@@ -673,12 +672,12 @@ fn generate_proxy_method(
     method: &ProxyMethod,
 ) -> Result<(), VmError> {
     let parameters = reflection::parameter_descriptors(&method.descriptor)?;
-    if parameters.len() > MAX_COMPACT_LOCALS {
+    let slot_count = parameter_slots(&parameters)?;
+    let last_parameter_slot = usize::from(slot_count) - 1;
+    if last_parameter_slot > MAX_ONE_BYTE_LOCAL {
         return Err(VmError::Native(format!(
-            "proxy method {}{} has {} parameter(s), more than the {MAX_COMPACT_LOCALS} compact local slots a generated method can address",
-            method.name,
-            method.descriptor,
-            parameters.len()
+            "proxy method {}{} needs local slot {last_parameter_slot} for its last parameter, but a one-byte local index reaches only {MAX_ONE_BYTE_LOCAL}",
+            method.name, method.descriptor
         )));
     }
 
@@ -704,19 +703,20 @@ fn generate_proxy_method(
     let mut code = Assembler::new();
     code.iconst(parameters.len() as i32);
     code.anewarray(object_array);
+    let mut parameter_slot = 1usize; // `this` is local 0.
     for (index, (descriptor, value_of)) in parameters.iter().zip(&boxes).enumerate() {
         code.dup();
         code.iconst(index as i32);
-        load_parameter(&mut code, descriptor, index + 1)?;
+        load_parameter(&mut code, descriptor, parameter_slot)?;
         if let Some(value_of) = value_of {
             invokestatic(&mut code, *value_of);
         }
         code.aastore();
+        parameter_slot += usize::from(parameter_width(descriptor)?);
     }
-    // The compact argument locals occupy 1..=n, so the first free compact slot is n + 1.
-    // `max_locals` below is the JVM slot count, which is larger whenever a `long` or
-    // `double` parameter appears; the temporary local is always inside it.
-    let temp = parameters.len() + 1;
+    // The parameters occupy slots 0..slot_count, so the temporary `Object[]` local goes
+    // after the last parameter slot.
+    let temp = usize::from(slot_count);
     store_local(&mut code, temp);
 
     code.aload(0);
@@ -731,7 +731,9 @@ fn generate_proxy_method(
 
     emit_return(builder, &mut code, &method.descriptor)?;
 
-    let max_locals = parameter_slots(&parameters)? + 2;
+    let max_locals = slot_count
+        .checked_add(1)
+        .ok_or_else(|| VmError::Native("proxy method local count overflows".to_owned()))?;
     builder.method(
         ACC_PUBLIC,
         &method.name,
@@ -757,11 +759,11 @@ fn box_method_ref(builder: &mut ClassBuilder, descriptor: &str) -> Option<u16> {
     Some(builder.method_ref(owner, method, value_of_descriptor))
 }
 
-/// Load compact parameter local `slot` with the opcode its descriptor needs.
+/// Load the parameter whose first JVM slot is `slot` with the opcode its descriptor needs.
 fn load_parameter(code: &mut Assembler, descriptor: &str, slot: usize) -> Result<(), VmError> {
     let slot = u8::try_from(slot).map_err(|_| {
         VmError::Native(format!(
-            "compact parameter slot {slot} does not fit a one-byte local index"
+            "parameter slot {slot} does not fit a one-byte local index"
         ))
     })?;
     match descriptor.as_bytes().first().copied() {
@@ -779,21 +781,23 @@ fn load_parameter(code: &mut Assembler, descriptor: &str, slot: usize) -> Result
     Ok(())
 }
 
-/// The JVM slot count of a parameter list (`long`/`double` count two).
+/// The JVM local slots one parameter descriptor occupies (`long`/`double` count two).
+fn parameter_width(descriptor: &str) -> Result<u16, VmError> {
+    match descriptor.as_bytes().first().copied() {
+        Some(b'J' | b'D') => Ok(2),
+        Some(b'Z' | b'B' | b'C' | b'S' | b'I' | b'F' | b'L' | b'[') => Ok(1),
+        _ => Err(VmError::Native(format!(
+            "unsupported proxy parameter descriptor {descriptor}"
+        ))),
+    }
+}
+
+/// The JVM slot count of a parameter list (`long`/`double` count two), plus `this`.
 fn parameter_slots(parameters: &[&str]) -> Result<u16, VmError> {
     let mut slots = 1u16; // `this`
     for descriptor in parameters {
-        let width = match descriptor.as_bytes().first().copied() {
-            Some(b'J' | b'D') => 2,
-            Some(b'Z' | b'B' | b'C' | b'S' | b'I' | b'F' | b'L' | b'[') => 1,
-            _ => {
-                return Err(VmError::Native(format!(
-                    "unsupported proxy parameter descriptor {descriptor}"
-                )));
-            }
-        };
         slots = slots
-            .checked_add(width)
+            .checked_add(parameter_width(descriptor)?)
             .ok_or_else(|| VmError::Native("proxy method slot count overflows".to_owned()))?;
     }
     Ok(slots)
@@ -886,7 +890,7 @@ fn store_local(code: &mut Assembler, slot: usize) {
     match u8::try_from(slot) {
         Ok(slot) => code.astore(slot),
         Err(_) => {
-            let index = u16::try_from(slot).expect("a compact local index fits a u16");
+            let index = u16::try_from(slot).expect("a local index fits a u16");
             code.op(
                 0xc4,
                 &[0x3a, index.to_be_bytes()[0], index.to_be_bytes()[1]],
@@ -900,7 +904,7 @@ fn load_local(code: &mut Assembler, slot: usize) {
     match u8::try_from(slot) {
         Ok(slot) => code.aload(slot),
         Err(_) => {
-            let index = u16::try_from(slot).expect("a compact local index fits a u16");
+            let index = u16::try_from(slot).expect("a local index fits a u16");
             code.op(
                 0xc4,
                 &[0x19, index.to_be_bytes()[0], index.to_be_bytes()[1]],
