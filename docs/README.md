@@ -34,6 +34,7 @@ documents are added when there is something to record.
 | [`explanation/testing-and-evidence.md`](explanation/testing-and-evidence.md) | explanation | fixtures vs generated artifacts, golden dumps, compatibility gates, the opt-in Spring acceptance and evidence rules |
 | [`notes/README.md`](notes/README.md) | history index | the history-note contract and the milestone index |
 | [`notes/M2.md`](notes/M2.md) | history | the M2 sequence, Spring blocker chain, lessons and fragile follow-ups |
+| [`notes/M3.md`](notes/M3.md) | history | the M3 dynamic-code sequence, CGLIB blocker chain, Spring AOP/C2 gate and lessons |
 | [`../stdlib/README.md`](../stdlib/README.md) | state | the two generated class libraries, and what each one is for |
 | [`../stdlib/c1/README.md`](../stdlib/c1/README.md) | state | the M2.2 JDK 17 C1 signature tree, its normalization boundary and its gates |
 
