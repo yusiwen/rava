@@ -39,9 +39,8 @@ fn add_class() -> Vec<u8> {
 
     // `lshl` pops a category-2 value and a category-1 distance (JVMS §6.5.lshl); the
     // distance must be read as an `int` even though the value is a `long`. The distance
-    // is a constant here because this interpreter stores one `Value` per local slot (the
-    // PROJECT.md boundary), so a second `int` parameter of a `(JI)J` method would land
-    // in local 1 while javac emits `iload 2`.
+    // is pushed as a constant here so this probe exercises only `lshl`;
+    // `slot_layout.rs` covers a `(JI)J` frame's JVM slot layout with a compiled fixture.
     for (name, distance) in [("shiftLeft40", 40u8), ("shiftLeft70", 70u8)] {
         let mut shift_left = Assembler::new();
         shift_left.lload(0);

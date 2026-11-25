@@ -188,9 +188,10 @@ the jars skips with a message.
 - **The verifier is not a full Java verifier.** It checks height, locals, branches and
   handlers, not operand types or `StackMapTable`. Generated classes still pass the same
   verifier as loaded classes; nothing is skipped.
-- **Mixed long/double locals are wrong.** The interpreter binds arguments compactly
-  while the verifier counts JVM slots. A compiled `static long shift(long, int)` returns
-  the wrong value. Issue #52 tracks the fix; the C2 gate does not exercise that shape.
+- **Local-slot types are not verified.** The verifier counts JVM slots and tracks
+  definitely assigned accesses, but it does not model a wide value's second half as a
+  hole or type-check a local load. The interpreter rejects a load of a hole with a typed
+  error, so such invalid bytecode fails at run time rather than at verification time.
 - **Reflection is not complete.** `Class.getFields` is not implemented, and the C1 tree
   is not closed under superclasses (69 referenced owners are absent). Issue #53 tracks
   both; the VM tolerates an omitted superclass during hierarchy walks.
@@ -199,8 +200,9 @@ the jars skips with a message.
   empty stubs.
 - **`Unsafe` is U0 only.** U1+ methods fail loudly; direct buffers have no storage or
   address; `invokeCleaner` is a no-op.
-- **Proxy limits.** No access checks, no `UndeclaredThrowableException`, the
-  `ClassLoader` argument is ignored, and generated methods use compact argument locals.
+- **Proxy limits.** No access checks, no `UndeclaredThrowableException`, and the
+  `ClassLoader` argument is ignored. Generated methods load their parameters at JVM slot
+  indexes and place the temporary `Object[]` after the last parameter slot.
 - **CGLIB/AOP scope.** The gate covers a bare `Enhancer`, a configuration subclass and
   `ProxyFactory` proxies. Advice chains, pointcuts, introductions and `@AspectJ`
   auto-proxying are not exercised; record `equals`/`toString`, `FutureTask.cancel`/timed

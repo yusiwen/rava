@@ -577,8 +577,8 @@ fn probe_bytes() -> Vec<u8> {
     double_body.dreturn();
     static_method(&mut builder, "doubleConstant", "()D", 2, 0, double_body);
 
-    // static long echoLong(long value) { return value; } -- one local slot, see the
-    // boundary in PROJECT.md.
+    // static long echoLong(long value) { return value; } -- the value owns JVM slots
+    // 0 and 1, and the load reads the first one.
     let mut echo_long = Assembler::new();
     echo_long.lload(0);
     echo_long.lreturn();
@@ -1488,8 +1488,8 @@ fn numeric_constants_keep_their_value_kind() {
         Some(Value::Double(2.25))
     );
 
-    // The interpreter keeps one local slot per value even for `long`/`double`, so the
-    // value round-trips through local 0 without a second slot.
+    // A wide argument begins at local 0; its second JVM slot is the hole at local 1, not a
+    // second value, and a load of slot 0 returns the whole `long`/`double`.
     assert_eq!(
         ok_call(&fixture, "echoLong", "(J)J", vec![Value::Long(42)]),
         Some(Value::Long(42))

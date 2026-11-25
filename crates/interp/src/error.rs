@@ -95,6 +95,17 @@ pub enum InterpError {
     Thrown(ObjRef),
     StackUnderflow,
     WrongValue,
+    /// A local load named the second slot of a wide (`long`/`double`) value.
+    ///
+    /// That slot is a hole: it holds no value of its own, and the verifier should reject
+    /// the load. The interpreter reports a typed error rather than returning a stale
+    /// neighbour.
+    LocalHole(u16),
+    /// The argument values handed to a method disagree with its descriptor.
+    ArgumentCount {
+        expected: usize,
+        found: usize,
+    },
     BadDescriptor(String),
     HeldLock(rava_vm::LockHeld),
     /// A monitor instruction failed: a null reference or an unlock this thread does not
@@ -177,6 +188,15 @@ impl fmt::Display for InterpError {
             Self::Thrown(throwable) => write!(f, "uncaught exception {throwable}"),
             Self::StackUnderflow => write!(f, "operand stack underflow"),
             Self::WrongValue => write!(f, "operand has the wrong type"),
+            Self::LocalHole(index) => {
+                write!(f, "local {index} is the empty second slot of a wide value")
+            }
+            Self::ArgumentCount { expected, found } => {
+                write!(
+                    f,
+                    "method expects {expected} argument value(s), found {found}"
+                )
+            }
             Self::Monitor(MonitorError::Null) => {
                 write!(f, "monitor instruction on a null reference")
             }
