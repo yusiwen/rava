@@ -310,6 +310,12 @@ pub fn register_natives(shared: &Shared) {
         "([Ljava/lang/Class;)Ljava/lang/reflect/Constructor;",
         class_get_constructor,
     );
+    shared.register_native(
+        "java/lang/Class",
+        "getProtectionDomain",
+        "()Ljava/security/ProtectionDomain;",
+        class_get_protection_domain,
+    );
 
     // `Field` and `Method` declare `getName` themselves; `Constructor` overrides it with
     // the binary class name, exactly as the JDK does.
@@ -393,6 +399,12 @@ pub fn register_natives(shared: &Shared) {
             "getParameterCount",
             "()I",
             executable_get_parameter_count,
+        );
+        shared.register_native(
+            owner,
+            "getExceptionTypes",
+            "()[Ljava/lang/Class;",
+            executable_get_exception_types,
         );
     }
     shared.register_native(
@@ -2411,6 +2423,51 @@ fn executable_get_parameter_count(
     Ok(Some(Value::Int(count)))
 }
 
+/// `Executable.getExceptionTypes()`: the class objects named by the member's `Exceptions`
+/// attribute, in declaration order.
+///
+/// CGLIB reads this through `ReflectUtils.getExceptionTypes(Member)` when it emits an
+/// overriding method, so the generated method declares the same checked exceptions.
+/// `Method` and `Constructor` both redeclare the method (their common base is
+/// `Executable`), so both names carry the entry.
+fn executable_get_exception_types(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    _args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let member = member_of(shared, receiver)?;
+    if member.kind == MemberKind::Field {
+        return Err(VmError::Native(
+            "getExceptionTypes is not a field method".to_owned(),
+        ));
+    }
+    let (exceptions, loader) = {
+        let entry = shared
+            .entry(member.class)
+            .ok_or_else(|| VmError::Loader(format!("class id {} is not loaded", member.class.0)))?;
+        let metadata = entry.metadata()?;
+        let method = metadata
+            .method(&member.name, &member.descriptor)
+            .ok_or_else(|| {
+                VmError::Native(format!(
+                    "class {} has no method {}:{}",
+                    entry.name, member.name, member.descriptor
+                ))
+            })?;
+        (method.exceptions.clone(), entry.loader)
+    };
+    let mut classes = Vec::with_capacity(exceptions.len());
+    for name in &exceptions {
+        let class = shared.load_class(loader, name)?;
+        classes.push(shared.class_object(class)?);
+    }
+    let component = shared.load_library_class("java/lang/Class")?;
+    let array = allocate_reference_array(shared, ClassRef::Named(component), &classes)?;
+    Ok(Some(Value::Ref(array)))
+}
+
 /// The class-file flags of a member, looked up by name and descriptor in the typed C1
 /// metadata.
 fn member_access_flags(shared: &Shared, member: &ReflectMember) -> Result<u16, VmError> {
@@ -2527,4 +2584,21 @@ pub fn return_descriptor(descriptor: &str) -> Result<&str, VmError> {
 
 fn bad_descriptor(descriptor: &str) -> VmError {
     VmError::Native(format!("malformed descriptor {descriptor}"))
+}
+
+/// `Class.getProtectionDomain()`: this VM has no code-source or security model, so a class
+/// has no protection domain.
+///
+/// The C1 stub declares the method without bytecode. Spring's repackaged CGLIB asks for
+/// the superclass's domain and forwards it to `ClassLoader.defineClass`, whose contract
+/// accepts a null domain, so the honest answer is null rather than a synthesized object.
+fn class_get_protection_domain(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    _args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    class_object_of(shared, receiver)?;
+    Ok(Some(Value::Ref(ObjRef::NULL)))
 }

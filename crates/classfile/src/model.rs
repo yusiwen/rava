@@ -105,11 +105,11 @@ pub enum BootstrapArgument {
     Double(f64),
     /// A `CONSTANT_MethodType`, as its method descriptor (`(Ljava/lang/String;)I`).
     MethodType(String),
-    /// A `CONSTANT_MethodHandle` to a method, with its reference kind.
+    /// A `CONSTANT_MethodHandle` to a method or field, with its reference kind.
     ///
-    /// Field handles (`REF_getField`, `REF_putStatic`, ...) are rejected when the entry is
-    /// materialized: this VM has no `MethodHandle`/`VarHandle` execution, and only the
-    /// lambda implementation handle needs a method target.
+    /// A lambda's implementation handle names a method. The record bootstrap's component
+    /// getters are `REF_getField` handles naming a private final field; the interpreter
+    /// reads that field for the record's `hashCode`.
     MethodHandle(BootstrapMethodHandle),
 }
 
@@ -274,7 +274,7 @@ impl ClassFile {
     /// An out-of-range index, a `bootstrap_method_ref` that is not a
     /// `CONSTANT_MethodHandle`, a handle that is not `REF_invokeStatic` to a method, or a
     /// static argument that is not a `String`/`Class`/`int`/`long`/`float`/`double`/
-    /// `MethodType`/method `MethodHandle` is [`Error::BadBootstrapMethod`].
+    /// `MethodType`/`MethodHandle` is [`Error::BadBootstrapMethod`].
     pub fn bootstrap_method(&self, index: u16) -> Result<BootstrapMethodEntry, Error> {
         let raw = self
             .bootstrap_methods
@@ -403,12 +403,14 @@ impl ClassFile {
     }
 }
 
-/// Resolves a `CONSTANT_MethodHandle` to its kind and the method it names.
+/// Resolves a `CONSTANT_MethodHandle` to its kind and the member it names.
 ///
-/// Only method reference kinds are accepted: the VM has no `MethodHandle`/`VarHandle`
-/// execution, and a lambda implementation handle always names a method. A field handle,
-/// an out-of-range reference, or a reference that is not a method is
-/// [`Error::BadBootstrapMethod`].
+/// The method reference kinds and the four field reference kinds are accepted: a
+/// bootstrap static argument may name a field, which is how
+/// `java.lang.runtime.ObjectMethods` hands a record's component getters to its bootstrap
+/// (JVMS §4.7.23 allows any loadable `CONSTANT_MethodHandle`). The reference named by the
+/// kind must be the matching constant kind: a method reference for a method handle, a
+/// `CONSTANT_Fieldref` for a field handle, otherwise [`Error::BadBootstrapMethod`].
 fn resolve_method_handle(
     pool: &ConstantPool,
     index: u16,
@@ -427,14 +429,22 @@ fn resolve_method_handle(
             });
         }
     };
-    if !matches!(
+    let field_kind = matches!(
+        reference_kind,
+        ReferenceKind::GetField
+            | ReferenceKind::GetStatic
+            | ReferenceKind::PutField
+            | ReferenceKind::PutStatic
+    );
+    let method_kind = matches!(
         reference_kind,
         ReferenceKind::InvokeVirtual
             | ReferenceKind::InvokeStatic
             | ReferenceKind::InvokeSpecial
             | ReferenceKind::NewInvokeSpecial
             | ReferenceKind::InvokeInterface
-    ) {
+    );
+    if !field_kind && !method_kind {
         return Err(Error::BadBootstrapMethod {
             detail: format!(
                 "method handle constant {index} has unsupported reference kind {:?}",
@@ -442,15 +452,14 @@ fn resolve_method_handle(
             ),
         });
     }
-    let (owner, name, descriptor) = match pool.get(reference_index)? {
-        Constant::MethodRef {
-            class_index,
-            name_and_type_index,
-        }
-        | Constant::InterfaceMethodRef {
-            class_index,
-            name_and_type_index,
-        } => {
+    let (owner, name, descriptor) = match (field_kind, pool.get(reference_index)?) {
+        (
+            true,
+            Constant::FieldRef {
+                class_index,
+                name_and_type_index,
+            },
+        ) => {
             let (name, descriptor) = pool.name_and_type(*name_and_type_index)?;
             (
                 pool.class_name(*class_index)?.to_owned(),
@@ -458,7 +467,33 @@ fn resolve_method_handle(
                 descriptor.to_owned(),
             )
         }
-        other => {
+        (
+            false,
+            Constant::MethodRef {
+                class_index,
+                name_and_type_index,
+            }
+            | Constant::InterfaceMethodRef {
+                class_index,
+                name_and_type_index,
+            },
+        ) => {
+            let (name, descriptor) = pool.name_and_type(*name_and_type_index)?;
+            (
+                pool.class_name(*class_index)?.to_owned(),
+                name.to_owned(),
+                descriptor.to_owned(),
+            )
+        }
+        (true, other) => {
+            return Err(Error::BadBootstrapMethod {
+                detail: format!(
+                    "field method handle constant {index} references constant {reference_index}, a {}, not a field",
+                    constant_kind(other)
+                ),
+            });
+        }
+        (false, other) => {
             return Err(Error::BadBootstrapMethod {
                 detail: format!(
                     "method handle constant {index} references constant {reference_index}, a {}, not a method",

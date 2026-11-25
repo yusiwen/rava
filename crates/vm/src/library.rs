@@ -23,9 +23,9 @@ use crate::shared::Shared;
 use crate::thread::ThreadState;
 use crate::value::Value;
 use crate::{
-    annotation, arrays, atomic, boxed, class_loader, collections, direct_buffer, exceptions,
-    format, generic, instance, jul, locks, maps, math, method_handles, object, proxy, references,
-    reflection, regex, string, system, thread_natives,
+    annotation, arrays, atomic, bitset, boxed, class_loader, collections, direct_buffer,
+    exceptions, format, generic, instance, jul, locks, maps, math, method_handles, modules, object,
+    proxy, references, reflection, regex, string, system, thread_natives,
 };
 
 /// `java.lang.System`'s binary-stable internal name.
@@ -78,6 +78,10 @@ pub fn register_all(shared: &Shared) -> Result<(), VmError> {
     // non-re-entrant `MethodHandle` queries. `MethodHandle.invoke*` lives in the
     // interpreter, like `Method.invoke`, because it re-enters the frame machinery.
     method_handles::register_natives(shared);
+    // `java.lang.module.ModuleFinder` reports this VM's empty system module set (M3.6).
+    modules::register_natives(shared)?;
+    // `java.util.BitSet` for CGLIB's `equals` helper and Spring's `MimeType` (M3.6).
+    bitset::register_natives(shared);
     register_print_stream(shared);
     install_system_streams(shared)?;
     proxy::install_support(shared)?;

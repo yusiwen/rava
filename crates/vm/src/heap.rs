@@ -3,10 +3,12 @@
 //! A handle carries a generation. Freeing a slot bumps the generation, so a stale
 //! handle is rejected instead of silently addressing a reused slot.
 
+use std::collections::BTreeSet;
 use std::fmt;
 
 use rava_classfile::metadata::AnnotationValue;
 
+use crate::futures::FutureTaskObject;
 use crate::loader::ClassId;
 use crate::value::Value;
 
@@ -1211,6 +1213,16 @@ pub struct LockState {
     pub count: usize,
 }
 
+/// One `java.util.BitSet`.
+///
+/// The JDK stores a `long[]`; a sorted set of the set bit indices is the same observable
+/// value for `get`/`set` and avoids modelling the word layout. CGLIB builds one while it
+/// emits an `equals` helper, and Spring's `MimeType` builds its token table from two.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct BitSetObject {
+    pub bits: BTreeSet<u32>,
+}
+
 /// One `java.util.concurrent.locks.Condition` created by `ReentrantLock.newCondition`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ConditionState {
@@ -1400,6 +1412,10 @@ pub enum HeapObject {
     Atomic(AtomicCell),
     /// One `ReentrantLock`.
     Lock(LockState),
+    /// One `java.util.concurrent.FutureTask` (see [`crate::futures::FutureTaskObject`]).
+    FutureTask(FutureTaskObject),
+    /// One `java.util.BitSet`: the indices of its set bits.
+    BitSet(BitSetObject),
     /// One `Condition` bound to a lock.
     Condition(ConditionState),
     /// One `java.util.regex.Pattern`.
@@ -1717,6 +1733,63 @@ impl Heap {
     /// Allocate one unlocked reentrant lock.
     pub fn allocate_lock(&mut self) -> ObjRef {
         self.allocate(HeapObject::Lock(LockState::default()))
+    }
+
+    /// Allocate one empty `java.util.BitSet`.
+    pub fn allocate_bit_set(&mut self) -> ObjRef {
+        self.allocate(HeapObject::BitSet(BitSetObject::default()))
+    }
+
+    /// The state behind a `BitSet` reference.
+    pub fn bit_set(&self, reference: ObjRef) -> Result<&BitSetObject, HeapError> {
+        match self.get(reference)? {
+            HeapObject::BitSet(bits) => Ok(bits),
+            _ => Err(HeapError::WrongObjectKind {
+                reference,
+                expected: "a BitSet",
+            }),
+        }
+    }
+
+    /// The mutable state behind a `BitSet` reference.
+    pub fn bit_set_mut(&mut self, reference: ObjRef) -> Result<&mut BitSetObject, HeapError> {
+        match self.get_mut(reference)? {
+            HeapObject::BitSet(bits) => Ok(bits),
+            _ => Err(HeapError::WrongObjectKind {
+                reference,
+                expected: "a BitSet",
+            }),
+        }
+    }
+
+    /// Allocate one `FutureTask` whose callable is filled in by its constructor.
+    pub fn allocate_future_task(&mut self, callable: ObjRef) -> ObjRef {
+        self.allocate(HeapObject::FutureTask(FutureTaskObject::new(callable)))
+    }
+
+    /// The state behind a `FutureTask` reference.
+    pub fn future_task(&self, reference: ObjRef) -> Result<&FutureTaskObject, HeapError> {
+        match self.get(reference)? {
+            HeapObject::FutureTask(task) => Ok(task),
+            _ => Err(HeapError::WrongObjectKind {
+                reference,
+                expected: "a FutureTask",
+            }),
+        }
+    }
+
+    /// The mutable state behind a `FutureTask` reference.
+    pub fn future_task_mut(
+        &mut self,
+        reference: ObjRef,
+    ) -> Result<&mut FutureTaskObject, HeapError> {
+        match self.get_mut(reference)? {
+            HeapObject::FutureTask(task) => Ok(task),
+            _ => Err(HeapError::WrongObjectKind {
+                reference,
+                expected: "a FutureTask",
+            }),
+        }
     }
 
     /// Allocate one condition bound to `lock`.

@@ -34,9 +34,11 @@
 pub mod callbacks;
 mod error;
 mod frame;
+pub mod futures;
 mod instr;
 mod lambda;
 pub mod method_handles;
+pub mod object_methods;
 pub mod proxy;
 pub mod reflect_invoke;
 pub mod streams;
@@ -734,15 +736,28 @@ fn execute(
                 descriptor,
                 bootstrap,
             } => {
-                // M2.18 dispatches the `StringConcatFactory` bootstrap and M2.19 adds the
-                // two `LambdaMetafactory` factory methods. The call site's arguments are
-                // popped exactly as for any other call; neither factory re-enters the
-                // interpreter, so no callee roots are needed. A lambda's captured values
-                // are stored in the new heap object (and enumerated by `Shared::roots`).
+                // M2.18 dispatches the `StringConcatFactory` bootstrap, M2.19 adds the
+                // two `LambdaMetafactory` factory methods, and M3.6 adds the
+                // `java.lang.runtime.ObjectMethods` record `hashCode` call site. The call
+                // site's arguments are popped exactly as for any other call. A lambda's
+                // captured values are stored in the new heap object (and enumerated by
+                // `Shared::roots`).
                 let args = pop_arguments(frame, &descriptor)?;
-                let reference = if bootstrap.handle.owner == lambda::LAMBDA_METAFACTORY {
-                    lambda::invoke_call_site(
+                let value = if bootstrap.handle.owner == lambda::LAMBDA_METAFACTORY {
+                    Value::Ref(lambda::invoke_call_site(
                         shared,
+                        frame.class,
+                        &bootstrap,
+                        &name,
+                        &descriptor,
+                        &args,
+                    )?)
+                } else if bootstrap.handle.owner == object_methods::OBJECT_METHODS {
+                    // A record's `hashCode` computes an int in the one frame model; its
+                    // `equals`/`toString` call sites are not synthesized.
+                    object_methods::invoke_call_site(
+                        shared,
+                        thread,
                         frame.class,
                         &bootstrap,
                         &name,
@@ -750,15 +765,15 @@ fn execute(
                         &args,
                     )?
                 } else {
-                    rava_vm::string_concat::invoke_call_site(
+                    Value::Ref(rava_vm::string_concat::invoke_call_site(
                         shared,
                         &bootstrap,
                         &name,
                         &descriptor,
                         &args,
-                    )?
+                    )?)
                 };
-                frame.push(Value::Ref(reference))?;
+                frame.push(value)?;
             }
             Instr::MonitorEnter => {
                 let reference = pop_reference(frame)?;
@@ -1236,6 +1251,7 @@ fn instance_field_slot(
 fn is_assignable(shared: &Shared, from: ClassId, to: ClassId) -> Result<bool, InterpError> {
     let mut stack = vec![from];
     let mut seen = HashSet::new();
+    let mut omitted_superclass: Option<String> = None;
     while let Some(current) = stack.pop() {
         if !seen.insert(current) {
             continue;
@@ -1249,16 +1265,34 @@ fn is_assignable(shared: &Shared, from: ClassId, to: ClassId) -> Result<bool, In
         for interface_name in entry.file.interface_names()? {
             // The C1 tree is the class library this VM ships; a transitive interface it
             // omits (for example `java.lang.constant.Constable` on `String`) cannot be
-            // part of the walk. A missing *class* elsewhere is still a loader error.
+            // part of the walk.
             match shared.load_class(entry.loader, interface_name) {
                 Ok(id) => stack.push(id),
                 Err(VmError::ClassNotFound { .. }) => {}
                 Err(error) => return Err(error.into()),
             }
         }
-        if let Some(super_class) = shared.resolution_superclass(current)? {
-            stack.push(super_class);
+        // The tree is not closed under superclasses either: `java.util.LinkedList`
+        // extends `java.util.AbstractSequentialList`, which is not a manifest owner and
+        // therefore is not projected. A walk over a loaded class stops where the shipped
+        // tree stops, so the class's own interface declarations still decide the answer.
+        match shared.resolution_superclass(current) {
+            Ok(Some(super_class)) => stack.push(super_class),
+            Ok(None) => {}
+            Err(VmError::ClassNotFound { name, .. }) => {
+                omitted_superclass.get_or_insert(name);
+            }
+            Err(error) => return Err(error.into()),
         }
+    }
+    // Nothing found, but the walk could not see the whole hierarchy. A "no" would be a
+    // guess, so report the omission instead: the caller can distinguish an unknown answer
+    // from a real one.
+    if let Some(name) = omitted_superclass {
+        return Err(InterpError::Decode(format!(
+            "assignability to {} is unknown: the C1 tree omits the superclass {name}",
+            class_name(shared, to)
+        )));
     }
     Ok(false)
 }
@@ -1858,6 +1892,8 @@ fn runtime_class_ref(shared: &Shared, reference: ObjRef) -> Result<ClassRef, Int
             HeapObject::LogLevel(_) => RuntimeKind::Library("java/util/logging/Level"),
             HeapObject::Atomic(cell) => RuntimeKind::Library(cell.class_name()),
             HeapObject::Lock(_) => RuntimeKind::Library(rava_vm::locks::REENTRANT_LOCK_CLASS),
+            HeapObject::FutureTask(_) => RuntimeKind::Library(rava_vm::futures::FUTURE_TASK_CLASS),
+            HeapObject::BitSet(_) => RuntimeKind::Library(rava_vm::bitset::BIT_SET_CLASS),
             HeapObject::Condition(_) => RuntimeKind::Library(rava_vm::locks::CONDITION_CLASS),
             HeapObject::Pattern(_) => RuntimeKind::Library("java/util/regex/Pattern"),
             HeapObject::Matcher(_) => RuntimeKind::Library("java/util/regex/Matcher"),
@@ -2079,6 +2115,12 @@ pub(crate) fn dispatch_class(
             HeapObject::Lock(_) => ReceiverKind::Named(
                 shared.load_library_class(rava_vm::locks::REENTRANT_LOCK_CLASS)?,
             ),
+            HeapObject::FutureTask(_) => {
+                ReceiverKind::Named(shared.load_library_class(rava_vm::futures::FUTURE_TASK_CLASS)?)
+            }
+            HeapObject::BitSet(_) => {
+                ReceiverKind::Named(shared.load_library_class(rava_vm::bitset::BIT_SET_CLASS)?)
+            }
             HeapObject::Condition(_) => {
                 ReceiverKind::Named(shared.load_library_class(rava_vm::locks::CONDITION_CLASS)?)
             }
@@ -2156,14 +2198,28 @@ pub(crate) fn resolve_virtual(
         if let Some(method) = entry.file.find_method(name, descriptor)? {
             return Ok((Arc::clone(&entry), method.is_native()));
         }
-        let Some(super_class) = shared.resolution_superclass(current)? else {
-            return Err(InterpError::MethodNotFound {
-                class: entry.name.clone(),
-                name: name.to_owned(),
-                descriptor: descriptor.to_owned(),
-            });
-        };
-        current = super_class;
+        // The C1 tree is not closed under superclasses: `LinkedList` extends
+        // `AbstractSequentialList`, which is not a manifest owner. A walk that reaches
+        // such a class ends here with `MethodNotFound`, so an `invokeinterface` can still
+        // fall back to the interface's own declaration (for example `List.iterator`).
+        match shared.resolution_superclass(current) {
+            Ok(Some(super_class)) => current = super_class,
+            Ok(None) => {
+                return Err(InterpError::MethodNotFound {
+                    class: entry.name.clone(),
+                    name: name.to_owned(),
+                    descriptor: descriptor.to_owned(),
+                });
+            }
+            Err(VmError::ClassNotFound { .. }) => {
+                return Err(InterpError::MethodNotFound {
+                    class: entry.name.clone(),
+                    name: name.to_owned(),
+                    descriptor: descriptor.to_owned(),
+                });
+            }
+            Err(error) => return Err(error.into()),
+        }
     }
 }
 

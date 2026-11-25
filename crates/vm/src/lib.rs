@@ -8,6 +8,7 @@
 pub mod annotation;
 pub mod arrays;
 pub mod atomic;
+pub mod bitset;
 pub mod boxed;
 pub mod class_loader;
 pub mod collections;
@@ -15,6 +16,7 @@ pub mod direct_buffer;
 pub mod error;
 pub mod exceptions;
 pub mod format;
+pub mod futures;
 pub mod generic;
 pub mod heap;
 pub mod hooks;
@@ -28,6 +30,7 @@ pub mod math;
 pub mod memory;
 pub mod metadata;
 pub mod method_handles;
+pub mod modules;
 pub mod object;
 pub mod proxy;
 pub mod references;
@@ -44,14 +47,15 @@ pub mod value;
 pub mod verify;
 
 pub use error::VmError;
+pub use futures::FutureTaskObject;
 pub use heap::{
-    AnnotationObject, Array, ArrayClass, ArrayKind, AtomicCell, BoxedPrimitive, ClassRef,
-    CollectorKind, CollectorObject, ConditionState, EnumConstant, EnumerationObject, FieldLayout,
-    FieldSlot, GenericArrayType, HandleKind, Heap, HeapError, HeapObject, Instance, IteratorObject,
-    LambdaObject, LambdaTarget, LambdaTargetKind, ListObject, LookupObject, MapEntry, MapObject,
-    MemberKind, MessageFormatObject, MethodHandleObject, MethodTypeObject, ObjRef,
-    ParameterizedType, PrimitiveKind, ReflectMember, SetObject, SinkObject, SpliteratorObject,
-    StreamObject, TypeDeclaration, TypeObject, TypeVariableType, WildcardType,
+    AnnotationObject, Array, ArrayClass, ArrayKind, AtomicCell, BitSetObject, BoxedPrimitive,
+    ClassRef, CollectorKind, CollectorObject, ConditionState, EnumConstant, EnumerationObject,
+    FieldLayout, FieldSlot, GenericArrayType, HandleKind, Heap, HeapError, HeapObject, Instance,
+    IteratorObject, LambdaObject, LambdaTarget, LambdaTargetKind, ListObject, LookupObject,
+    MapEntry, MapObject, MemberKind, MessageFormatObject, MethodHandleObject, MethodTypeObject,
+    ObjRef, ParameterizedType, PrimitiveKind, ReflectMember, SetObject, SinkObject,
+    SpliteratorObject, StreamObject, TypeDeclaration, TypeObject, TypeVariableType, WildcardType,
 };
 pub use hooks::{ClassUnloadHook, Hooks, ReferenceHook};
 pub use loader::{ClassEntry, ClassId, ClassState, LoaderId};

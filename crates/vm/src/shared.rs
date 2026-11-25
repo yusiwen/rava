@@ -198,11 +198,6 @@ fn default_properties() -> HashMap<String, String> {
         ("os.name", std::env::consts::OS),
         ("os.arch", std::env::consts::ARCH),
         ("user.dir", ""),
-        // This VM has no JPMS module layer yet (ADR-0009 assigns resources, jars and
-        // modules to M4). Advertise the GraalVM native-image environment so Spring's
-        // `NativeDetector` takes its module-free path instead of enumerating system
-        // modules through `java.lang.module.ModuleFinder` and a `Stream` pipeline.
-        ("org.graalvm.nativeimage.imagecode", "runtime"),
     ] {
         properties.insert(name.to_owned(), value.to_owned());
     }
@@ -610,6 +605,50 @@ impl Shared {
         // other enum constant) therefore sees a real object, and two reads of the same
         // constant are reference-identical.
         if let Some(value) = self.enum_static_constant(&entry, name, descriptor)? {
+            return Ok(Some(value));
+        }
+        // A declared static field that no initializer has written is readable all the
+        // same: JVMS §5.4.2 preparation gives it its type's default, and a `static final`
+        // takes its `ConstantValue`. The statics table starts empty, so a field such as
+        // CGLIB's `ClassEmitter.hookCounter` (no initializer, so no `putstatic`) resolves
+        // from its declaration here.
+        self.declared_static_value(&entry, name, descriptor)
+    }
+
+    /// The value of a declared static field whose statics entry is absent.
+    ///
+    /// `ConstantValue` is the field's initial value (JVMS §4.7.2); every other type gets
+    /// its default. Only a declaration in this class is considered, so a misspelt field
+    /// still reports as absent.
+    fn declared_static_value(
+        &self,
+        entry: &crate::loader::ClassEntry,
+        name: &str,
+        descriptor: &str,
+    ) -> Result<Option<Value>, VmError> {
+        let file = &entry.file;
+        for field in &file.fields {
+            if !field.is_static()
+                || file.field_name(field)? != name
+                || file.field_descriptor(field)? != descriptor
+            {
+                continue;
+            }
+            let constant = file.constant_value(field).map_err(VmError::ClassFile)?;
+            let value = match constant {
+                Some(rava_classfile::Constant::Integer(value)) => Value::Int(*value),
+                Some(rava_classfile::Constant::Float(value)) => Value::Float(*value),
+                Some(rava_classfile::Constant::Long(value)) => Value::Long(*value),
+                Some(rava_classfile::Constant::Double(value)) => Value::Double(*value),
+                Some(rava_classfile::Constant::String { string_index }) => {
+                    let text = file
+                        .constant_pool
+                        .utf8(*string_index)
+                        .map_err(VmError::ClassFile)?;
+                    Value::Ref(self.intern_string(text))
+                }
+                _ => Value::default_for(descriptor),
+            };
             return Ok(Some(value));
         }
         Ok(None)
@@ -1071,6 +1110,12 @@ impl Shared {
                 HeapObject::LogLevel(_) => Kind::LogLevel,
                 HeapObject::Atomic(cell) => Kind::Atomic(cell.class_name()),
                 HeapObject::Lock(_) => Kind::Lock,
+                HeapObject::FutureTask(_) => {
+                    Kind::Named(self.load_library_class(crate::futures::FUTURE_TASK_CLASS)?)
+                }
+                HeapObject::BitSet(_) => {
+                    Kind::Named(self.load_library_class(crate::bitset::BIT_SET_CLASS)?)
+                }
                 HeapObject::Condition(_) => Kind::Condition,
                 HeapObject::Pattern(_) => Kind::Pattern,
                 HeapObject::Matcher(_) => Kind::Matcher,
@@ -1293,6 +1338,12 @@ impl Shared {
             crate::locks::REENTRANT_LOCK_CLASS => {
                 return Ok(self.heap().allocate_lock());
             }
+            crate::futures::FUTURE_TASK_CLASS => {
+                return Ok(self.heap().allocate_future_task(ObjRef::NULL));
+            }
+            crate::bitset::BIT_SET_CLASS => {
+                return Ok(self.heap().allocate_bit_set());
+            }
             crate::atomic::ATOMIC_BOOLEAN_CLASS
             | crate::atomic::ATOMIC_INTEGER_CLASS
             | crate::atomic::ATOMIC_LONG_CLASS
@@ -1308,8 +1359,16 @@ impl Shared {
         // `CopyOnWriteArrayList` and adds `this$0`). The shape is still selected from the
         // superclass chain, and the subclass's own field layout starts at its defaults.
         if let Some(kind) = self.container_kind(class)? {
-            let layout = self.field_layout(class)?;
-            let fields = layout.defaults();
+            // A container base class keeps its state in the heap shape, not in instance
+            // fields, so its layout is empty and its superclass chain is not consulted.
+            // `LinkedList`'s superclass is `AbstractSequentialList`, which the C1 tree
+            // does not project (it is not a manifest owner); allocating a linked list must
+            // not fail because of a field layout it never uses.
+            let fields = if Self::is_container_base(&name) {
+                Vec::new()
+            } else {
+                self.field_layout(class)?.defaults()
+            };
             return Ok(match kind {
                 VmContainerKind::List => self.heap().allocate_list_with_fields(class, fields),
                 VmContainerKind::Set => self.heap().allocate_set_with_fields(class, fields),
@@ -1343,6 +1402,7 @@ impl Shared {
                 | crate::maps::HASHTABLE_CLASS
                 | crate::maps::PROPERTIES_CLASS
                 | crate::maps::TREE_MAP_CLASS
+                | crate::maps::WEAK_HASH_MAP_CLASS
                 | crate::maps::IDENTITY_HASH_MAP_CLASS
                 | crate::maps::CONCURRENT_HASH_MAP_CLASS => return Ok(Some(VmContainerKind::Map)),
                 _ => {}
@@ -1350,6 +1410,32 @@ impl Shared {
             current = self.resolution_superclass(id)?;
         }
         Ok(None)
+    }
+
+    /// Whether `name` is one of the VM container base classes.
+    ///
+    /// A container's state lives in its heap shape ([`crate::heap::HeapObject::List`], `Set`
+    /// or `Map`), so its class-file fields are not part of an instance layout.
+    fn is_container_base(name: &str) -> bool {
+        matches!(
+            name,
+            crate::collections::ARRAY_LIST_CLASS
+                | crate::collections::LINKED_LIST_CLASS
+                | crate::collections::COPY_ON_WRITE_ARRAY_LIST_CLASS
+                | crate::collections::ARRAY_DEQUE_CLASS
+                | crate::collections::LINKED_HASH_SET_CLASS
+                | crate::collections::HASH_SET_CLASS
+                | crate::collections::TREE_SET_CLASS
+                | crate::collections::COPY_ON_WRITE_ARRAY_SET_CLASS
+                | crate::maps::HASH_MAP_CLASS
+                | crate::maps::LINKED_HASH_MAP_CLASS
+                | crate::maps::HASHTABLE_CLASS
+                | crate::maps::PROPERTIES_CLASS
+                | crate::maps::TREE_MAP_CLASS
+                | crate::maps::WEAK_HASH_MAP_CLASS
+                | crate::maps::IDENTITY_HASH_MAP_CLASS
+                | crate::maps::CONCURRENT_HASH_MAP_CLASS
+        )
     }
 
     pub fn define_class(
@@ -1384,6 +1470,18 @@ impl Shared {
             .read()
             .expect("class table lock poisoned")
             .class_count()
+    }
+
+    /// Every loaded class entry, in class-table order.
+    ///
+    /// A class generated while a program runs has no name to look up in advance, so a
+    /// caller that wants to inspect it scans the table instead. The returned entries are
+    /// cheap `Arc` clones; the table lock is released before the caller reads them.
+    pub fn class_entries(&self) -> Vec<Arc<ClassEntry>> {
+        self.classes
+            .read()
+            .expect("class table lock poisoned")
+            .entries()
     }
 
     /// Lock the heap for a short, scoped operation. Never hold this guard across a
@@ -1608,6 +1706,20 @@ impl Shared {
                     }
                     HeapObject::Atomic(crate::heap::AtomicCell::Reference(value)) => {
                         push_container_root(&mut roots, &mut seen, *value);
+                    }
+                    HeapObject::FutureTask(task) => {
+                        if !task.callable.is_null() && seen.insert(task.callable) {
+                            roots.push(task.callable);
+                        }
+                        match &task.outcome {
+                            Some(Ok(Some(value))) => {
+                                push_container_root(&mut roots, &mut seen, *value)
+                            }
+                            Some(Err(throwable)) => {
+                                push_container_root(&mut roots, &mut seen, Value::Ref(*throwable));
+                            }
+                            _ => {}
+                        }
                     }
                     HeapObject::Condition(condition) => {
                         if !condition.lock.is_null() && seen.insert(condition.lock) {

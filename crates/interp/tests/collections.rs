@@ -113,6 +113,11 @@ fn probe_bytes() -> Vec<u8> {
         "append",
         "(Ljava/lang/CharSequence;)Ljava/lang/StringBuilder;",
     );
+    let sb_append_char_sequence_range = builder.method_ref(
+        "java/lang/StringBuilder",
+        "append",
+        "(Ljava/lang/CharSequence;II)Ljava/lang/StringBuilder;",
+    );
     let sb_to_string = builder.method_ref(
         "java/lang/StringBuilder",
         "toString",
@@ -320,6 +325,31 @@ fn probe_bytes() -> Vec<u8> {
         2,
         2,
         append_char_sequence,
+    );
+
+    // static String appendRange(String s, int start, int end) {
+    //     StringBuilder sb = new StringBuilder();
+    //     sb.append((CharSequence) s, start, end);
+    //     return sb.toString();
+    // }
+    let mut append_range = Assembler::new();
+    new_builder(&mut append_range, sb_class, sb_init, 3);
+    append_range.aload(3);
+    append_range.aload(0);
+    append_range.iload(1);
+    append_range.iload(2);
+    append_range.invokevirtual(sb_append_char_sequence_range);
+    append_range.astore(3);
+    append_range.aload(3);
+    append_range.invokevirtual(sb_to_string);
+    append_range.areturn();
+    method(
+        &mut builder,
+        "appendRange",
+        "(Ljava/lang/String;II)Ljava/lang/String;",
+        4,
+        4,
+        append_range,
     );
 
     // static int builderLength(String s) { return new StringBuilder().append(s).length(); }
@@ -1592,6 +1622,49 @@ fn string_builder_measures_and_mutates_utf16_units() {
         ),
         "axc"
     );
+}
+
+#[test]
+fn string_builder_appends_a_char_sequence_range_like_the_jdk() {
+    let fixture = fixture();
+
+    let range = |text: Option<&str>, start: i32, end: i32| {
+        let value = match text {
+            Some(text) => heap_string(&fixture, text),
+            None => Value::Ref(ObjRef::NULL),
+        };
+        call(
+            &fixture,
+            "appendRange",
+            "(Ljava/lang/String;II)Ljava/lang/String;",
+            vec![value, Value::Int(start), Value::Int(end)],
+        )
+    };
+
+    // The [start, end) slice, in UTF-16 units.
+    assert_eq!(
+        string_value(&fixture.shared, range(Some("hello"), 1, 3).unwrap()),
+        "el"
+    );
+    assert_eq!(
+        string_value(&fixture.shared, range(Some("hello"), 0, 0).unwrap()),
+        ""
+    );
+    assert_eq!(
+        string_value(&fixture.shared, range(Some("hello"), 2, 5).unwrap()),
+        "llo"
+    );
+    // A null CharSequence is the text "null" before the range is applied.
+    assert_eq!(
+        string_value(&fixture.shared, range(None, 1, 3).unwrap()),
+        "ul"
+    );
+
+    // The JDK's one `start < 0 || start > end || end > length` check reports the offending
+    // argument as a typed StringIndexOutOfBounds.
+    assert_eq!(string_bounds(range(Some("hello"), -1, 2)), (-1, 5));
+    assert_eq!(string_bounds(range(Some("hello"), 0, 6)), (6, 5));
+    assert_eq!(string_bounds(range(Some("hello"), 4, 2)), (2, 5));
 }
 
 #[test]

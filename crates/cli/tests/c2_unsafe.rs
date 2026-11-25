@@ -201,7 +201,7 @@ fn instance_int(shared: &Shared, object: ObjRef, name: &str) -> i32 {
     }
 }
 
-/// The `int` static field `name`, or `None` when it has no value yet.
+/// The `int` static field `name`, or `None` when the class does not declare it.
 fn static_int(shared: &Shared, class: ClassId, name: &str) -> Option<i32> {
     match shared
         .static_field_value(class, name, "I")
@@ -248,10 +248,12 @@ fn get_unsafe_and_the_static_field_are_reference_identical() {
 fn allocate_instance_initializes_the_class_and_skips_the_constructor() {
     let (shared, application, thread) = fixture();
     let probe = probe_class(&shared, application);
+    // Preparation gives every declared static its type's default, so `marker` is readable
+    // as 0 before initialization; only the initializer makes it 7.
     assert_eq!(
         static_int(&shared, probe, "marker"),
-        None,
-        "a loaded class has not run its initializer"
+        Some(0),
+        "a declared static reads its preparation default before the initializer runs"
     );
 
     let unsafe_object = unsafe_instance(&shared, &thread);
@@ -318,7 +320,8 @@ fn the_jdk_initialization_queries_are_idempotent() {
         .expect("shouldBeInitialized runs"),
     );
     assert_eq!(before, 1, "the class still needs initialization");
-    assert_eq!(static_int(&shared, probe, "marker"), None);
+    // JVMS §5.4.2 preparation: the declared static reads 0 until the initializer runs.
+    assert_eq!(static_int(&shared, probe, "marker"), Some(0));
     assert_eq!(class_state(&shared, probe), ClassState::Uninitialized);
 
     run_instance_method(
