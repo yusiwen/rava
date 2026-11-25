@@ -80,6 +80,20 @@ const ARRAY_MODIFIERS: u16 = 0x0411;
 /// `ACC_PUBLIC` (JVMS §4.1).
 const ACC_PUBLIC: u16 = 0x0001;
 
+/// `ACC_PRIVATE` (JVMS §4.1).
+const ACC_PRIVATE: u16 = 0x0002;
+
+/// `ACC_STATIC` (JVMS §4.1, §4.5).
+const ACC_STATIC: u16 = 0x0008;
+
+/// `ACC_FINAL` (JVMS §4.1, §4.5).
+const ACC_FINAL: u16 = 0x0010;
+
+/// The access flags of a VM-installed static whose class-file declaration the C1
+/// projection omits: `private static final` (`0x001A`), the shape
+/// `sun.misc.Unsafe.theUnsafe` has in the JDK.
+const INSTALLED_STATIC_ACCESS: u16 = ACC_PRIVATE | ACC_STATIC | ACC_FINAL;
+
 /// `ACC_INTERFACE` (JVMS §4.1).
 const ACC_INTERFACE: u16 = 0x0200;
 
@@ -162,6 +176,12 @@ pub fn register_natives(shared: &Shared) {
         "isInstance",
         "(Ljava/lang/Object;)Z",
         class_is_instance,
+    );
+    shared.register_native(
+        "java/lang/Class",
+        "cast",
+        "(Ljava/lang/Object;)Ljava/lang/Object;",
+        class_cast,
     );
     shared.register_native(
         "java/lang/reflect/Array",
@@ -876,10 +896,51 @@ fn class_is_instance(
     if reference.is_null() {
         return Ok(Some(Value::Int(0)));
     }
-    // An annotation object stores its concrete annotation type even though
-    // `get_class` reports the `java.lang.annotation.Annotation` interface (its
-    // `invokevirtual` dispatch uses the annotation type); `isInstance` asks for the
-    // concrete type, so the stored class is used here.
+    let candidate = instance_class_object(shared, reference)?;
+    Ok(Some(Value::Int(i32::from(class_object_assignable(
+        shared, &target, &candidate,
+    )?))))
+}
+
+/// `Class.cast(Object)`: return the argument when assignable, otherwise throw the JDK's
+/// `ClassCastException`. A null argument is returned as null.
+fn class_cast(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let target = class_object_of(shared, receiver)?;
+    let Some(Value::Ref(reference)) = args.first().copied() else {
+        return Err(VmError::Native(
+            "Class.cast expects an Object argument".to_owned(),
+        ));
+    };
+    if reference.is_null() {
+        return Ok(Some(Value::Ref(ObjRef::NULL)));
+    }
+    let candidate = instance_class_object(shared, reference)?;
+    if class_object_assignable(shared, &target, &candidate)? {
+        return Ok(Some(Value::Ref(reference)));
+    }
+    let target_name = shared.class_ref_name(&target.class_ref())?;
+    let found = shared.class_ref_name(&candidate.class_ref())?;
+    let throwable = crate::exceptions::new_throwable(
+        shared,
+        "java/lang/ClassCastException",
+        format!("class {found} cannot be cast to class {target_name}"),
+    )?;
+    Err(VmError::Thrown(throwable))
+}
+
+/// The class object of an object's runtime type, used by `isInstance` and `cast`.
+///
+/// An annotation object stores its concrete annotation type even though `get_class`
+/// reports the `java.lang.annotation.Annotation` interface (its `invokevirtual` dispatch
+/// uses the annotation type); both queries ask for the concrete type, so the stored class
+/// is used here.
+fn instance_class_object(shared: &Shared, reference: ObjRef) -> Result<ClassObject, VmError> {
     let annotation_class = {
         let heap = shared.heap();
         match heap
@@ -890,16 +951,13 @@ fn class_is_instance(
             _ => None,
         }
     };
-    let candidate = match annotation_class {
-        Some(class) => ClassObject::Named(class),
+    match annotation_class {
+        Some(class) => Ok(ClassObject::Named(class)),
         None => {
             let object_class = shared.get_class(reference)?;
-            class_object_of(shared, object_class)?
+            class_object_of(shared, object_class)
         }
-    };
-    Ok(Some(Value::Int(i32::from(class_object_assignable(
-        shared, &target, &candidate,
-    )?))))
+    }
 }
 
 /// `Class.getResource`/`getResourceAsStream`: no resource model until M4.
@@ -1387,11 +1445,12 @@ fn declared_class_objects(
 ///
 /// The members come from the typed C1 metadata model, so names, descriptors and access
 /// flags are read once through the same decoder the metadata gate uses. Fields are every
-/// declared field; methods are every declared method except `<init>`/`<clinit>`;
-/// constructors are the `<init>` methods. Superclasses and interfaces are not consulted,
-/// so this is the declared view only. Each element is the cached member object for its
-/// `(class, kind, name, descriptor)` identity, and the array is an ordinary heap
-/// reference array.
+/// declared field plus every VM-installed static the projection omits (filtered by name so
+/// a declared `System.out` is not repeated); methods are every declared method except
+/// `<init>`/`<clinit>`; constructors are the `<init>` methods. Superclasses and interfaces
+/// are not consulted, so this is the declared view only. Each element is the cached member
+/// object for its `(class, kind, name, descriptor)` identity, and the array is an ordinary
+/// heap reference array.
 fn declared_members(shared: &Shared, class: ClassId, kind: MemberKind) -> Result<ObjRef, VmError> {
     let entry = shared
         .entry(class)
@@ -1400,8 +1459,18 @@ fn declared_members(shared: &Shared, class: ClassId, kind: MemberKind) -> Result
     let mut members: Vec<(String, String)> = Vec::new();
     match kind {
         MemberKind::Field => {
+            let mut declared = HashSet::new();
             for field in &metadata.fields {
+                declared.insert(field.name.clone());
                 members.push((field.name.clone(), field.descriptor.clone()));
+            }
+            // A VM-installed static whose declaration the C1 projection omits is still a
+            // declared field. The installed keys are filtered by name, so a static the
+            // class file already declares (`System.out`, `Boolean.TRUE`) appears once.
+            for (name, descriptor) in shared.installed_static_fields(class)? {
+                if declared.insert(name.clone()) {
+                    members.push((name, descriptor));
+                }
             }
         }
         MemberKind::Method => {
@@ -1515,7 +1584,7 @@ fn class_get_declared_field(
     let name = lookup_name(shared, args, 0, "Class.getDeclaredField")?;
     let class = class_object_of(shared, receiver)?;
     if let ClassObject::Named(class) = class {
-        if let Some(found) = find_declared_field(shared, class, &name)? {
+        if let Some(found) = find_declared_field(shared, class, &name, true)? {
             return member_value(shared, found, MemberKind::Field);
         }
     }
@@ -1533,7 +1602,7 @@ fn class_get_field(
     let class = class_object_of(shared, receiver)?;
     if let ClassObject::Named(class) = class {
         for candidate in lookup_order(shared, class)? {
-            if let Some(found) = find_declared_field(shared, candidate, &name)? {
+            if let Some(found) = find_declared_field(shared, candidate, &name, false)? {
                 return member_value(shared, found, MemberKind::Field);
             }
         }
@@ -1768,6 +1837,7 @@ fn find_declared_field(
     shared: &Shared,
     class: ClassId,
     name: &str,
+    include_installed: bool,
 ) -> Result<Option<FoundMember>, VmError> {
     let entry = shared
         .entry(class)
@@ -1780,6 +1850,19 @@ fn find_declared_field(
                 name: field.name.clone(),
                 descriptor: field.descriptor.clone(),
             }));
+        }
+    }
+    if include_installed {
+        // A VM-installed static the C1 projection omits is visible to the declared query
+        // only; the inherited public `getField` must not expose a private field.
+        for (installed, descriptor) in shared.installed_static_fields(class)? {
+            if installed == name {
+                return Ok(Some(FoundMember {
+                    class,
+                    name: installed,
+                    descriptor,
+                }));
+            }
         }
     }
     Ok(None)
@@ -1960,6 +2043,8 @@ fn member_get_modifiers(
 /// A member object whose declaration is absent from its class file has no flags to
 /// report, so that lookup is a typed [`VmError::Native`] rather than a fabricated
 /// `false`; a lookup miss is a broken member object, not a member with the flag unset.
+/// The one exception is a VM-installed static, which reports the private static final
+/// flags of the field the C1 projection omitted.
 fn member_flag(shared: &Shared, receiver: ObjRef, flag: u16) -> Result<Option<Value>, VmError> {
     let member = member_of(shared, receiver)?;
     let flags = member_access_flags(shared, &member)?;
@@ -2044,33 +2129,45 @@ struct FieldView {
 }
 
 /// Read a reflected field's metadata and check it still matches the member identity.
+///
+/// A field whose declaration the C1 projection omits is accepted when the statics table
+/// holds its key; such a VM-installed field is static by construction.
 fn field_view(shared: &Shared, member: &ReflectMember) -> Result<FieldView, VmError> {
     let entry = shared
         .entry(member.class)
         .ok_or_else(|| VmError::Loader(format!("class id {} is not loaded", member.class.0)))?;
     let metadata = entry.metadata()?;
-    let field = metadata
+    if let Some(field) = metadata
         .field(&member.name)
         .filter(|field| field.descriptor == member.descriptor)
-        .ok_or_else(|| {
-            VmError::Native(format!(
-                "class {} has no field {}:{}",
-                entry.name, member.name, member.descriptor
-            ))
-        })?;
-    Ok(FieldView {
-        descriptor: field.descriptor.clone(),
-        is_static: field.is_static(),
-    })
+    {
+        return Ok(FieldView {
+            descriptor: field.descriptor.clone(),
+            is_static: field.is_static(),
+        });
+    }
+    // A reflected Field for a VM-installed static has no class-file declaration to read;
+    // the statics key is its declaration and it is by construction static.
+    if shared.has_installed_static(member.class, &member.name, &member.descriptor)? {
+        return Ok(FieldView {
+            descriptor: member.descriptor.clone(),
+            is_static: true,
+        });
+    }
+    Err(VmError::Native(format!(
+        "class {} has no field {}:{}",
+        entry.name, member.name, member.descriptor
+    )))
 }
 
-/// `Field.get(Object)`: read an instance field and box a primitive result.
+/// `Field.get(Object)`: read a static or instance field and box a primitive result.
 ///
-/// Instance fields only: a static field is a typed mismatch rather than a silent read
-/// with an ignored receiver. The receiver must be an instance assignable to the declaring
-/// class, and the value is converted with [`boxed::box_result`], so each primitive becomes
-/// its own wrapper (`boolean` a `Boolean`, `long` a `Long`, ...) and a reference keeps its
-/// handle. There is no access check, so a private field reads like a public one.
+/// A static field reads [`Shared::static_field_value`] and requires a null receiver; a
+/// non-null receiver is a typed error rather than a silent read with an ignored object.
+/// An instance field requires a receiver assignable to the declaring class. The value is
+/// converted with [`boxed::box_result`], so each primitive becomes its own wrapper
+/// (`boolean` a `Boolean`, `long` a `Long`, ...) and a reference keeps its handle. There is
+/// no access check, so a private field reads like a public one.
 fn field_get(
     shared: &Shared,
     _thread: &ThreadState,
@@ -2081,7 +2178,21 @@ fn field_get(
     let member = member_of(shared, receiver)?;
     require_field(&member, "Field.get")?;
     let view = field_view(shared, &member)?;
-    require_instance_field(shared, &view, &member, "Field.get")?;
+    if view.is_static {
+        require_static_receiver(shared, &member, args, 0, "Field.get")?;
+        let value = shared
+            .static_field_value(member.class, &member.name, &member.descriptor)?
+            .ok_or_else(|| {
+                VmError::Native(format!(
+                    "Field.get: static field {}.{}:{} has no value (its class has not been initialized)",
+                    class_name(shared, member.class),
+                    member.name,
+                    member.descriptor
+                ))
+            })?;
+        let result = boxed::box_result(shared, &view.descriptor, Some(value))?;
+        return Ok(Some(result));
+    }
     let (target, actual) = field_receiver(shared, &member, args, 0, "Field.get")?;
     let slot = field_slot(shared, actual, &member)?;
     let value = {
@@ -2099,12 +2210,14 @@ fn field_get(
     Ok(Some(result))
 }
 
-/// `Field.set(Object, Object)`: write an instance field, unboxing a primitive value.
+/// `Field.set(Object, Object)`: write a static or instance field, unboxing a primitive
+/// value.
 ///
 /// The descriptor decides the conversion: a primitive field requires the matching wrapper
 /// (a narrower numeric wrapper is accepted by Java's widening rule, JLS §5.3) and a
-/// reference descriptor passes the handle through (null included). A static field and a
-/// non-assignable receiver are rejected exactly as in [`field_get`].
+/// reference descriptor passes the handle through (null included). A static field writes
+/// [`Shared::set_static_field`] and requires a null receiver; a non-assignable instance
+/// receiver is rejected exactly as in [`field_get`].
 fn field_set(
     shared: &Shared,
     _thread: &ThreadState,
@@ -2115,13 +2228,18 @@ fn field_set(
     let member = member_of(shared, receiver)?;
     require_field(&member, "Field.set")?;
     let view = field_view(shared, &member)?;
-    require_instance_field(shared, &view, &member, "Field.set")?;
-    let (target, actual) = field_receiver(shared, &member, args, 0, "Field.set")?;
     let Some(value) = args.get(1).copied() else {
         return Err(VmError::Native(
             "Field.set is missing its value argument".to_owned(),
         ));
     };
+    if view.is_static {
+        require_static_receiver(shared, &member, args, 0, "Field.set")?;
+        let value = boxed::unbox_argument(shared, &view.descriptor, value)?;
+        shared.set_static_field(member.class, &member.name, &member.descriptor, value)?;
+        return Ok(None);
+    }
+    let (target, actual) = field_receiver(shared, &member, args, 0, "Field.set")?;
     let value = boxed::unbox_argument(shared, &view.descriptor, value)?;
     let slot = field_slot(shared, actual, &member)?;
     {
@@ -2135,6 +2253,28 @@ fn field_set(
     Ok(None)
 }
 
+/// A static field's receiver must be the null object, as `Field.get(null)` passes it.
+fn require_static_receiver(
+    shared: &Shared,
+    member: &ReflectMember,
+    args: &[Value],
+    position: usize,
+    operation: &str,
+) -> Result<(), VmError> {
+    match args.get(position).copied() {
+        Some(Value::Ref(receiver)) if receiver.is_null() => Ok(()),
+        Some(Value::Ref(_)) => Err(VmError::Native(format!(
+            "{operation} on static field {}.{}:{} expects a null receiver",
+            class_name(shared, member.class),
+            member.name,
+            member.descriptor
+        ))),
+        _ => Err(VmError::Native(format!(
+            "{operation} expects an Object receiver"
+        ))),
+    }
+}
+
 fn require_field(member: &ReflectMember, operation: &str) -> Result<(), VmError> {
     if member.kind == MemberKind::Field {
         Ok(())
@@ -2144,23 +2284,6 @@ fn require_field(member: &ReflectMember, operation: &str) -> Result<(), VmError>
             member.kind.binary_name()
         )))
     }
-}
-
-fn require_instance_field(
-    shared: &Shared,
-    view: &FieldView,
-    member: &ReflectMember,
-    operation: &str,
-) -> Result<(), VmError> {
-    if view.is_static {
-        return Err(VmError::Native(format!(
-            "{operation} does not support static field {}.{}:{} (M2.10)",
-            class_name(shared, member.class),
-            member.name,
-            member.descriptor
-        )));
-    }
-    Ok(())
 }
 
 /// Resolve the receiver argument and require an instance assignable to the declaring
@@ -2301,6 +2424,9 @@ fn member_access_flags(shared: &Shared, member: &ReflectMember) -> Result<u16, V
                 if field.descriptor == member.descriptor {
                     return Ok(field.access_flags);
                 }
+            }
+            if shared.has_installed_static(member.class, &member.name, &member.descriptor)? {
+                return Ok(INSTALLED_STATIC_ACCESS);
             }
         }
         MemberKind::Method | MemberKind::Constructor => {

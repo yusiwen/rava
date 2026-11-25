@@ -23,9 +23,9 @@ use crate::shared::Shared;
 use crate::thread::ThreadState;
 use crate::value::Value;
 use crate::{
-    annotation, arrays, atomic, boxed, class_loader, collections, exceptions, format, generic,
-    instance, jul, locks, maps, math, method_handles, object, proxy, references, reflection, regex,
-    string, system, thread_natives,
+    annotation, arrays, atomic, boxed, class_loader, collections, direct_buffer, exceptions,
+    format, generic, instance, jul, locks, maps, math, method_handles, object, proxy, references,
+    reflection, regex, string, system, thread_natives,
 };
 
 /// `java.lang.System`'s binary-stable internal name.
@@ -71,6 +71,9 @@ pub fn register_all(shared: &Shared) -> Result<(), VmError> {
     // `Proxy`/`InvocationHandler` are M3.2: the `Proxy` natives plus the runtime-private
     // `rava/proxy/ProxySupport` helper class the generated proxy classes call.
     proxy::register_natives(shared);
+    // `ByteBuffer.allocateDirect` and `DirectByteBuffer.isDirect` are M3.5. The install
+    // marks the `ByteBuffer` stub initialized because its C1 `<clinit>` reads U1 members.
+    direct_buffer::install(shared)?;
     // `java.lang.invoke` is M3.4: `MethodHandles`/`Lookup`, `MethodType` and the
     // non-re-entrant `MethodHandle` queries. `MethodHandle.invoke*` lives in the
     // interpreter, like `Method.invoke`, because it re-enters the frame machinery.

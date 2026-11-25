@@ -80,6 +80,8 @@ fn execute(options: &Options) -> Result<(), String> {
     // `MethodHandle.invoke*` (M3.4).
     rava_interp::reflect_invoke::register_natives(&shared);
     rava_interp::method_handles::register_natives(&shared);
+    rava_interp::unsafe_natives::register_natives(&shared)
+        .map_err(|error| format!("cannot register the Unsafe natives: {error}"))?;
     rava_interp::proxy::register_natives(&shared);
     rava_interp::callbacks::register_natives(&shared);
     rava_interp::streams::register_natives(&shared);

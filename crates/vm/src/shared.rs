@@ -17,7 +17,7 @@ use crate::heap::{
     MemberKind, ObjRef, PrimitiveKind, ReflectMember, TypeObject,
 };
 use crate::hooks::Hooks;
-use crate::loader::{ClassEntry, ClassId, ClassTable, LoaderId};
+use crate::loader::{ClassEntry, ClassId, ClassState, ClassTable, LoaderId};
 use crate::source::{ClassSource, DirectorySource};
 use crate::thread::ThreadState;
 use crate::value::Value;
@@ -52,6 +52,9 @@ pub enum SharedLock {
     NativeRegistry,
     Stdout,
     Stderr,
+    /// The `Unsafe` U0 call log. A native appends one entry per call and releases the
+    /// lock before returning, so it is never held across a Java call.
+    UnsafeCalls,
 }
 
 impl fmt::Display for SharedLock {
@@ -72,6 +75,7 @@ impl fmt::Display for SharedLock {
             Self::NativeRegistry => write!(f, "native registry"),
             Self::Stdout => write!(f, "stdout"),
             Self::Stderr => write!(f, "stderr"),
+            Self::UnsafeCalls => write!(f, "Unsafe call log"),
         }
     }
 }
@@ -129,6 +133,13 @@ pub struct Shared {
     natives: RwLock<HashMap<NativeKey, NativeFn>>,
     stdout: Mutex<Vec<u8>>,
     stderr: Mutex<Vec<u8>>,
+    /// One entry per `sun.misc.Unsafe` / `jdk.internal.misc.Unsafe` call the VM served.
+    ///
+    /// ADR-0005's acceptance requires a runtime log that contains only the open tier's
+    /// methods. The log is diagnostic state, not roots: it holds text, never references.
+    /// The lock is released before a native returns, so it is never held across a Java
+    /// call.
+    unsafe_calls: Mutex<Vec<String>>,
     /// The minimal `java.util.logging` state: the one `Logger` per name and the fields of
     /// every live `LogRecord`.
     jul: Mutex<crate::jul::JulState>,
@@ -222,6 +233,7 @@ impl Shared {
             natives: RwLock::new(HashMap::new()),
             stdout: Mutex::new(Vec::new()),
             stderr: Mutex::new(Vec::new()),
+            unsafe_calls: Mutex::new(Vec::new()),
             jul: Mutex::new(crate::jul::JulState::default()),
             properties: Mutex::new(default_properties()),
             enums: Mutex::new(HashMap::new()),
@@ -601,6 +613,75 @@ impl Shared {
             return Ok(Some(value));
         }
         Ok(None)
+    }
+
+    /// The static-field keys the VM has written into `class`'s statics table.
+    ///
+    /// The C1 projection carries only public members, so a VM-installed private static
+    /// such as `sun.misc.Unsafe.theUnsafe` has a value but no class-file declaration.
+    /// Reflection uses this list to expose those entries as declared fields; a key the
+    /// metadata already declares is filtered by the caller, so `System.out` and `err`
+    /// appear once. The keys are sorted for a deterministic `getDeclaredFields` order.
+    pub fn installed_static_fields(
+        &self,
+        class: ClassId,
+    ) -> Result<Vec<(String, String)>, VmError> {
+        let entry = self
+            .entry(class)
+            .ok_or_else(|| VmError::Loader(format!("class id {} is not loaded", class.0)))?;
+        let mut keys: Vec<(String, String)> = entry
+            .statics
+            .lock()
+            .expect("static field lock poisoned")
+            .keys()
+            .cloned()
+            .collect();
+        keys.sort();
+        Ok(keys)
+    }
+
+    /// Whether `class`'s statics table holds exactly this field key.
+    ///
+    /// This answers the declaration question for a VM-installed field whose descriptor the
+    /// C1 metadata omits, without inventing a value when the key is absent.
+    pub fn has_installed_static(
+        &self,
+        class: ClassId,
+        name: &str,
+        descriptor: &str,
+    ) -> Result<bool, VmError> {
+        let entry = self
+            .entry(class)
+            .ok_or_else(|| VmError::Loader(format!("class id {} is not loaded", class.0)))?;
+        Ok(entry
+            .statics
+            .lock()
+            .expect("static field lock poisoned")
+            .contains_key(&(name.to_owned(), descriptor.to_owned())))
+    }
+
+    /// Write one static field value into `class`'s statics table.
+    ///
+    /// This is the write half of [`Shared::static_field_value`] for
+    /// `java.lang.reflect.Field.set(null, value)`. It does not run an initializer and does
+    /// not validate the descriptor against the class file: the reflected `Field` already
+    /// names the declaration or the installed static the caller read.
+    pub fn set_static_field(
+        &self,
+        class: ClassId,
+        name: &str,
+        descriptor: &str,
+        value: Value,
+    ) -> Result<(), VmError> {
+        let entry = self
+            .entry(class)
+            .ok_or_else(|| VmError::Loader(format!("class id {} is not loaded", class.0)))?;
+        entry
+            .statics
+            .lock()
+            .expect("static field lock poisoned")
+            .insert((name.to_owned(), descriptor.to_owned()), value);
+        Ok(())
     }
 
     /// The canonical enum object for a static constant field of an enum class.
@@ -1667,6 +1748,11 @@ impl Shared {
                 lock: SharedLock::Stderr,
             })?;
         }
+        {
+            let _guard = self.unsafe_calls.try_lock().map_err(|_| LockHeld {
+                lock: SharedLock::UnsafeCalls,
+            })?;
+        }
         Ok(())
     }
 
@@ -1711,6 +1797,54 @@ impl Shared {
 
     pub fn stdout(&self) -> String {
         String::from_utf8_lossy(&self.stdout.lock().expect("stdout lock poisoned")).into_owned()
+    }
+
+    /// Append one served `Unsafe` call to the U0 log (ADR-0005 acceptance).
+    ///
+    /// The format is `owner.name descriptor`, for example
+    /// `sun/misc/Unsafe.getUnsafe()Lsun/misc/Unsafe;`. The lock is scoped to the push and
+    /// is never held across a Java call.
+    pub fn record_unsafe_call(&self, call: impl Into<String>) {
+        self.unsafe_calls
+            .lock()
+            .expect("Unsafe call log lock poisoned")
+            .push(call.into());
+    }
+
+    /// The served `Unsafe` calls, oldest first.
+    ///
+    /// ADR-0005 uses this as the acceptance probe: at M3 every entry names a U0 method,
+    /// and a `U1`+ call leaves no entry because no native serves it.
+    pub fn unsafe_calls(&self) -> Vec<String> {
+        self.unsafe_calls
+            .lock()
+            .expect("Unsafe call log lock poisoned")
+            .clone()
+    }
+
+    /// Declare `class` initialized without running its `<clinit>`.
+    ///
+    /// The VM's own installation steps use this when the C1 stub's `<clinit>` names
+    /// members the open tier does not implement but the fields the VM needs are installed
+    /// directly: `java.nio.ByteBuffer`'s initializer reads `Buffer.UNSAFE` and calls a U1
+    /// array accessor, and `sun.misc.Unsafe`'s initializer calls
+    /// `jdk/internal/reflect/Reflection` and U1/U3 members. This is the same statement
+    /// [`crate::Shared::static_field_value`] already makes for an enum, whose constants
+    /// are installed instead of running its initializer. A class that genuinely failed
+    /// initialization is not overwritten.
+    pub fn mark_initialized(&self, class: ClassId) -> Result<(), VmError> {
+        let entry = self
+            .entry(class)
+            .ok_or_else(|| VmError::Loader(format!("class id {} is not loaded", class.0)))?;
+        let mut state = entry.state.lock().expect("class state lock poisoned");
+        if matches!(*state, ClassState::Erroneous) {
+            return Err(VmError::Loader(format!(
+                "class {} failed initialization",
+                entry.name
+            )));
+        }
+        *state = ClassState::Initialized;
+        Ok(())
     }
 
     /// Record a throwable's detail message.

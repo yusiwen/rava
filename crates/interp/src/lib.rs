@@ -40,6 +40,7 @@ pub mod method_handles;
 pub mod proxy;
 pub mod reflect_invoke;
 pub mod streams;
+pub mod unsafe_natives;
 
 pub use error::InterpError;
 pub use frame::Frame;
@@ -2166,7 +2167,7 @@ pub(crate) fn resolve_virtual(
     }
 }
 
-fn ensure_initialized(
+pub(crate) fn ensure_initialized(
     shared: &Shared,
     thread: &ThreadState,
     class: ClassId,
