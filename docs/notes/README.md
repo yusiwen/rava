@@ -25,3 +25,4 @@ lesson, but an accepted decision is still an ADR, not a note.
 | Note | Scope | Date |
 | :--- | :--- | :--- |
 | [`M2.md`](M2.md) | M2: C1 metadata, minimal library and the first Spring context | 2026-11-24 |
+| [`M3.md`](M3.md) | M3: dynamic code, CGLIB/Objenesis, Spring AOP and the C2 gate | 2026-11-25 |
