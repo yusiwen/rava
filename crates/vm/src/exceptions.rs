@@ -30,6 +30,7 @@ const THROWABLE_CLASSES: &[&str] = &[
     "java/lang/IndexOutOfBoundsException",
     "java/lang/UnsupportedOperationException",
     "java/lang/ClassNotFoundException",
+    "java/io/FileNotFoundException",
     "java/lang/NoSuchElementException",
     "java/lang/NoSuchMethodException",
     "java/lang/NoSuchFieldException",

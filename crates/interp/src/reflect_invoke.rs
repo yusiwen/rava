@@ -211,10 +211,35 @@ fn method_invoke(
             }
         }
         require_instance(shared, target, member.class, "Method.invoke")?;
+        // `Method.invoke` is a virtual call, not a direct one: the reflected member may be
+        // declared on an interface (`JdkDynamicAopProxy` looks up `Greeter.greet`) or be
+        // overridden by the receiver's class. Resolve on the receiver's runtime class
+        // first, then fall back to the interface's default method, exactly as
+        // `invokeinterface` does.
+        let start = crate::dispatch_class(shared, member.class, target)
+            .map_err(|error| invocation_error_for(shared, &member, error))?;
+        let declaring =
+            match crate::resolve_virtual(shared, start, &member.name, &member.descriptor) {
+                Ok((entry, _)) => entry.id,
+                Err(InterpError::MethodNotFound { .. }) => crate::find_interface_method(
+                    shared,
+                    member.class,
+                    &member.name,
+                    &member.descriptor,
+                )
+                .map_err(|error| invocation_error_for(shared, &member, error))?
+                .ok_or_else(|| InterpError::MethodNotFound {
+                    class: class_name(shared, member.class),
+                    name: member.name.clone(),
+                    descriptor: member.descriptor.clone(),
+                })
+                .map_err(|error| invocation_error_for(shared, &member, error))?,
+                Err(error) => return Err(invocation_error_for(shared, &member, error)),
+            };
         run_instance_method(
             shared,
             thread,
-            member.class,
+            declaring,
             &member.name,
             &member.descriptor,
             target,
@@ -297,17 +322,13 @@ fn require_instance(
     )))
 }
 
-/// Is `from` the same class as `to`, or a subclass of it?
-fn is_assignable(shared: &Shared, mut from: ClassId, to: ClassId) -> Result<bool, VmError> {
-    loop {
-        if from == to {
-            return Ok(true);
-        }
-        let Some(super_class) = shared.resolution_superclass(from)? else {
-            return Ok(false);
-        };
-        from = super_class;
-    }
+/// Is `from` the same class as `to`, a subclass of it, or a class that implements the
+/// interface? A reflected `Method` declared on an interface (`JdkDynamicAopProxy` looks
+/// one up on `Greeter`) is invoked on an instance of an implementing class, so the check
+/// has to walk interfaces as well as superclasses; `named_assignable` is the one predicate
+/// for that.
+fn is_assignable(shared: &Shared, from: ClassId, to: ClassId) -> Result<bool, VmError> {
+    reflection::named_assignable(shared, to, from)
 }
 
 /// Convert an invocation failure to the native ABI's error type.

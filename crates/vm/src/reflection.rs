@@ -97,6 +97,9 @@ const INSTALLED_STATIC_ACCESS: u16 = ACC_PRIVATE | ACC_STATIC | ACC_FINAL;
 /// `ACC_INTERFACE` (JVMS §4.1).
 const ACC_INTERFACE: u16 = 0x0200;
 
+/// `ACC_ABSTRACT` (JVMS §4.1, §4.6).
+const ACC_ABSTRACT: u16 = 0x0400;
+
 /// `ACC_BRIDGE` (JVMS §4.6): a compiler-generated bridge method.
 const ACC_BRIDGE: u16 = 0x0040;
 
@@ -270,9 +273,21 @@ pub fn register_natives(shared: &Shared) {
     );
     shared.register_native(
         "java/lang/Class",
+        "getMethods",
+        "()[Ljava/lang/reflect/Method;",
+        class_get_methods,
+    );
+    shared.register_native(
+        "java/lang/Class",
         "getDeclaredConstructors",
         "()[Ljava/lang/reflect/Constructor;",
         class_get_declared_constructors,
+    );
+    shared.register_native(
+        "java/lang/Class",
+        "getConstructors",
+        "()[Ljava/lang/reflect/Constructor;",
+        class_get_constructors,
     );
     shared.register_native(
         "java/lang/Class",
@@ -362,6 +377,12 @@ pub fn register_natives(shared: &Shared) {
         "isBridge",
         "()Z",
         method_is_bridge,
+    );
+    shared.register_native(
+        "java/lang/reflect/Method",
+        "isDefault",
+        "()Z",
+        method_is_default,
     );
     shared.register_native(
         "java/lang/reflect/Field",
@@ -1271,8 +1292,12 @@ fn class_object_assignable(
     }
 }
 
-/// Is `candidate` a supertype (class or interface) of `from`?
-fn named_assignable(shared: &Shared, target: ClassId, from: ClassId) -> Result<bool, VmError> {
+/// Is `target` a supertype (class or interface) of `from`?
+///
+/// The walk covers the superclass chain and every interface list on it, so a class is
+/// assignable to an interface it implements. `Method.invoke`, `Constructor.newInstance`
+/// and the reflected-field receiver checks all use this one predicate.
+pub fn named_assignable(shared: &Shared, target: ClassId, from: ClassId) -> Result<bool, VmError> {
     use std::collections::HashSet;
     let mut stack = vec![from];
     let mut seen = HashSet::new();
@@ -1339,6 +1364,118 @@ fn class_get_declared_methods(
     Ok(Some(Value::Ref(array)))
 }
 
+/// `Class.getMethods()`: the public methods of the class, its superclasses and every
+/// superinterface, each declared method appearing once.
+///
+/// This is the JDK's query, not [`class_get_declared_methods`]: Spring's AOP and bean
+/// introspection walk a hierarchy and expect inherited public methods (`ClassUtils`,
+/// `ReflectionUtils`, `BeanUtils`). A member class the C1 tree omits contributes no
+/// methods, and an omitted superclass ends that branch of the walk instead of failing the
+/// query, because the committed tree is a subset of the JDK.
+fn class_get_methods(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    _args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let objects = match class_object_of(shared, receiver)? {
+        ClassObject::Named(class) => public_method_objects(shared, class)?,
+        ClassObject::Primitive(_) | ClassObject::Array(_) => Vec::new(),
+    };
+    let component = shared.load_library_class("java/lang/reflect/Method")?;
+    let array = allocate_reference_array(shared, ClassRef::Named(component), &objects)?;
+    Ok(Some(Value::Ref(array)))
+}
+
+/// The public methods [`class_get_methods`] returns, most-derived declaration first.
+fn public_method_objects(shared: &Shared, class: ClassId) -> Result<Vec<ObjRef>, VmError> {
+    let is_interface = {
+        let entry = shared
+            .entry(class)
+            .ok_or_else(|| VmError::Loader(format!("class id {} is not loaded", class.0)))?;
+        entry.metadata()?.is_interface()
+    };
+    let mut seen: HashSet<(String, String)> = HashSet::new();
+    let mut objects = Vec::new();
+    let mut interfaces = Vec::new();
+    let mut current = Some(class);
+    while let Some(current_class) = current {
+        collect_public_methods(shared, current_class, &mut seen, &mut objects)?;
+        interfaces.extend(interface_classes(shared, current_class)?);
+        // An interface's class file names `Object` as its superclass, but `Object`'s
+        // members are not inherited interface members.
+        current = if is_interface {
+            None
+        } else {
+            match shared.resolution_superclass(current_class) {
+                Ok(super_class) => super_class,
+                // The C1 tree is the pinned manifest's subset; an omitted superclass
+                // contributes no methods this VM can name.
+                Err(VmError::ClassNotFound { .. }) => None,
+                Err(error) => return Err(error),
+            }
+        };
+    }
+    let mut visited = HashSet::new();
+    while let Some(interface) = interfaces.pop() {
+        if !visited.insert(interface) {
+            continue;
+        }
+        collect_public_methods(shared, interface, &mut seen, &mut objects)?;
+        interfaces.extend(interface_classes(shared, interface)?);
+    }
+    Ok(objects)
+}
+
+/// Append `class`'s public methods that no earlier (more derived) declaration named.
+fn collect_public_methods(
+    shared: &Shared,
+    class: ClassId,
+    seen: &mut HashSet<(String, String)>,
+    objects: &mut Vec<ObjRef>,
+) -> Result<(), VmError> {
+    let entry = shared
+        .entry(class)
+        .ok_or_else(|| VmError::Loader(format!("class id {} is not loaded", class.0)))?;
+    let metadata = entry.metadata()?;
+    for method in &metadata.methods {
+        if method.is_constructor() || method.is_class_initializer() {
+            continue;
+        }
+        if method.access_flags & ACC_PUBLIC == 0 {
+            continue;
+        }
+        if !seen.insert((method.name.clone(), method.descriptor.clone())) {
+            continue;
+        }
+        objects.push(shared.reflect_member(
+            class,
+            MemberKind::Method,
+            &method.name,
+            &method.descriptor,
+        )?);
+    }
+    Ok(())
+}
+
+/// The interfaces `class` names, loaded through its defining loader.
+fn interface_classes(shared: &Shared, class: ClassId) -> Result<Vec<ClassId>, VmError> {
+    let entry = shared
+        .entry(class)
+        .ok_or_else(|| VmError::Loader(format!("class id {} is not loaded", class.0)))?;
+    let loader = entry.loader;
+    let mut interfaces = Vec::new();
+    for name in entry.file.interface_names()? {
+        match shared.load_class(loader, name) {
+            Ok(interface) => interfaces.push(interface),
+            Err(VmError::ClassNotFound { .. }) => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(interfaces)
+}
+
 fn class_get_declared_constructors(
     shared: &Shared,
     _thread: &ThreadState,
@@ -1347,6 +1484,45 @@ fn class_get_declared_constructors(
     _args: &[Value],
 ) -> Result<Option<Value>, VmError> {
     let array = declared_members_of(shared, receiver, MemberKind::Constructor)?;
+    Ok(Some(Value::Ref(array)))
+}
+
+/// `Class.getConstructors()`: this class's `public` constructors.
+///
+/// Constructors are never inherited, so the query does not walk a hierarchy; the only
+/// difference from [`class_get_declared_constructors`] is the `public` filter. Spring's
+/// CGLIB enhancement asks for the superclass's constructors to reproduce them.
+fn class_get_constructors(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    _args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let objects = match class_object_of(shared, receiver)? {
+        ClassObject::Named(class) => {
+            let entry = shared
+                .entry(class)
+                .ok_or_else(|| VmError::Loader(format!("class id {} is not loaded", class.0)))?;
+            let metadata = entry.metadata()?;
+            let mut objects = Vec::new();
+            for method in &metadata.methods {
+                if !method.is_constructor() || method.access_flags & ACC_PUBLIC == 0 {
+                    continue;
+                }
+                objects.push(shared.reflect_member(
+                    class,
+                    MemberKind::Constructor,
+                    &method.name,
+                    &method.descriptor,
+                )?);
+            }
+            objects
+        }
+        ClassObject::Primitive(_) | ClassObject::Array(_) => Vec::new(),
+    };
+    let component = shared.load_library_class(MemberKind::Constructor.class_name())?;
+    let array = allocate_reference_array(shared, ClassRef::Named(component), &objects)?;
     Ok(Some(Value::Ref(array)))
 }
 
@@ -2015,6 +2191,31 @@ fn member_of(shared: &Shared, receiver: ObjRef) -> Result<ReflectMember, VmError
     Ok(member)
 }
 
+/// `Method.isDefault()`: a `public` non-`abstract`, non-`static` method declared on an
+/// interface, which is the JDK's predicate.
+fn method_is_default(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    _args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let member = member_of(shared, receiver)?;
+    if member.kind != MemberKind::Method {
+        return Ok(Some(Value::Int(0)));
+    }
+    let flags = member_access_flags(shared, &member)?;
+    let declared_on_interface = shared
+        .entry(member.class)
+        .map(|entry| entry.file.access_flags & ACC_INTERFACE != 0)
+        .unwrap_or(false);
+    let is_default = declared_on_interface
+        && flags & ACC_PUBLIC != 0
+        && flags & ACC_ABSTRACT == 0
+        && flags & ACC_STATIC == 0;
+    Ok(Some(Value::Int(i32::from(is_default))))
+}
+
 fn member_get_name(
     shared: &Shared,
     _thread: &ThreadState,
@@ -2328,7 +2529,7 @@ fn field_receiver(
             }
         }
     };
-    if !is_assignable(shared, actual, member.class)? {
+    if !named_assignable(shared, member.class, actual)? {
         return Err(VmError::Native(format!(
             "{operation} receiver of class {} is not assignable to {}",
             class_name(shared, actual),
@@ -2351,19 +2552,6 @@ fn field_slot(shared: &Shared, actual: ClassId, member: &ReflectMember) -> Resul
                 member.descriptor
             ))
         })
-}
-
-/// Is `from` the same class as `to`, or a subclass of it?
-fn is_assignable(shared: &Shared, mut from: ClassId, to: ClassId) -> Result<bool, VmError> {
-    loop {
-        if from == to {
-            return Ok(true);
-        }
-        let Some(super_class) = shared.resolution_superclass(from)? else {
-            return Ok(false);
-        };
-        from = super_class;
-    }
 }
 
 fn class_name(shared: &Shared, class: ClassId) -> String {

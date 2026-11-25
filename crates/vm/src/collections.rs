@@ -709,6 +709,52 @@ fn register_set_natives(shared: &Shared) {
         ("toArray", "()[Ljava/lang/Object;", set_to_array),
     ] {
         shared.register_native("java/util/Set", name, descriptor, function);
+    }
+    // The C1 tree omits `AbstractCollection`'s concrete subclasses
+    // (`AbstractList`/`AbstractSequentialList`), so a `Collection` call site on a
+    // `LinkedList` has no class-file declaration to resolve to and falls back to the
+    // `java/util/Collection` interface entries. Every entry there must therefore accept
+    // both collection shapes; the `Set`-only natives above would reject the list.
+    for (name, descriptor, function) in [
+        (
+            "add",
+            "(Ljava/lang/Object;)Z",
+            abstract_collection_add as crate::NativeFn,
+        ),
+        (
+            "contains",
+            "(Ljava/lang/Object;)Z",
+            abstract_collection_contains,
+        ),
+        (
+            "remove",
+            "(Ljava/lang/Object;)Z",
+            abstract_collection_remove,
+        ),
+        ("size", "()I", collection_size),
+        ("isEmpty", "()Z", collection_is_empty),
+        (
+            "iterator",
+            "()Ljava/util/Iterator;",
+            abstract_collection_iterator,
+        ),
+        ("clear", "()V", abstract_collection_clear),
+        (
+            "addAll",
+            "(Ljava/util/Collection;)Z",
+            abstract_collection_add_all,
+        ),
+        (
+            "toArray",
+            "()[Ljava/lang/Object;",
+            abstract_collection_to_array,
+        ),
+        (
+            "toArray",
+            "([Ljava/lang/Object;)[Ljava/lang/Object;",
+            collection_to_array_into,
+        ),
+    ] {
         shared.register_native("java/util/Collection", name, descriptor, function);
     }
     shared.register_native(
@@ -1954,6 +2000,48 @@ fn iterator_remove(
     ))
 }
 
+/// Install `Collections.EMPTY_SET`, `EMPTY_LIST` and `EMPTY_MAP`.
+///
+/// The C1 stubs carry no initializer `Code` for `Collections`, so the real `<clinit>` never
+/// runs and these `static final` fields would read as their type's default (`null`).
+/// CGLIB's `EmitUtils.wrap_undeclared_throwable` reads `Collections.EMPTY_SET` whenever the
+/// method it is emitting has no checked exceptions, so the empty collection objects must
+/// exist before any application code runs. They are ordinary heap shapes, so the same
+/// `Collection.add`/`iterator`/`contains` natives serve them as `Collections.emptySet()`
+/// returns.
+pub fn install_empty_constants(shared: &Shared) -> Result<(), VmError> {
+    let collections = shared.load_library_class("java/util/Collections")?;
+    let set = {
+        let class = shared.load_library_class(LINKED_HASH_SET_CLASS)?;
+        shared.heap().allocate_set(class)
+    };
+    let list = {
+        let class = shared.load_library_class(ARRAY_LIST_CLASS)?;
+        shared.heap().allocate_list(class)
+    };
+    let map = {
+        let class = shared.load_library_class(crate::maps::HASH_MAP_CLASS)?;
+        shared.heap().allocate_map(class)
+    };
+    let entry = shared
+        .entry(collections)
+        .ok_or_else(|| VmError::Loader(format!("class id {} is not loaded", collections.0)))?;
+    let mut statics = entry.statics.lock().expect("static field lock poisoned");
+    statics.insert(
+        ("EMPTY_SET".to_owned(), "Ljava/util/Set;".to_owned()),
+        Value::Ref(set),
+    );
+    statics.insert(
+        ("EMPTY_LIST".to_owned(), "Ljava/util/List;".to_owned()),
+        Value::Ref(list),
+    );
+    statics.insert(
+        ("EMPTY_MAP".to_owned(), "Ljava/util/Map;".to_owned()),
+        Value::Ref(map),
+    );
+    Ok(())
+}
+
 fn collections_empty_set(
     shared: &Shared,
     _thread: &ThreadState,
@@ -2131,6 +2219,60 @@ fn any_collection(
             "{method} receiver is not a java.util.Collection"
         ))),
     }
+}
+
+/// `Collection.size()`: the element count of either container shape.
+fn collection_size(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    _args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    if receiver.is_null() {
+        return Err(null_receiver("Collection.size"));
+    }
+    let length = {
+        let heap = shared.heap();
+        match heap.get(receiver).map_err(heap_error)? {
+            HeapObject::List(list) => list.elements.len(),
+            HeapObject::Set(set) => set.elements.len(),
+            _ => {
+                return Err(VmError::Native(
+                    "Collection.size receiver is not a java.util.Collection".to_owned(),
+                ));
+            }
+        }
+    };
+    let size = i32::try_from(length)
+        .map_err(|_| VmError::Native("collection is longer than an int can hold".to_owned()))?;
+    Ok(Some(Value::Int(size)))
+}
+
+/// `Collection.isEmpty()`: whether either container shape holds no elements.
+fn collection_is_empty(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    _args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    if receiver.is_null() {
+        return Err(null_receiver("Collection.isEmpty"));
+    }
+    let empty = {
+        let heap = shared.heap();
+        match heap.get(receiver).map_err(heap_error)? {
+            HeapObject::List(list) => list.elements.is_empty(),
+            HeapObject::Set(set) => set.elements.is_empty(),
+            _ => {
+                return Err(VmError::Native(
+                    "Collection.isEmpty receiver is not a java.util.Collection".to_owned(),
+                ));
+            }
+        }
+    };
+    Ok(Some(Value::Int(i32::from(empty))))
 }
 
 fn abstract_collection_add_all(
