@@ -477,8 +477,8 @@ fn probe_bytes() -> Vec<u8> {
         void_type_name,
     );
 
-    // static int maxValue() { return Integer.MAX_VALUE; } -- not a TYPE field, so it must
-    // stay absent, exactly as before M2.15.
+    // static int maxValue() { return Integer.MAX_VALUE; } -- a declared static final whose
+    // value comes from the ConstantValue attribute, not from an initializer Code.
     let max_value = builder.field_ref("java/lang/Integer", "MAX_VALUE", "I");
     let mut max_value_body = Assembler::new();
     max_value_body.getstatic(max_value);
@@ -744,16 +744,6 @@ fn member_of(fixture: &Fixture, reference: ObjRef) -> rava_vm::ReflectMember {
         .clone()
 }
 
-fn assert_decode_error(result: Result<Option<Value>, InterpError>, fragment: &str) {
-    match result {
-        Err(InterpError::Decode(ref detail)) => assert!(
-            detail.contains(fragment),
-            "expected a decode error containing {fragment:?}, found {detail:?}"
-        ),
-        other => panic!("expected a decode error containing {fragment:?}, found {other:?}"),
-    }
-}
-
 #[test]
 fn every_primitive_for_name_is_one_cached_class_object_with_jdk_flags() {
     let fixture = fixture();
@@ -993,11 +983,12 @@ fn wrapper_type_fields_are_the_primitive_class_objects() {
         "void"
     );
 
-    // Only TYPE is virtual: any other static field of a wrapper is still absent because
-    // the C1 stub has no initializer `Code`.
-    assert_decode_error(
-        call_static(&fixture, "maxValue", "()I", Vec::new()),
-        "no static field",
+    // `Integer.MAX_VALUE` is a `static final int` with a `ConstantValue` attribute, so it
+    // reads as the constant even though the C1 stub carries no initializer `Code`.
+    assert_eq!(
+        int_value(call_static(&fixture, "maxValue", "()I", Vec::new()).unwrap()),
+        i32::MAX,
+        "a declared static final reads its ConstantValue"
     );
 }
 

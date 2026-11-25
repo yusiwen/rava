@@ -21,6 +21,13 @@ const ARRAYS_CLASS: &str = "java/util/Arrays";
 
 pub fn register_natives(shared: &Shared) {
     shared.register_native(ARRAYS_CLASS, "sort", "([Ljava/lang/Object;)V", arrays_sort);
+    // The primitive overloads share the one implementation: a primitive array's elements
+    // are already `Value::Int`/`Long`/`Float`/`Double`, which `natural_compare` orders.
+    for descriptor in [
+        "([I)V", "([J)V", "([B)V", "([S)V", "([C)V", "([F)V", "([D)V",
+    ] {
+        shared.register_native(ARRAYS_CLASS, "sort", descriptor, arrays_sort);
+    }
     shared.register_native(
         ARRAYS_CLASS,
         "asList",
@@ -94,9 +101,14 @@ fn int_argument(args: &[Value], position: usize, method: &'static str) -> Result
     }
 }
 
-/// Compare two values for `Arrays.sort(Object[])`.
+/// Compare two values for `Arrays.sort`: natural order for primitives, and content for a
+/// string or a box among object elements (every other reference keeps its input order).
 fn natural_compare(heap: &crate::Heap, left: Value, right: Value) -> std::cmp::Ordering {
     match (left, right) {
+        (Value::Int(left), Value::Int(right)) => left.cmp(&right),
+        (Value::Long(left), Value::Long(right)) => left.cmp(&right),
+        (Value::Float(left), Value::Float(right)) => compare_float(left, right),
+        (Value::Double(left), Value::Double(right)) => compare_double(left, right),
         (Value::Ref(left_ref), Value::Ref(right_ref))
             if !left_ref.is_null() && !right_ref.is_null() =>
         {
@@ -110,6 +122,28 @@ fn natural_compare(heap: &crate::Heap, left: Value, right: Value) -> std::cmp::O
         }
         _ => std::cmp::Ordering::Equal,
     }
+}
+
+/// `Float.compare(float, float)`: `NaN` sorts above every value and `-0.0` below `0.0`.
+fn compare_float(left: f32, right: f32) -> std::cmp::Ordering {
+    if left < right {
+        return std::cmp::Ordering::Less;
+    }
+    if left > right {
+        return std::cmp::Ordering::Greater;
+    }
+    left.to_bits().cmp(&right.to_bits())
+}
+
+/// `Double.compare(double, double)`: the `Float.compare` order widened to `double`.
+fn compare_double(left: f64, right: f64) -> std::cmp::Ordering {
+    if left < right {
+        return std::cmp::Ordering::Less;
+    }
+    if left > right {
+        return std::cmp::Ordering::Greater;
+    }
+    left.to_bits().cmp(&right.to_bits())
 }
 
 fn arrays_sort(

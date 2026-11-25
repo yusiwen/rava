@@ -385,6 +385,16 @@ pub(crate) fn runtime_binary_name(shared: &Shared, receiver: ObjRef) -> Result<S
             HeapObject::LogLevel(_) => Kind::LogLevel,
             HeapObject::Atomic(cell) => Kind::Atomic(cell.class_name()),
             HeapObject::Lock(_) => Kind::Lock,
+            HeapObject::FutureTask(_) => Kind::Named(
+                shared
+                    .load_library_class(crate::futures::FUTURE_TASK_CLASS)
+                    .map_err(|error| VmError::Native(error.to_string()))?,
+            ),
+            HeapObject::BitSet(_) => Kind::Named(
+                shared
+                    .load_library_class(crate::bitset::BIT_SET_CLASS)
+                    .map_err(|error| VmError::Native(error.to_string()))?,
+            ),
             HeapObject::Condition(_) => Kind::Condition,
             HeapObject::Pattern(_) => Kind::Pattern,
             HeapObject::Matcher(_) => Kind::Matcher,

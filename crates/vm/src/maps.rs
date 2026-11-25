@@ -39,6 +39,12 @@ pub const LINKED_HASH_MAP_CLASS: &str = "java/util/LinkedHashMap";
 /// The internal name of the sorted map's runtime class.
 pub const TREE_MAP_CLASS: &str = "java/util/TreeMap";
 
+/// The internal name of the weak-keyed map's runtime class.
+///
+/// The VM has no collector, so the entries are stored like a `HashMap`'s and never
+/// dropped; the class is a real map container, not a special case.
+pub const WEAK_HASH_MAP_CLASS: &str = "java/util/WeakHashMap";
+
 /// The internal name of the identity map's runtime class.
 pub const IDENTITY_HASH_MAP_CLASS: &str = "java/util/IdentityHashMap";
 
@@ -64,6 +70,7 @@ pub fn register_natives(shared: &Shared) {
         HASH_MAP_CLASS,
         LINKED_HASH_MAP_CLASS,
         TREE_MAP_CLASS,
+        WEAK_HASH_MAP_CLASS,
         IDENTITY_HASH_MAP_CLASS,
         CONCURRENT_HASH_MAP_CLASS,
         HASHTABLE_CLASS,

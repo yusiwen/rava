@@ -141,6 +141,12 @@ pub fn register_natives(shared: &Shared) {
     );
     shared.register_native(
         STRING_BUILDER_CLASS,
+        "append",
+        "(Ljava/lang/CharSequence;II)Ljava/lang/StringBuilder;",
+        string_builder_append_char_sequence_range,
+    );
+    shared.register_native(
+        STRING_BUILDER_CLASS,
         "toString",
         "()Ljava/lang/String;",
         string_builder_to_string,
@@ -1060,10 +1066,6 @@ fn string_builder_append_double(
 }
 
 /// `StringBuilder.append(CharSequence)`: the text of a String or another builder.
-///
-/// Implementing `CharSequence` through `length`/`charAt` would require re-entering the
-/// interpreter, so the two character sequences the class library models are accepted and
-/// any other reference is a typed error rather than a guessed text.
 fn string_builder_append_char_sequence(
     shared: &Shared,
     _thread: &ThreadState,
@@ -1072,20 +1074,72 @@ fn string_builder_append_char_sequence(
     args: &[Value],
 ) -> Result<Option<Value>, VmError> {
     let reference = reference_argument(args, 0, "StringBuilder.append")?;
-    let text = if reference.is_null() {
-        "null".to_owned()
-    } else {
-        let heap = shared.heap();
-        match heap.get(reference).map_err(heap_error)? {
-            HeapObject::Str(text) | HeapObject::StringBuilder(text) => text.clone(),
-            _ => {
-                return Err(VmError::Native(format!(
-                    "{reference} is not a String or StringBuilder CharSequence"
-                )));
-            }
-        }
-    };
+    let text = char_sequence_text(shared, reference, "StringBuilder.append")?;
     append_text(shared, receiver, &text, "StringBuilder.append")
+}
+
+/// `StringBuilder.append(CharSequence, int, int)`: the `[start, end)` slice of a
+/// character sequence, with the JDK's `AbstractStringBuilder` semantics.
+///
+/// A null sequence is the text `"null"` before the range is checked, and the range is
+/// measured in UTF-16 units, like every other builder operation. The JDK's single
+/// `start < 0 || start > end || end > length` test is reported as a typed
+/// [`VmError::StringIndexOutOfBounds`] naming the argument that failed.
+fn string_builder_append_char_sequence_range(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let method = "StringBuilder.append";
+    let reference = reference_argument(args, 0, method)?;
+    let text = char_sequence_text(shared, reference, method)?;
+    let units = utf16_units(&text);
+    let start = int_argument(args, 1, method)?;
+    let end = int_argument(args, 2, method)?;
+    let start_position = usize::try_from(start)
+        .ok()
+        .filter(|position| *position <= units.len())
+        .ok_or(VmError::StringIndexOutOfBounds {
+            index: start,
+            length: units.len(),
+        })?;
+    let end_position = usize::try_from(end)
+        .ok()
+        .filter(|position| *position <= units.len() && *position >= start_position)
+        .ok_or(VmError::StringIndexOutOfBounds {
+            index: end,
+            length: units.len(),
+        })?;
+    let slice = string_from_utf16(&units[start_position..end_position], method)?;
+    append_text(shared, receiver, &slice, method)
+}
+
+/// The text behind a `CharSequence` argument the class library models.
+///
+/// Implementing `CharSequence` through `length`/`charAt` would require re-entering the
+/// interpreter, so the three character sequences the class library models are accepted (a
+/// `String`, a `StringBuilder` and a `StringBuffer`) and any other reference is a typed
+/// error rather than a guessed text. A null reference is the JDK's `"null"` text.
+fn char_sequence_text(
+    shared: &Shared,
+    reference: ObjRef,
+    method: &'static str,
+) -> Result<String, VmError> {
+    if reference.is_null() {
+        return Ok("null".to_owned());
+    }
+    let heap = shared.heap();
+    match heap.get(reference).map_err(heap_error)? {
+        HeapObject::Str(text)
+        | HeapObject::StringBuilder(text)
+        | HeapObject::StringBuffer(text) => Ok(text.clone()),
+        _ => Err(VmError::Native(format!(
+            "{method} received {reference}, which is not a String, StringBuilder or \
+             StringBuffer CharSequence"
+        ))),
+    }
 }
 
 fn string_builder_to_string(

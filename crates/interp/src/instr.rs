@@ -258,7 +258,8 @@ pub enum Instr {
     },
     /// `invokedynamic`: a call site whose target the class's `BootstrapMethods` entry
     /// supplies. The entry is resolved at decode time into its typed handle and static
-    /// arguments; execution supports `StringConcatFactory` only.
+    /// arguments; execution supports `StringConcatFactory`, `LambdaMetafactory` and the
+    /// `ObjectMethods` record `hashCode` call site.
     InvokeDynamic {
         /// The call-site name from `CONSTANT_InvokeDynamic` (`makeConcatWithConstants`).
         name: String,

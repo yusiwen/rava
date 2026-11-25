@@ -85,6 +85,8 @@ fn execute(options: &Options) -> Result<(), String> {
     rava_interp::proxy::register_natives(&shared);
     rava_interp::callbacks::register_natives(&shared);
     rava_interp::streams::register_natives(&shared);
+    rava_interp::futures::register_natives(&shared);
+    rava_interp::object_methods::register_natives(&shared);
 
     let main_class = match shared.load_class(loader, &options.main_class) {
         Ok(class) => class,
