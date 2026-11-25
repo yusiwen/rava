@@ -658,9 +658,9 @@ fn class_get_superclass(
 /// (`[I`, `[[I`, `[Ljava.lang.String;`).
 ///
 /// `Class.forName` takes a binary name (`java.util.List`), not an internal one; for an
-/// array it takes the JDK's descriptor form with dots in an object component. The named
-/// component of an array is resolved through the bootstrap loader, exactly as a named
-/// argument is.
+/// array it takes the JDK's descriptor form with dots in an object component. The native
+/// ABI receives the *declaring* class's loader, and `java.lang.Class` is a bootstrap class,
+/// so this one-argument form resolves through the application loader.
 fn class_for_name(
     shared: &Shared,
     _thread: &ThreadState,
@@ -668,17 +668,42 @@ fn class_for_name(
     _receiver: ObjRef,
     args: &[Value],
 ) -> Result<Option<Value>, VmError> {
+    let name = for_name_argument(shared, args)?;
+    let loader = if loader == LoaderId::BOOTSTRAP {
+        shared.application_loader()
+    } else {
+        loader
+    };
+    resolve_for_name(shared, loader, &name)
+}
+
+/// The `String` argument of a `Class.forName` call.
+fn for_name_argument(shared: &Shared, args: &[Value]) -> Result<String, VmError> {
     let Some(Value::Ref(reference)) = args.first().copied() else {
         return Err(VmError::Native(
             "Class.forName expects a String argument".to_owned(),
         ));
     };
-    let name = {
-        let heap = shared.heap();
-        heap.string(reference).map_err(heap_error)?.to_owned()
-    };
+    if reference.is_null() {
+        return Err(VmError::Native(
+            "Class.forName received a null name".to_owned(),
+        ));
+    }
+    let heap = shared.heap();
+    Ok(heap.string(reference).map_err(heap_error)?.to_owned())
+}
 
-    if let Some(kind) = PrimitiveKind::from_name(&name) {
+/// Resolve a `Class.forName` name through one loader.
+///
+/// Primitive names and array descriptors have no class file, so they resolve from the
+/// caches regardless of the loader; a named class goes through the ordinary parent-first
+/// lookup. A miss is a real `ClassNotFoundException` object.
+fn resolve_for_name(
+    shared: &Shared,
+    loader: LoaderId,
+    name: &str,
+) -> Result<Option<Value>, VmError> {
+    if let Some(kind) = PrimitiveKind::from_name(name) {
         return Ok(Some(Value::Ref(shared.primitive_class(kind))));
     }
     if name.starts_with('[') {
@@ -690,14 +715,11 @@ fn class_for_name(
         return Ok(Some(Value::Ref(object)));
     }
     let internal = name.replace('.', "/");
-    let loader = if loader == LoaderId::BOOTSTRAP {
-        shared.application_loader()
-    } else {
-        loader
-    };
     let class = match shared.load_class(loader, &internal) {
         Ok(class) => class,
-        Err(VmError::ClassNotFound { .. }) => return Err(class_not_found(shared)),
+        Err(VmError::ClassNotFound { .. }) => {
+            return Err(class_not_found(shared, name));
+        }
         Err(error) => return Err(error),
     };
     let object = shared.class_object(class)?;
@@ -709,40 +731,41 @@ fn class_for_name(
 /// M2.23 needs this one exception object because `Class.forName` is how libraries probe
 /// for optional dependencies and they catch the failure. The constructor is not run (the
 /// C1 stub has no `Code`); the object exists so the interpreter's handler search can
-/// match it by class. The requested name is not carried as a message yet.
-fn class_not_found(shared: &Shared) -> VmError {
-    match shared.load_library_class("java/lang/ClassNotFoundException") {
-        Ok(class) => match shared.allocate_instance(class) {
-            Ok(object) => VmError::Thrown(object),
-            Err(error) => error,
-        },
+/// match it by class, and it carries the requested name as its detail message.
+fn class_not_found(shared: &Shared, name: &str) -> VmError {
+    match crate::exceptions::new_throwable(
+        shared,
+        "java/lang/ClassNotFoundException",
+        name.to_owned(),
+    ) {
+        Ok(object) => VmError::Thrown(object),
         Err(error) => error,
     }
 }
 
-/// `Class.forName(String, boolean, ClassLoader)`: the same resolution as
-/// `Class.forName(String)`.
+/// `Class.forName(String, boolean, ClassLoader)`: resolve through the supplied loader.
 ///
 /// The initialize flag is accepted and ignored: this VM initializes a class on first use,
-/// not at `forName` time, and the C1 stubs have no initializer `Code` to run. The
-/// `ClassLoader` argument is accepted for signature compatibility; the class resolves
-/// through the executing frame's loader, which is the application loader for Spring's own
-/// calls and there is no public `ClassLoader` object model yet.
+/// not at `forName` time, and the C1 stubs have no initializer `Code` to run. A null
+/// `ClassLoader` means the bootstrap loader, exactly as the JDK documents, so an
+/// application class is not visible through it.
 fn class_for_name_initialized(
     shared: &Shared,
-    thread: &ThreadState,
-    loader: LoaderId,
-    receiver: ObjRef,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
     args: &[Value],
 ) -> Result<Option<Value>, VmError> {
-    class_for_name(shared, thread, loader, receiver, &args[..1.min(args.len())])
+    let name = for_name_argument(shared, args)?;
+    let loader = match args.get(2).copied() {
+        Some(Value::Ref(reference)) if !reference.is_null() => shared.loader_id_for(reference)?,
+        _ => LoaderId::BOOTSTRAP,
+    };
+    resolve_for_name(shared, loader, &name)
 }
 
-/// `Class.getClassLoader()`: null, meaning the bootstrap loader.
-///
-/// The VM has no public `ClassLoader` object model; every class's loader is an internal
-/// `LoaderId`. Reporting null makes Spring's `ClassUtils.forName` fall back to
-/// `Class.forName`, whose native resolves through the executing frame's loader.
+/// `Class.getClassLoader()`: the defining loader's object, or null for a bootstrap class
+/// and for a primitive or array class.
 fn class_get_class_loader(
     shared: &Shared,
     _thread: &ThreadState,
@@ -760,7 +783,7 @@ fn class_get_class_loader(
     if loader == LoaderId::BOOTSTRAP {
         Ok(Some(Value::Ref(ObjRef::NULL)))
     } else {
-        let object = shared.class_loader_object()?;
+        let object = shared.loader_object(loader)?;
         Ok(Some(Value::Ref(object)))
     }
 }

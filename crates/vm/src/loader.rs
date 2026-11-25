@@ -78,6 +78,12 @@ struct Loader {
 #[derive(Debug)]
 pub(crate) struct ClassTable {
     loaders: Vec<Loader>,
+    /// The loader a runner added last through [`ClassTable::add_application_loader`].
+    ///
+    /// Child loaders the VM creates for a user `ClassLoader` instance go through
+    /// [`ClassTable::add_loader`] and do not move this marker, so
+    /// `application_loader()` keeps naming the runner's loader.
+    application: LoaderId,
     classes: HashMap<ClassKey, ClassId>,
     entries: Vec<Arc<ClassEntry>>,
 }
@@ -89,6 +95,7 @@ impl ClassTable {
                 parent: None,
                 source,
             }],
+            application: LoaderId::BOOTSTRAP,
             classes: HashMap::new(),
             entries: Vec::new(),
         }
@@ -113,9 +120,36 @@ impl ClassTable {
         Ok(id)
     }
 
-    /// The most recently added loader, which is the application loader the runner added.
-    pub(crate) fn last_loader(&self) -> LoaderId {
-        LoaderId((self.loaders.len() - 1) as u32)
+    /// Add a loader and make it the application loader.
+    ///
+    /// This is the public [`crate::Shared::add_loader`] path: a runner's loader is the
+    /// application loader, and a later child loader the VM creates for a user
+    /// `ClassLoader` instance does not replace it.
+    pub(crate) fn add_application_loader(
+        &mut self,
+        parent: LoaderId,
+        source: Arc<dyn ClassSource>,
+    ) -> Result<LoaderId, VmError> {
+        let id = self.add_loader(parent, source)?;
+        self.application = id;
+        Ok(id)
+    }
+
+    /// The loader the runner marked as the application loader, or bootstrap when none
+    /// was added.
+    pub(crate) fn application_loader(&self) -> LoaderId {
+        self.application
+    }
+
+    pub(crate) fn has_loader(&self, loader: LoaderId) -> bool {
+        loader.index() < self.loaders.len()
+    }
+
+    /// The parent of `loader`, or `None` for the bootstrap loader and an unknown id.
+    pub(crate) fn parent(&self, loader: LoaderId) -> Option<LoaderId> {
+        self.loaders
+            .get(loader.index())
+            .and_then(|loader| loader.parent)
     }
 
     pub(crate) fn lookup(&self, loader: LoaderId, name: &str) -> Option<ClassId> {

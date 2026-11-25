@@ -1,4 +1,4 @@
-//! `java.lang.Thread` and `ClassLoader` natives for the single-threaded VM (M2.23).
+//! `java.lang.Thread` natives for the single-threaded VM (M2.23).
 //!
 //! M5 introduces real threads. Until then `currentThread` returns one cached `Thread`
 //! object, `sleep`/`yield`/`join` return immediately, and `getState` reports `RUNNABLE`.
@@ -6,9 +6,9 @@
 //! `Thread.State.WAITING`, so the six enum constants are installed into `Thread$State`'s
 //! statics exactly as `java.util.logging.Level` is.
 //!
-//! `ClassLoader` has no public object model yet: `getSystemClassLoader` and
-//! `getContextClassLoader` return null, which makes Spring fall back to
-//! `Class.forName(String)` and the application loader.
+//! `ClassLoader` natives live in [`crate::class_loader`] (M3.3); this module only answers
+//! `Thread.getContextClassLoader`/`setContextClassLoader` through the application loader
+//! object.
 
 use crate::VmError;
 use crate::heap::{EnumConstant, ObjRef};
@@ -19,7 +19,6 @@ use crate::value::Value;
 
 const THREAD_CLASS: &str = "java/lang/Thread";
 const THREAD_STATE_CLASS: &str = "java/lang/Thread$State";
-const CLASS_LOADER_CLASS: &str = "java/lang/ClassLoader";
 const THREAD_LOCAL_CLASS: &str = "java/lang/ThreadLocal";
 
 const THREAD_STATES: [&str; 6] = [
@@ -103,66 +102,6 @@ pub fn register_natives(shared: &Shared) {
         "()Ljava/lang/Object;",
         thread_null,
     );
-    shared.register_native(
-        CLASS_LOADER_CLASS,
-        "getResource",
-        "(Ljava/lang/String;)Ljava/net/URL;",
-        thread_null,
-    );
-    shared.register_native(
-        CLASS_LOADER_CLASS,
-        "getResources",
-        "(Ljava/lang/String;)Ljava/util/Enumeration;",
-        class_loader_get_resources,
-    );
-    shared.register_native(
-        CLASS_LOADER_CLASS,
-        "getSystemResources",
-        "(Ljava/lang/String;)Ljava/util/Enumeration;",
-        class_loader_get_resources,
-    );
-    shared.register_native(
-        CLASS_LOADER_CLASS,
-        "getSystemResource",
-        "(Ljava/lang/String;)Ljava/net/URL;",
-        thread_null,
-    );
-    shared.register_native(
-        CLASS_LOADER_CLASS,
-        "getResourceAsStream",
-        "(Ljava/lang/String;)Ljava/io/InputStream;",
-        thread_null,
-    );
-    shared.register_native(
-        CLASS_LOADER_CLASS,
-        "getSystemResourceAsStream",
-        "(Ljava/lang/String;)Ljava/io/InputStream;",
-        thread_null,
-    );
-    shared.register_native(
-        CLASS_LOADER_CLASS,
-        "getSystemClassLoader",
-        "()Ljava/lang/ClassLoader;",
-        current_class_loader,
-    );
-    shared.register_native(
-        CLASS_LOADER_CLASS,
-        "getPlatformClassLoader",
-        "()Ljava/lang/ClassLoader;",
-        current_class_loader,
-    );
-    shared.register_native(
-        CLASS_LOADER_CLASS,
-        "getContextClassLoader",
-        "()Ljava/lang/ClassLoader;",
-        current_class_loader,
-    );
-    shared.register_native(
-        CLASS_LOADER_CLASS,
-        "setContextClassLoader",
-        "(Ljava/lang/ClassLoader;)V",
-        thread_noop_reference,
-    );
 }
 
 /// Install the six `Thread.State` enum constants into the stub's statics.
@@ -203,17 +142,6 @@ fn current_class_loader(
 ) -> Result<Option<Value>, VmError> {
     let loader = shared.class_loader_object()?;
     Ok(Some(Value::Ref(loader)))
-}
-
-fn class_loader_get_resources(
-    shared: &Shared,
-    _thread: &ThreadState,
-    _loader: LoaderId,
-    _receiver: ObjRef,
-    _args: &[Value],
-) -> Result<Option<Value>, VmError> {
-    let enumeration = shared.heap().allocate_enumeration(Vec::new());
-    Ok(Some(Value::Ref(enumeration)))
 }
 
 fn thread_local_get(
