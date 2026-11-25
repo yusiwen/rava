@@ -78,7 +78,8 @@ fn call_site_probe_bytes() -> Vec<u8> {
 
     // `makeConcat` over every primitive descriptor the conversion supports. The body uses
     // compact local slots because this interpreter keeps one local per argument (it does
-    // not widen long/double to two slots).
+    // not widen long/double to two slots). The class file still carries JVM slot counts:
+    // `max_stack` and `max_locals` size the descriptor's eight slots, not the six values.
     let primitives_descriptor = "(JFDZCB)Ljava/lang/String;";
     let primitives_bootstrap = builder.bootstrap_method(
         "java/lang/invoke/StringConcatFactory",
@@ -101,8 +102,8 @@ fn call_site_probe_bytes() -> Vec<u8> {
         &mut builder,
         "primitives",
         primitives_descriptor,
-        6,
-        6,
+        8,
+        8,
         primitive_body,
     );
 

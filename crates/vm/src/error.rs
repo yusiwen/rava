@@ -77,6 +77,16 @@ pub enum VmError {
     },
     /// The same `(loader, name)` was defined twice.
     DuplicateClass { loader: LoaderId, name: String },
+    /// A method in a class being defined failed bytecode verification.
+    ///
+    /// `class` is the class's binary name, `method` is its name and descriptor (for
+    /// example `answer()I`), and `detail` is the verifier's diagnostic. The class is not
+    /// inserted into the class table, so the failed definition leaves no trace.
+    Verify {
+        class: String,
+        method: String,
+        detail: String,
+    },
     /// No loader in the delegation chain supplied the class.
     ClassNotFound { loader: LoaderId, name: String },
     /// A `Signature` attribute is not a well-formed JVMS generic signature.
@@ -125,6 +135,14 @@ impl fmt::Display for VmError {
             Self::DuplicateClass { loader, name } => {
                 write!(f, "class {name} is already defined in loader {}", loader.0)
             }
+            Self::Verify {
+                class,
+                method,
+                detail,
+            } => write!(
+                f,
+                "class {class} method {method} failed verification: {detail}"
+            ),
             Self::ClassNotFound { loader, name } => {
                 write!(f, "class {name} not found from loader {}", loader.0)
             }

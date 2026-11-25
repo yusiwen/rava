@@ -155,14 +155,157 @@ fn rejects_a_truncated_operand() {
 
 #[test]
 fn reports_an_unsupported_opcode_instead_of_passing_it() {
-    let class = case("()V", (1, 0, vec![0xaa]));
+    // `ret` (`0xa9`) is not part of the verifier's covered set; the switches and `wide`
+    // used to stand in for it but are decoded now.
+    let class = case("()V", (1, 0, vec![0xa9]));
 
     let error = verify_method(&class, run_method(&class, "()V")).unwrap_err();
     assert_eq!(
         error,
         VerifyError::UnsupportedOpcode {
             pc: 0,
-            opcode: 0xaa,
+            opcode: 0xa9,
+        }
+    );
+}
+
+#[test]
+fn verifies_tableswitch_and_lookupswitch_targets() {
+    let table = assemble(|assembler| {
+        let one = assembler.label();
+        let otherwise = assembler.label();
+        assembler.iload(0);
+        assembler.tableswitch(otherwise, 1, &[one]);
+        assembler.place(one);
+        assembler.iconst(10);
+        assembler.ireturn();
+        assembler.place(otherwise);
+        assembler.iconst(0);
+        assembler.ireturn();
+    });
+    let class = case("(I)I", (1, 1, table));
+    let verified = verify_method(&class, run_method(&class, "(I)I")).expect("tableswitch verifies");
+    assert_eq!(
+        verified.frames.len(),
+        6,
+        "the entry, the switch and each arm's constant/return boundaries are reachable"
+    );
+
+    let lookup = assemble(|assembler| {
+        let first = assembler.label();
+        let hundred = assembler.label();
+        let otherwise = assembler.label();
+        assembler.iload(0);
+        assembler.lookupswitch(otherwise, &[(1, first), (100, hundred)]);
+        assembler.place(first);
+        assembler.iconst(1);
+        assembler.ireturn();
+        assembler.place(hundred);
+        assembler.iconst(100);
+        assembler.ireturn();
+        assembler.place(otherwise);
+        assembler.iconst(0);
+        assembler.ireturn();
+    });
+    let class = case("(I)I", (1, 1, lookup));
+    let verified =
+        verify_method(&class, run_method(&class, "(I)I")).expect("lookupswitch verifies");
+    assert_eq!(
+        verified.frames.len(),
+        8,
+        "the entry, the switch and each of the three arms are reachable"
+    );
+}
+
+#[test]
+fn rejects_switch_targets_that_are_not_instruction_boundaries() {
+    // `iconst_0` supplies the selector; the `tableswitch` at pc 1 then targets byte 19,
+    // the last byte of the case offset rather than the `return` at byte 20.
+    let mut operand = vec![0u8; 2];
+    operand.extend_from_slice(&18i32.to_be_bytes()); // default: pc 1 + 18 = 19
+    operand.extend_from_slice(&0i32.to_be_bytes());
+    operand.extend_from_slice(&0i32.to_be_bytes());
+    operand.extend_from_slice(&20i32.to_be_bytes()); // case: pc 1 + 19 = 20
+    let code = assemble(|assembler| {
+        assembler.iconst(0);
+        assembler.op(0xaa, &operand);
+        assembler.return_();
+    });
+    let class = case("(I)I", (1, 1, code));
+
+    let error = verify_method(&class, run_method(&class, "(I)I")).unwrap_err();
+    assert_eq!(
+        error,
+        VerifyError::InvalidBranchTarget {
+            pc: 1,
+            target: 19,
+            code_len: 21,
+        }
+    );
+}
+
+#[test]
+fn rejects_a_lookupswitch_with_unsorted_keys() {
+    let mut operand = vec![0u8; 3];
+    operand.extend_from_slice(&0i32.to_be_bytes()); // default
+    operand.extend_from_slice(&2i32.to_be_bytes()); // two pairs
+    operand.extend_from_slice(&20i32.to_be_bytes());
+    operand.extend_from_slice(&0i32.to_be_bytes());
+    operand.extend_from_slice(&10i32.to_be_bytes());
+    operand.extend_from_slice(&0i32.to_be_bytes());
+    let code = assemble(|assembler| {
+        assembler.op(0xab, &operand);
+        assembler.return_();
+    });
+    let class = case("(I)I", (1, 1, code));
+
+    let error = verify_method(&class, run_method(&class, "(I)I")).unwrap_err();
+    assert!(
+        matches!(error, VerifyError::MalformedCode { ref detail } if detail.contains("strictly ascending")),
+        "found {error:?}"
+    );
+}
+
+#[test]
+fn verifies_wide_local_access_and_rejects_an_out_of_range_index() {
+    let code = assemble(|assembler| {
+        assembler.iconst(7);
+        assembler.op(0xc4, &[0x36, 0x01, 0x00]); // wide istore 256
+        assembler.op(0xc4, &[0x15, 0x01, 0x00]); // wide iload 256
+        assembler.ireturn();
+    });
+    let class = case("()I", (1, 257, code));
+    let verified = verify_method(&class, run_method(&class, "()I")).expect("wide verifies");
+    assert_eq!(verified.max_locals, 257);
+
+    // `wide iload 1` with max_locals 1 is out of range.
+    let code = assemble(|assembler| {
+        assembler.op(0xc4, &[0x15, 0x00, 0x01]);
+        assembler.ireturn();
+    });
+    let class = case("()I", (1, 1, code));
+    let error = verify_method(&class, run_method(&class, "()I")).unwrap_err();
+    assert_eq!(
+        error,
+        VerifyError::InvalidLocal {
+            pc: 0,
+            index: 1,
+            max_locals: 1,
+        }
+    );
+}
+
+#[test]
+fn rejects_wide_ret() {
+    // `wide ret 1`: the modified opcode is `ret` (`0xa9`), which stays unsupported.
+    let class = case("()V", (1, 1, vec![0xc4, 0xa9, 0x00, 0x01]));
+
+    let error = verify_method(&class, run_method(&class, "()V")).unwrap_err();
+    assert_eq!(
+        error,
+        VerifyError::UnsupportedOpcode {
+            pc: 0,
+            opcode: 0xa9,
         }
     );
 }

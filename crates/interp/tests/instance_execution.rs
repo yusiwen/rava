@@ -193,7 +193,8 @@ fn probe_bytes() -> Vec<u8> {
         ACC_PUBLIC_STATIC,
         "badDescriptor",
         "(LPoint;)I",
-        Some((1, 1, bad_descriptor.finish().unwrap())),
+        // `getfield` of the mis-declared `long` pushes two slots before `ireturn` reads one.
+        Some((2, 1, bad_descriptor.finish().unwrap())),
     );
 
     // static boolean isRooted(Point p) { return PointProbe.aux(p); }

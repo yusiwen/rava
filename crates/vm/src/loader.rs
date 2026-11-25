@@ -10,6 +10,7 @@ use rava_classfile::{ClassFile, ClassMetadata};
 
 use crate::error::VmError;
 use crate::source::ClassSource;
+use crate::verify::{VerifyError, verify_method};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct LoaderId(pub u32);
@@ -183,6 +184,7 @@ impl ClassTable {
         }
 
         let file = Arc::new(ClassFile::parse(bytes)?);
+        verify_class(&file)?;
         let id = ClassId(self.entries.len() as u32);
         self.classes.insert(key, id);
         self.entries.push(Arc::new(ClassEntry {
@@ -215,4 +217,29 @@ impl ClassTable {
         }
         chain
     }
+}
+
+/// Verifies every method that carries a `Code` attribute.
+///
+/// A native, abstract or signature-only stub has no `Code`; [`verify_method`] reports
+/// that as [`VerifyError::NoCode`], which is skipped. Any other verifier error becomes a
+/// [`VmError::Verify`] naming the class and method. The caller runs this before inserting
+/// the class, so a rejected definition does not change the class table.
+fn verify_class(file: &ClassFile) -> Result<(), VmError> {
+    let class = file.this_class_name()?;
+    for method in &file.methods {
+        let name = file.method_name(method)?;
+        let descriptor = file.method_descriptor(method)?;
+        match verify_method(file, method) {
+            Ok(_) | Err(VerifyError::NoCode) => {}
+            Err(error) => {
+                return Err(VmError::Verify {
+                    class: class.to_owned(),
+                    method: format!("{name}{descriptor}"),
+                    detail: error.to_string(),
+                });
+            }
+        }
+    }
+    Ok(())
 }
