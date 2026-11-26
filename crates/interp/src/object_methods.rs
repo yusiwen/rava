@@ -13,9 +13,12 @@
 //! component is hashed by dispatching its own `hashCode()` (the same virtual dispatch any
 //! other call uses), with `null` hashing to 0.
 //!
-//! `equals` and `toString` are not synthesized: the call sites this slice does not reach
-//! fail with a typed error naming the call site, instead of guessing a comparison or a
-//! rendering.
+//! `equals` follows the JDK's `ObjectMethods` rules: `this == o` answers true before any
+//! component is read, then the class must match, then each component is compared with the
+//! primitive's `Wrapper.compare` (so `NaN` equals `NaN` and `0.0` differs from `-0.0`) or
+//! the reference's own `equals`. `toString` renders `boolean` as `true`/`false`, a `char`
+//! as the character, and a reference through its `toString`, exactly as the JDK's record
+//! bootstrap does.
 //!
 //! `java.util.AbstractList.hashCode` is registered here because it needs the same
 //! per-element `hashCode()` dispatch that cannot run from a `rava-vm` native. The JDK
@@ -89,6 +92,12 @@ pub(crate) fn invoke_call_site(
             let Some(Value::Ref(other)) = args.get(1).copied() else {
                 return Ok(Value::Int(0));
             };
+            // The JDK's ObjectMethods equals starts with `this == o`; without it a record
+            // holding NaN is not equal to itself, and a component's equals may run where
+            // the JDK would not call it.
+            if other == receiver {
+                return Ok(Value::Int(1));
+            }
             if other.is_null() {
                 return Ok(Value::Int(0));
             }
@@ -119,7 +128,7 @@ pub(crate) fn invoke_call_site(
                     text.push('=');
                 }
                 let value = read_component(shared, caller, receiver, getter)?;
-                text.push_str(&component_text(shared, thread, caller, value)?);
+                text.push_str(&component_text(shared, thread, caller, getter, value)?);
             }
             text.push(']');
             Ok(Value::Ref(shared.heap().allocate_string(text)))
@@ -145,37 +154,73 @@ fn component_equals(
     left: Value,
     right: Value,
 ) -> Result<bool, InterpError> {
-    if let (Value::Ref(left), Value::Ref(right)) = (left, right) {
-        if left.is_null() || right.is_null() {
-            return Ok(left.is_null() && right.is_null());
+    match (left, right) {
+        // `Float.compare`/`Double.compare`: NaN equals NaN, and `0.0` differs from `-0.0`
+        // even though Rust's `==` treats the zeros as equal. Comparing the bits after the
+        // NaN case is the JDK's rule for every other value.
+        (Value::Float(left), Value::Float(right)) => {
+            if left.is_nan() && right.is_nan() {
+                Ok(true)
+            } else {
+                Ok(left.to_bits() == right.to_bits())
+            }
         }
-        let start = runtime_class(shared, caller, left)?;
-        let (entry, _) = resolve_virtual(shared, start, "equals", "(Ljava/lang/Object;)Z")?;
-        return match run_instance_method(
-            shared,
-            thread,
-            entry.id,
-            "equals",
-            "(Ljava/lang/Object;)Z",
-            left,
-            vec![Value::Ref(right)],
-        )? {
-            Some(Value::Int(value)) => Ok(value != 0),
-            _ => Err(InterpError::Decode(
-                "record component equals did not return a boolean".to_owned(),
-            )),
-        };
+        (Value::Double(left), Value::Double(right)) => {
+            if left.is_nan() && right.is_nan() {
+                Ok(true)
+            } else {
+                Ok(left.to_bits() == right.to_bits())
+            }
+        }
+        (Value::Ref(left), Value::Ref(right)) => {
+            if left.is_null() || right.is_null() {
+                return Ok(left.is_null() && right.is_null());
+            }
+            let start = runtime_class(shared, caller, left)?;
+            let (entry, _) = resolve_virtual(shared, start, "equals", "(Ljava/lang/Object;)Z")?;
+            match run_instance_method(
+                shared,
+                thread,
+                entry.id,
+                "equals",
+                "(Ljava/lang/Object;)Z",
+                left,
+                vec![Value::Ref(right)],
+            )? {
+                Some(Value::Int(value)) => Ok(value != 0),
+                _ => Err(InterpError::Decode(
+                    "record component equals did not return a boolean".to_owned(),
+                )),
+            }
+        }
+        (left, right) => Ok(left == right),
     }
-    Ok(left == right)
 }
 
 fn component_text(
     shared: &Shared,
     thread: &ThreadState,
     caller: ClassId,
+    getter: &BootstrapMethodHandle,
     value: Value,
 ) -> Result<String, InterpError> {
+    let descriptor = getter.descriptor.as_str();
     match value {
+        // `boolean` and `char` are both JVM `int` values; the descriptor is what tells
+        // them apart, and the JDK renders them as `true`/`false` and the character.
+        Value::Int(value) if descriptor == "Z" => {
+            Ok(if value != 0 { "true" } else { "false" }.to_owned())
+        }
+        Value::Int(value) if descriptor == "C" => {
+            let unit = u32::try_from(value).ok().and_then(char::from_u32);
+            match unit {
+                Some(character) => Ok(character.to_string()),
+                None => Err(InterpError::Decode(format!(
+                    "record component {}:{} holds an unpaired surrogate {value}",
+                    getter.name, descriptor
+                ))),
+            }
+        }
         Value::Int(value) => Ok(value.to_string()),
         Value::Long(value) => Ok(value.to_string()),
         Value::Float(value) => Ok(rava_vm::string::float_text(value)),
