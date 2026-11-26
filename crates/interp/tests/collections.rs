@@ -1855,7 +1855,7 @@ fn array_list_null_elements_are_values() {
 }
 
 #[test]
-fn array_list_contains_and_remove_use_reference_identity() {
+fn array_list_contains_and_remove_use_reference_identity_in_the_vm_layer() {
     let fixture = fixture();
 
     // The same handle is found.
@@ -1867,8 +1867,10 @@ fn array_list_contains_and_remove_use_reference_identity() {
         vec![same, same]
     )));
 
-    // Two distinct strings with equal content are not found: reference equality, not
-    // Object.equals. This is the documented M2.12 limitation.
+    // Two distinct strings with equal content are not found at this layer: the VM's
+    // collection natives use reference equality. The runner installs
+    // `collection_equality`, which makes List/Set call Java `equals`; that public behavior
+    // is pinned in `crates/cli/tests/surface.rs`, not here.
     assert!(!bool_value(ok(
         &fixture,
         "listContainsEqual",
