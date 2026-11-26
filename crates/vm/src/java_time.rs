@@ -61,6 +61,10 @@ pub struct TimeState {
 }
 
 impl TimeState {
+    /// The BCP 47 tag of a `Locale` object, for the formatter's decimal separator.
+    pub fn locale_tag(&self, object: ObjRef) -> Option<String> {
+        self.locales.get(&object).cloned()
+    }
     /// Every object the side table keeps state for, so [`crate::Shared::roots`] can
     /// report them.
     pub fn references(&self) -> Vec<ObjRef> {
@@ -587,6 +591,46 @@ fn formatter_of_localized_date_time(
     Ok(Some(Value::Ref(object)))
 }
 
+/// Install the `Locale` constants the formatter API reads as static fields.
+///
+/// The C1 stub has no initializer `Code`, so `Locale.GERMANY` and its neighbours would
+/// otherwise read null; each constant is a `Locale` object with its tag in the side table.
+fn install_locale_constants(shared: &Shared) -> Result<(), VmError> {
+    let class = shared.load_library_class(LOCALE_CLASS)?;
+    let constants = [
+        ("US", "en-US"),
+        ("UK", "en-GB"),
+        ("GERMANY", "de-DE"),
+        ("FRANCE", "fr-FR"),
+        ("ITALY", "it-IT"),
+        ("JAPAN", "ja-JP"),
+        ("CHINA", "zh-CN"),
+        ("CANADA", "en-CA"),
+        ("CANADA_FRENCH", "fr-CA"),
+        ("KOREA", "ko-KR"),
+        ("TAIWAN", "zh-TW"),
+        ("ROOT", ""),
+    ];
+    let mut values = Vec::with_capacity(constants.len());
+    for (name, tag) in constants {
+        let object = shared.allocate_instance(class)?;
+        shared.time_state().locales.insert(object, tag.to_owned());
+        values.push((
+            name.to_owned(),
+            "Ljava/util/Locale;".to_owned(),
+            Value::Ref(object),
+        ));
+    }
+    let entry = shared
+        .entry(class)
+        .ok_or_else(|| VmError::Loader(format!("class id {} is not loaded", class.0)))?;
+    let mut statics = entry.statics.lock().expect("static field lock poisoned");
+    for (name, descriptor, value) in values {
+        statics.insert((name, descriptor), value);
+    }
+    Ok(())
+}
+
 /// Install the `DateTimeFormatter` constants the framework reads as static fields.
 ///
 /// The C1 stub has no initializer `Code`, so without this every constant would read as
@@ -595,6 +639,7 @@ fn formatter_of_localized_date_time(
 /// table; the identity relations the JDK guarantees (`ISO_DATE` and `ISO_LOCAL_DATE` are
 /// distinct objects) hold because each field gets its own object.
 pub fn install_constants(shared: &Shared) -> Result<(), VmError> {
+    install_locale_constants(shared)?;
     let class = shared.load_library_class(DATE_TIME_FORMATTER_CLASS)?;
     let constants = [
         ("ISO_LOCAL_DATE", "yyyy-MM-dd"),
@@ -789,7 +834,7 @@ fn utc_zone() -> ZoneInfo {
     }
 }
 
-fn host_locale() -> String {
+pub(crate) fn host_locale() -> String {
     let language = std::env::var("LANG").unwrap_or_else(|_| "en".to_owned());
     let language = language.split(['_', '.']).next().unwrap_or("en");
     if language.is_empty() {
