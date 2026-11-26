@@ -90,6 +90,28 @@ else
   fi
 fi
 
+# ---- record shape (issue #64) ------------------------------------------------
+# A record is "## M<id> — …" up to the next "## ". Twelve non-empty lines and 200
+# characters per line is what keeps a record scannable; the evidence it used to carry
+# lives in the explanation document it links to.
+SHAPE_BAD=""
+for f in "$SLICES_DIR"/M*.md; do
+  [ -f "$f" ] || continue
+  bad=$(awk '
+    function flush() { if (id != "" && n > 12) print id " (" n ")" }
+    /^## / { flush(); id = ""; n = 0; if ($2 ~ /^M[0-9]/) id = $2; next }
+    id != "" && NF { n++ }
+    END { flush() }' "$f")
+  [ -n "$bad" ] && SHAPE_BAD="$SHAPE_BAD $bad"
+done
+LONG_LINES=$(awk 'length($0) > 200 { print FILENAME ":" FNR }' "$SLICES_DIR"/M*.md 2>/dev/null | tr '\n' ' ')
+if [ -z "$SHAPE_BAD" ] && [ -z "$LONG_LINES" ]; then
+  pass "every slice record is within 12 lines and 200 characters"
+else
+  [ -n "$SHAPE_BAD" ] && fail "slice record(s) over 12 non-empty lines:$SHAPE_BAD"
+  [ -n "$LONG_LINES" ] && fail "slice record line(s) over 200 characters: $LONG_LINES"
+fi
+
 # ---- relative links resolve --------------------------------------------------
 BROKEN=""
 while IFS= read -r link; do
