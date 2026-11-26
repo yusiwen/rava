@@ -296,6 +296,14 @@ dispatch, record `equals`/`toString` bootstraps, `java.io` readers/files and
 `BitSet`. Those are ordinary JDK classes with observed behavior; they are not stubs and
 they are not selected by class name for Boot.
 
+What the gate exercises is measured, not assumed: a debug build exposes an opt-in
+`RAVA_NATIVE_CENSUS` hook in the native table, and `scripts/native-census.sh` runs this
+gate under it. The 2026-11-26 baseline is **2,132 registered natives, 581 distinct natives
+called, 1,551 never called**; of the 585 registrations the M4.5 commit added, **109 (18.6%)
+are called** and **476 are neither called by the gate nor covered by another test**. The
+per-module tests for the interpreter-side surface and the M5 boundary are
+`crates/cli/tests/surface.rs` and `crates/cli/tests/m5_boundary.rs`.
+
 The M4.5 boundary is honest about the seams: the VM is single-threaded until M5
 (`Thread.start` does not run the task, `CountDownLatch.await` and
 `LinkedBlockingQueue.put`/`take` fail only when they would block, no executor factory

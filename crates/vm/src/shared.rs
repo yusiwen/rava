@@ -101,6 +101,35 @@ impl fmt::Display for LockHeld {
 
 impl std::error::Error for LockHeld {}
 
+/// Opt-in native census for debug builds: `RAVA_NATIVE_CENSUS=<path>` appends one
+/// tab-separated line per registration and native lookup.
+///
+/// This is measurement tooling, not runtime behaviour: release builds do not contain it,
+/// and a debug build with the variable unset pays one `OnceLock` read per lookup.
+/// `scripts/native-census.sh` runs the Boot gate under it and summarises the result.
+#[cfg(debug_assertions)]
+fn census_log(line: &str) {
+    use std::io::Write as _;
+    use std::sync::OnceLock;
+
+    static LOG: OnceLock<Option<Mutex<std::fs::File>>> = OnceLock::new();
+    let log = LOG.get_or_init(|| {
+        std::env::var_os("RAVA_NATIVE_CENSUS").and_then(|path| {
+            std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)
+                .ok()
+                .map(Mutex::new)
+        })
+    });
+    if let Some(log) = log {
+        if let Ok(mut file) = log.lock() {
+            let _ = writeln!(file, "{line}");
+        }
+    }
+}
+
 pub struct Shared {
     classes: RwLock<ClassTable>,
     heap: Mutex<Heap>,
@@ -2213,21 +2242,27 @@ impl Shared {
         descriptor: impl Into<String>,
         function: NativeFn,
     ) {
+        let owner = owner.into();
+        let name = name.into();
+        let descriptor = descriptor.into();
+        #[cfg(debug_assertions)]
+        census_log(&format!("REG\t{owner}\t{name}\t{descriptor}"));
         self.natives
             .write()
             .expect("native table lock poisoned")
             .insert(
                 NativeKey {
-                    owner: owner.into(),
-                    name: name.into(),
-                    descriptor: descriptor.into(),
+                    owner,
+                    name,
+                    descriptor,
                 },
                 function,
             );
     }
 
     pub fn native(&self, owner: &str, name: &str, descriptor: &str) -> Option<NativeFn> {
-        self.natives
+        let found = self
+            .natives
             .read()
             .expect("native table lock poisoned")
             .get(&NativeKey {
@@ -2235,7 +2270,13 @@ impl Shared {
                 name: name.to_owned(),
                 descriptor: descriptor.to_owned(),
             })
-            .copied()
+            .copied();
+        #[cfg(debug_assertions)]
+        census_log(&format!(
+            "CALL\t{owner}\t{name}\t{descriptor}\t{}",
+            if found.is_some() { "hit" } else { "miss" }
+        ));
+        found
     }
 
     /// Every registered native as `(owner, name, descriptor)`, sorted.
