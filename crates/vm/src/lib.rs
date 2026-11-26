@@ -9,6 +9,7 @@ pub mod annotation;
 pub mod arrays;
 pub mod atomic;
 pub mod bitset;
+pub mod boot;
 pub mod boxed;
 pub mod class_loader;
 pub mod collections;
@@ -48,6 +49,7 @@ pub mod thread_natives;
 pub mod value;
 pub mod verify;
 
+pub use boot::BootJarSource;
 pub use error::VmError;
 pub use futures::FutureTaskObject;
 pub use heap::{

@@ -1,0 +1,5 @@
+Manifest-Version: 1.0
+Created-By: rava fixture
+Main-Class: org.springframework.boot.loader.launch.JarLauncher
+Start-Class: demo.NestedMain
+

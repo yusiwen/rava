@@ -1,26 +1,51 @@
-//! `rava -jar` — launch the `Main-Class` of an executable jar.
+//! `rava -jar` — launch the main class of an executable jar.
 //!
 //! An executable jar is an ordinary jar whose `META-INF/MANIFEST.MF` names the main
 //! class and, optionally, extra `Class-Path` entries. The manifest reader lives in the
-//! CLI because the classpath is a launcher concern; M4.4 reuses it for Spring Boot's
-//! nested layout. The classpath is the executable jar first and then every `Class-Path`
-//! entry in manifest order, resolved relative to the executable jar's directory. A
-//! `Class-Path` entry the JDK would ignore — a missing file, or one that is not a
-//! readable directory/jar — is skipped; the executable jar itself is always fatal.
+//! CLI because the classpath is a launcher concern. For a flat jar the classpath is the
+//! executable jar first and then every `Class-Path` entry in manifest order, resolved
+//! relative to the executable jar's directory. A `Class-Path` entry the JDK would ignore
+//! — a missing file, or one that is not a readable directory/jar — is skipped; the
+//! executable jar itself is always fatal.
 //!
-//! This slice launches only a flat executable jar. Nested jars (`BOOT-INF/lib`) and
-//! Spring Boot's launcher are M4.4, and there is no `URLClassLoader`.
+//! ## Spring Boot nested layout (M4.4)
+//!
+//! A Boot executable jar keeps the application classes under `BOOT-INF/classes/` and its
+//! dependencies as whole jars under `BOOT-INF/lib/`; its manifest names Boot's launcher
+//! (`Main-Class: org.springframework.boot.loader...`) and the real application class
+//! (`Start-Class`). This launcher detects that layout and reads it through
+//! [`rava_vm::BootJarSource`], which preserves the ordinary `(loader, name)` class
+//! identity and resource lookup.
+//!
+//! **Launcher substitution:** the pinned jars carry no Boot loader classes, so this
+//! command does not run Boot's `JarLauncher` or a `URLClassLoader`. A Boot layout with a
+//! non-Boot-launcher `Main-Class` runs that class directly; when `Main-Class` names a Boot
+//! launcher (or is absent), a non-empty `Start-Class` is required (exit 1 otherwise) and
+//! runs directly over the Boot-aware source. That is a deliberate, documented
+//! substitution, not a claim that Boot's launcher ran.
+//!
+//! **`Class-Path` on a Boot layout is not applied.** Boot's own launcher builds its
+//! classpath from `BOOT-INF/classes` and `BOOT-INF/lib`, not from the manifest's
+//! `Class-Path`; merging those entries here would invent reachability Boot does not
+//! have. The header is therefore ignored for a Boot jar (and tested to be ignored), while
+//! the flat-jar path keeps its M4.3 behaviour. There is no `loader.path`, exec support or
+//! nested-jar `Class-Path`.
 
 use std::collections::HashMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::sync::Arc;
 
-use rava_vm::{ClassPathSource, JarSource};
+use rava_vm::{BootJarSource, ClassPathSource, JarSource};
 
 use crate::run;
 
 const MANIFEST_PATH: &str = "META-INF/MANIFEST.MF";
+
+/// The prefix of Spring Boot's launcher classes (`...loader.JarLauncher` and
+/// `...loader.launch.JarLauncher` in Boot 3.2+).
+const BOOT_LAUNCHER_PREFIX: &str = "org.springframework.boot.loader.";
 
 /// The main-attributes section of a jar manifest.
 ///
@@ -117,6 +142,15 @@ impl Manifest {
             .filter(|value| !value.trim().is_empty())
     }
 
+    /// The `Start-Class` attribute, or `None` when it is missing or empty.
+    ///
+    /// Spring Boot writes the application entry point here and puts its own launcher in
+    /// `Main-Class`; [`launch`] substitutes the former for the latter.
+    pub(crate) fn start_class(&self) -> Option<&str> {
+        self.attribute("start-class")
+            .filter(|value| !value.trim().is_empty())
+    }
+
     /// The `Class-Path` entries in manifest order.
     ///
     /// The JDK treats the value as a whitespace-separated list of URLs; the caller
@@ -204,6 +238,10 @@ fn launch(options: &Options) -> Result<(), String> {
             options.jar.display()
         )
     })?;
+    if BootJarSource::is_boot(&jar) {
+        return launch_boot(options, jar);
+    }
+
     let manifest = Manifest::from_jar(&jar).map_err(|error| {
         format!(
             "cannot read executable jar {}: {error}",
@@ -240,16 +278,65 @@ fn launch(options: &Options) -> Result<(), String> {
         let _ = classpath.add_path(path);
     }
 
-    run::execute_with(
-        &run::Options {
-            main_class: main_class.to_owned(),
-            stdlib: options.stdlib.clone(),
-            // `execute_with` uses the source built above and does not read this field.
-            classpath: Vec::new(),
-            program_args: options.program_args.clone(),
-        },
-        classpath,
-    )
+    run::execute_with(&execution_options(options, main_class), Arc::new(classpath))
+}
+
+/// Launch a Spring Boot nested-layout jar through [`BootJarSource`].
+///
+/// The pinned jar set has no Boot loader classes, so `org.springframework.boot.loader...`
+/// cannot be loaded, let alone run. This is the documented substitution: run
+/// `Start-Class` directly over the Boot-aware source. Its class identity and resource
+/// lookups are the ordinary ones because `BootJarSource` is an application `ClassSource`,
+/// not a second class table.
+fn launch_boot(options: &Options, jar: JarSource) -> Result<(), String> {
+    let manifest = Manifest::from_jar(&jar).map_err(|error| {
+        format!(
+            "cannot read executable jar {}: {error}",
+            options.jar.display()
+        )
+    })?;
+    // A non-Boot Main-Class in a Boot layout is an ordinary application entry point and
+    // wins without requiring Start-Class. Only a Boot launcher marker (or a missing
+    // Main-Class) needs the Start-Class substitution, and that value is required.
+    let main_class = match manifest.main_class() {
+        Some(main_class) if !is_boot_launcher(main_class) => main_class,
+        _ => manifest.start_class().ok_or_else(|| {
+            format!(
+                "Boot-layout jar {} has no Start-Class in {MANIFEST_PATH}",
+                options.jar.display()
+            )
+        })?,
+    };
+    let source = BootJarSource::from_jar(jar)
+        .map_err(|error| {
+            format!(
+                "cannot open Boot-layout jar {}: {error}",
+                options.jar.display()
+            )
+        })?
+        .ok_or_else(|| {
+            format!(
+                "{} is not a Boot-layout jar after all",
+                options.jar.display()
+            )
+        })?;
+    // Deliberately not applying `manifest.class_path()`: Boot's launcher does not use the
+    // manifest's Class-Path, and this slice does not implement loader.path either.
+    run::execute_with(&execution_options(options, main_class), Arc::new(source))
+}
+
+/// The shared `run::Options`; `execute_with` reads the source, not this classpath field.
+fn execution_options(options: &Options, main_class: &str) -> run::Options {
+    run::Options {
+        main_class: main_class.to_owned(),
+        stdlib: options.stdlib.clone(),
+        classpath: Vec::new(),
+        program_args: options.program_args.clone(),
+    }
+}
+
+fn is_boot_launcher(main_class: &str) -> bool {
+    main_class.starts_with(BOOT_LAUNCHER_PREFIX)
 }
 
 fn parse(args: &[String]) -> Result<Parsed, String> {
@@ -375,7 +462,8 @@ fn hex_value(byte: u8) -> Option<u8> {
 fn print_usage() {
     println!("usage: rava -jar <file> [options] [args...]");
     println!();
-    println!("runs the Main-Class named by <file>'s META-INF/MANIFEST.MF.");
+    println!("runs the Main-Class named by <file>'s META-INF/MANIFEST.MF,");
+    println!("or the Start-Class of a Spring Boot nested-jar layout.");
     println!();
     println!("options:");
     println!(
@@ -434,6 +522,24 @@ mod tests {
         .expect("case-insensitive names parse");
         assert_eq!(manifest.main_class(), Some("demo.JarMain"));
         assert_eq!(manifest.class_path(), vec!["lib/helper.jar"]);
+    }
+
+    #[test]
+    fn start_class_is_read_case_insensitively_and_an_empty_value_is_none() {
+        let manifest = Manifest::parse(
+            b"Manifest-Version: 1.0\nMain-Class: org.springframework.boot.loader.launch.JarLauncher\nStart-Class: demo.NestedMain\n\n",
+        )
+        .expect("a Boot manifest parses");
+        assert_eq!(manifest.start_class(), Some("demo.NestedMain"));
+        assert_eq!(
+            manifest.main_class(),
+            Some("org.springframework.boot.loader.launch.JarLauncher")
+        );
+        assert!(is_boot_launcher(manifest.main_class().unwrap()));
+
+        let empty = Manifest::parse(b"Manifest-Version: 1.0\nStart-Class: \n\n")
+            .expect("an empty Start-Class parses");
+        assert_eq!(empty.start_class(), None);
     }
 
     #[test]

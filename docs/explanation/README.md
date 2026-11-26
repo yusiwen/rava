@@ -40,7 +40,7 @@ When the fact is only a status, update `PROJECT.md` instead.
 | Document | Question it owns | Status |
 | :--- | :--- | :--- |
 | [`compatibility-gates.md`](compatibility-gates.md) | How are C0–C4 measured, which artifact/command owns each gate, and how does `cargo xtask ci` relate to them? | current |
-| [`class-loading-and-libraries.md`](class-loading-and-libraries.md) | How do sources, loader identity, parent-first delegation, the two `stdlib` trees, classpath resources, executable-jar launch and native dispatch fit together? | current |
+| [`class-loading-and-libraries.md`](class-loading-and-libraries.md) | How do sources, loader identity, parent-first delegation, the two `stdlib` trees, classpath resources, executable-jar and Boot nested-jar launch and native dispatch fit together? | current |
 | [`interpreter-execution.md`](interpreter-execution.md) | How does a method call become a frame, dispatch, exception, lambda or stream callback? | current |
 | [`reflection-and-metadata.md`](reflection-and-metadata.md) | How does a C1 metadata record become a `Class`/member/annotation/generic `Type` at runtime? | current |
 | [`c1-metadata.md`](c1-metadata.md) | What exactly does the M2 C1 metadata diff compare, and what does “diff 0” prove? | current |

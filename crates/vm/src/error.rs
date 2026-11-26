@@ -15,6 +15,16 @@ pub enum VmError {
     ClassFile(rava_classfile::Error),
     /// A jar entry or structure is not usable.
     Jar(String),
+    /// A `BOOT-INF/lib/*.jar` entry of a Spring Boot layout is not a usable jar.
+    ///
+    /// `entry` is the outer jar's entry name, so the error identifies which nested
+    /// dependency failed instead of reporting an anonymous zip error.
+    BootEntry {
+        /// The outer-jar entry, for example `BOOT-INF/lib/broken.jar`.
+        entry: String,
+        /// The underlying jar or I/O failure.
+        detail: String,
+    },
     /// A loader or class source is inconsistent.
     Loader(String),
     /// A native implementation failed.
@@ -102,6 +112,9 @@ impl fmt::Display for VmError {
             Self::Io { path, source } => write!(f, "cannot read {}: {source}", path.display()),
             Self::ClassFile(error) => write!(f, "invalid class file: {error}"),
             Self::Jar(detail) => write!(f, "invalid jar: {detail}"),
+            Self::BootEntry { entry, detail } => {
+                write!(f, "nested jar {entry} is not usable: {detail}")
+            }
             Self::Loader(detail) => write!(f, "loader error: {detail}"),
             Self::Native(detail) => write!(f, "native error: {detail}"),
             Self::NullStringArgument { method } => {
