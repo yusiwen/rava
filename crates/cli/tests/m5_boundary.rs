@@ -10,6 +10,10 @@
 //! `VmError`, so the catch body never runs; each test asserts both halves: the operation
 //! aborts at the Rust level and the Java handler was skipped.
 //!
+//! These tests pin the pre-M5 answers on purpose. M5 owns replacing them (the M4.5 slice
+//! record in `docs/slices/M4.md` names the split), so a failure here when threads land is
+//! the boundary moving, not a regression.
+//!
 //! No pinned jars are needed; the fixture imports `java.*` only.
 
 use std::path::PathBuf;
