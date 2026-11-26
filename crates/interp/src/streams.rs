@@ -2320,16 +2320,26 @@ pub fn register_natives(shared: &Shared) {
         shared.register_native(STREAM_CLASS, name, descriptor, function);
     }
 
-    // BaseStream.
+    // BaseStream. The return type erases to `BaseStream`, not `Stream`: javac emits
+    // `invokeinterface BaseStream.parallel:()Ljava/util/stream/BaseStream;` and casts the
+    // result, so a `Stream`-typed descriptor here is unreachable.
     for (name, descriptor, function) in [
         ("isParallel", "()Z", stream_is_parallel as rava_vm::NativeFn),
         (
             "sequential",
-            "()Ljava/util/stream/Stream;",
+            "()Ljava/util/stream/BaseStream;",
             stream_sequential,
         ),
-        ("parallel", "()Ljava/util/stream/Stream;", stream_parallel),
-        ("unordered", "()Ljava/util/stream/Stream;", stream_unordered),
+        (
+            "parallel",
+            "()Ljava/util/stream/BaseStream;",
+            stream_parallel,
+        ),
+        (
+            "unordered",
+            "()Ljava/util/stream/BaseStream;",
+            stream_unordered,
+        ),
         (
             "onClose",
             "(Ljava/lang/Runnable;)Ljava/util/stream/BaseStream;",

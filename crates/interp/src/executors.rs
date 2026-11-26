@@ -21,8 +21,11 @@ pub fn register_natives(shared: &Shared) {
         "()Ljava/util/concurrent/ThreadFactory;",
         executors_default_thread_factory,
     );
+    // The lambda target is looked up through the owner stored in its `LambdaTarget`, which
+    // is the factory interface, not `Executors`; a registration on `Executors` is
+    // unreachable and makes `newThread` fail with a missing target.
     shared.register_native(
-        EXECUTORS_CLASS,
+        "java/util/concurrent/ThreadFactory",
         "$defaultThreadFactory",
         NEW_THREAD,
         executors_new_thread,
@@ -77,10 +80,13 @@ fn executors_default_thread_factory(
     Ok(Some(Value::Ref(lambda)))
 }
 
-/// The default factory's `newThread`: a fresh `Thread` object around the runnable.
+/// The default factory's `newThread`: a fresh `Thread` object.
 ///
-/// `Thread.start` is a no-op until M5, so the returned object never runs; the factory
-/// contract (return a `Thread`) still holds and a caller that only inspects it proceeds.
+/// The C1 `Thread` has no fields and every `Thread` constructor native is a no-op, so the
+/// runnable passed by the caller cannot be stored; `Thread.start` is a no-op until M5.
+/// The factory contract "return a `Thread`" holds for shape and identity, and a caller that
+/// only inspects the result proceeds. M5 adds thread state (including the runnable) in one
+/// place; this native is not the seam.
 fn executors_new_thread(
     shared: &Shared,
     _thread: &ThreadState,

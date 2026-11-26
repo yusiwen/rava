@@ -105,16 +105,27 @@ pub fn register_natives(shared: &Shared) {
         predicate_negate_native,
     );
     // `Function.identity()`/`UnaryOperator.identity()`: a lambda that returns its argument.
+    //
+    // The two static methods erase differently: `Function.identity()` returns `Function`,
+    // `UnaryOperator.identity()` returns the subtype `UnaryOperator`. The lambda's
+    // interface must be the class the static method belongs to, or an `invokeinterface`
+    // through `UnaryOperator.apply` fails the interface check.
+    shared.register_native(
+        "java/util/function/Function",
+        "identity",
+        "()Ljava/util/function/Function;",
+        function_identity,
+    );
+    shared.register_native(
+        "java/util/function/UnaryOperator",
+        "identity",
+        "()Ljava/util/function/UnaryOperator;",
+        unary_operator_identity,
+    );
     for class in [
         "java/util/function/Function",
         "java/util/function/UnaryOperator",
     ] {
-        shared.register_native(
-            class,
-            "identity",
-            "()Ljava/util/function/Function;",
-            function_identity,
-        );
         shared.register_native(
             class,
             "$identity",
@@ -133,14 +144,29 @@ fn function_identity(
     _receiver: ObjRef,
     _args: &[Value],
 ) -> Result<Option<Value>, VmError> {
-    let class = shared.load_library_class("java/util/function/Function")?;
+    identity_lambda(shared, "java/util/function/Function")
+}
+
+fn unary_operator_identity(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    _args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    identity_lambda(shared, "java/util/function/UnaryOperator")
+}
+
+/// A lambda of `interface_name` whose `apply` returns its argument.
+fn identity_lambda(shared: &Shared, interface_name: &str) -> Result<Option<Value>, VmError> {
+    let interface = shared.load_library_class(interface_name)?;
     let lambda = shared.allocate_lambda(LambdaObject {
-        interface: class,
+        interface,
         sam_name: "apply".to_owned(),
         sam_descriptor: FUNCTION_APPLY.to_owned(),
         instantiated_descriptor: FUNCTION_APPLY.to_owned(),
         target: LambdaTarget {
-            class,
+            class: interface,
             name: "$identity".to_owned(),
             descriptor: FUNCTION_APPLY.to_owned(),
             kind: LambdaTargetKind::Native,
