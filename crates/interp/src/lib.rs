@@ -66,6 +66,41 @@ use rava_vm::{
     HeapObject, LoaderId, MemberKind, ObjRef, PrimitiveKind, Shared, ThreadState, Value, VmError,
 };
 
+/// Install every native that must re-enter the interpreter, in registration order.
+///
+/// `rava_vm::library::register_all` installs the class-library natives that do not
+/// re-enter; this function installs the overrides that do and therefore live in this
+/// crate. A runner calls it after the VM library:
+///
+/// ```text
+/// rava_vm::library::register_all(&shared)?;
+/// rava_interp::register_all(&shared)?;
+/// ```
+///
+/// Order matters where a later module replaces an earlier registration for the same
+/// `(owner, name, descriptor)`: the `ServiceLoader` iterator, collection-equality and
+/// functional-default overrides only work after the VM module they replace.
+pub fn register_all(shared: &Shared) -> Result<(), VmError> {
+    reflect_invoke::register_natives(shared);
+    method_handles::register_natives(shared);
+    unsafe_natives::register_natives(shared)?;
+    proxy::register_natives(shared);
+    callbacks::register_natives(shared);
+    streams::register_natives(shared);
+    futures::register_natives(shared);
+    object_methods::register_natives(shared);
+    service_loader::register_natives(shared);
+    collection_equality::register_natives(shared);
+    functional::register_natives(shared);
+    interface_defaults::register_natives(shared);
+    iterables::register_natives(shared);
+    executors::register_natives(shared);
+    bean_support::register_natives(shared);
+    objects::register_natives(shared);
+    stack_walker::register_natives(shared);
+    Ok(())
+}
+
 /// Run a static method with `args` and return its result (`None` for `void`).
 pub fn run_static_method(
     shared: &Shared,
