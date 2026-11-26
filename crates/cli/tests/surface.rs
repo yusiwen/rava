@@ -142,6 +142,46 @@ fn iterable_spliterator_drains_the_iterator() {
 }
 
 #[test]
+fn map_membership_calls_java_equals() {
+    let fixture = fixture();
+    assert!(bool_value(&fixture, "mapGetUsesEquals"));
+    assert!(bool_value(&fixture, "mapContainsKeyUsesEquals"));
+    assert!(bool_value(&fixture, "mapPutReplacesEqualKey"));
+    assert!(bool_value(&fixture, "mapGetOrDefaultUsesEquals"));
+    assert!(bool_value(&fixture, "mapRemoveUsesEquals"));
+    assert!(bool_value(&fixture, "mapRemovePairUsesEquals"));
+    assert!(bool_value(&fixture, "mapContainsValueUsesEquals"));
+    assert!(bool_value(&fixture, "mapPutIfAbsentUsesEquals"));
+    assert_eq!(int_value(&fixture, "mapComputeIfAbsent"), 84);
+}
+
+#[test]
+fn identity_map_stays_reference_based() {
+    let fixture = fixture();
+    assert_eq!(
+        int_value(&fixture, "identityMapStoresBoth"),
+        2,
+        "IdentityHashMap keeps two equal keys apart"
+    );
+    assert!(
+        bool_value(&fixture, "identityMapInterfaceCall"),
+        "a Map-typed call on an IdentityHashMap must still compare by identity"
+    );
+    assert!(
+        bool_value(&fixture, "identityMapComputeIfAbsent"),
+        "the Map.computeIfAbsent default must keep identity keys apart"
+    );
+    assert!(
+        bool_value(&fixture, "identityMapRemovePair"),
+        "the Map.remove(k, v) default must keep identity keys apart"
+    );
+    assert!(
+        bool_value(&fixture, "identityMapEquals"),
+        "IdentityHashMap.equals is identity-based and rejects another map type"
+    );
+}
+
+#[test]
 fn property_descriptor_constructor_uses_the_bean_methods() {
     let fixture = fixture();
     assert!(bool_value(&fixture, "propertyDescriptor"));

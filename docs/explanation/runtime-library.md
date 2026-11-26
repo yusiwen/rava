@@ -66,11 +66,20 @@ factor, so a capacity or load factor is a validated hint. `LinkedHashMap(int,flo
 records access order, so a successful `get` and an update of an existing key move the entry
 to the end, which iteration then observes.
 
-Membership and equality are VM-wide: **strings by content, boxed primitives by per-kind
-value, everything else by reference identity.** A Java `equals` override is not consulted,
-because a native cannot re-enter the interpreter to dispatch it. The set constructors copy
-with the same rule, a repeated element contributing once in first-occurrence order;
-`TreeSet` keeps insertion order rather than sorting.
+Member search is per container, not one VM-wide rule. `List`/`Set` queries (`contains`,
+`indexOf`, `lastIndexOf`, `remove(Object)`, `Set.equals`) and the `Map` key/value operations
+(`get`, `containsKey`, `containsValue`, `put`, `putIfAbsent`, `computeIfAbsent`,
+`getOrDefault`, `remove`) compare through the probe's Java `equals`, via the
+interpreter-side overrides in `crates/interp/src/collection_equality.rs`; a `put` with an
+equal key keeps the stored key and replaces the value. `IdentityHashMap` keeps reference
+identity, including a `Map`-typed call: the override checks the receiver's runtime class.
+`TreeSet`/`TreeMap` stay insertion-ordered and compare with `equals`, not a comparator.
+
+The `rava-vm` natives underneath still use the older rule — strings by content, boxed
+primitives by per-kind value, everything else by identity — and the runner installs the
+overrides after them, so a VM-only test sees the VM layer. A set copy constructor
+(`new HashSet<>(collection)`) still copies with that VM rule and keeps two equal elements;
+the bulk set operations are tracked separately from the per-element queries above.
 
 ## 5. Text formatting
 
