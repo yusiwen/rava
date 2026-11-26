@@ -125,13 +125,20 @@ names account for 70 interface edges. Those are properties of the observed manif
 tree — the 1,047 owners the 35 pinned jars reference — not differences between the
 committed stubs and `ct.sym`; the metadata diff remains 0.
 
+The profile is measured, not remembered: `cargo test -p rava-cli --test c1_closure`
+walks every committed stub, computes the missing-owner profile and fails if the counts
+change; it also asserts that no omitted owner is a manifest class. It prints
+`C1 closure: classes=1047 manifest=1047 missing_super=35/44 missing_interface=34/70
+missing_owners=69 overlap=0`.
+
 The runtime tolerates the omission instead of inventing classes. `Class.getFields()`
 (issue #53) and `Class.getMethods()` end a superclass or superinterface branch at
 `VmError::ClassNotFound`, and the inherited-lookup and `Class.getInterfaces()` walks skip
-an omitted interface the same way. A query therefore sees the observed tree, not a
-closed JDK hierarchy: an inherited field or method declared by an absent superclass is
-not reported, and the rest of the query still answers. The C1 gate is a metadata-shape
-gate; it does not promise a complete runtime hierarchy.
+an omitted interface the same way; `crates/interp/tests/fields.rs` pins the field query
+and the method/interface queries against hand-built orphans. A query therefore sees the
+observed tree, not a closed JDK hierarchy: an inherited field or method declared by an
+absent superclass is not reported, and the rest of the query still answers. The C1 gate
+is a metadata-shape gate; it does not promise a complete runtime hierarchy.
 
 ## What is normalized
 
