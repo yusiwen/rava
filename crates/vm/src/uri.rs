@@ -6,10 +6,13 @@
 //! parses RFC 3986-shaped references and answers the query methods the startup path uses.
 //!
 //! A URI's components are Rust text in [`UriState`], a side table keyed by [`ObjRef`],
-//! exactly as the M4.1 URL objects are stored. The raw components and the percent-decoded
-//! forms are both kept, so `getRawPath` and `getPath` differ where they should. Relative
-//! references, `resolve` and dot-segment normalization follow RFC 3986 §5.2; the opaque
-//! (scheme-specific-part) form is preserved.
+//! exactly as the M4.1 URL objects are stored. Parsing keeps the raw components and the
+//! accessors decode on demand, so `getRawPath` and `getPath` differ where they should.
+//! Parsing validates the RFC 3986 character set and the percent escapes: `new URI` raises
+//! a catchable `URISyntaxException`, and `URI.create`/`resolve(String)` raise
+//! `IllegalArgumentException`, as on the JDK. Relative references, `resolve` and
+//! dot-segment normalization follow RFC 3986 §5.2; the opaque (scheme-specific-part) form
+//! is preserved.
 
 use std::collections::HashMap;
 
@@ -34,7 +37,7 @@ struct UriData {
 }
 
 impl UriData {
-    fn parse(form: &str) -> UriData {
+    fn parse(form: &str) -> Result<UriData, String> {
         let mut rest = form;
         let mut scheme = None;
         if let Some((candidate, tail)) = split_scheme(rest) {
@@ -52,14 +55,24 @@ impl UriData {
         }
         let opaque =
             scheme.is_some() && authority.is_none() && !path.is_empty() && !path.starts_with('/');
-        UriData {
+        for (component, what) in [
+            (authority.as_deref(), "authority"),
+            (Some(path), "path"),
+            (query.as_deref(), "query"),
+            (fragment.as_deref(), "fragment"),
+        ] {
+            if let Some(component) = component {
+                validate_component(component, what)?;
+            }
+        }
+        Ok(UriData {
             scheme,
             authority,
             path: path.to_owned(),
             query,
             fragment,
             opaque,
-        }
+        })
     }
 
     fn compose(&self) -> String {
@@ -137,8 +150,10 @@ impl UriState {
     }
 
     /// Record a URI object's external form, parsing it first.
-    pub fn insert(&mut self, object: ObjRef, form: impl AsRef<str>) {
-        self.uris.insert(object, UriData::parse(form.as_ref()));
+    pub fn insert(&mut self, object: ObjRef, form: impl AsRef<str>) -> Result<(), String> {
+        let data = UriData::parse(form.as_ref())?;
+        self.uris.insert(object, data);
+        Ok(())
     }
 
     /// The object's external form, if it has URI state.
@@ -171,40 +186,28 @@ pub fn register_natives(shared: &Shared) {
         URI_CLASS,
         "getRawSchemeSpecificPart",
         "()Ljava/lang/String;",
-        uri_get_scheme_specific_part,
+        uri_get_raw_scheme_specific_part,
     );
     shared.register_native(URI_CLASS, "isAbsolute", "()Z", uri_is_absolute);
     shared.register_native(URI_CLASS, "isOpaque", "()Z", uri_is_opaque);
-    for (name, raw) in [
-        ("getAuthority", false),
-        ("getRawAuthority", true),
-        ("getUserInfo", false),
-        ("getRawUserInfo", true),
-        ("getHost", true),
+    for (name, function) in [
+        ("getAuthority", uri_get_authority as crate::NativeFn),
+        ("getRawAuthority", uri_get_raw_authority),
+        ("getUserInfo", uri_get_user_info),
+        ("getRawUserInfo", uri_get_raw_user_info),
+        ("getHost", uri_get_host),
     ] {
-        let function = match name {
-            "getAuthority" | "getRawAuthority" => uri_get_authority as crate::NativeFn,
-            "getUserInfo" | "getRawUserInfo" => uri_get_user_info,
-            _ => uri_get_host,
-        };
-        let _ = raw;
         shared.register_native(URI_CLASS, name, "()Ljava/lang/String;", function);
     }
     shared.register_native(URI_CLASS, "getPort", "()I", uri_get_port);
-    for (name, decode) in [
-        ("getPath", true),
-        ("getRawPath", false),
-        ("getQuery", true),
-        ("getRawQuery", false),
-        ("getFragment", true),
-        ("getRawFragment", false),
+    for (name, function) in [
+        ("getPath", uri_get_path as crate::NativeFn),
+        ("getRawPath", uri_get_raw_path),
+        ("getQuery", uri_get_query),
+        ("getRawQuery", uri_get_raw_query),
+        ("getFragment", uri_get_fragment),
+        ("getRawFragment", uri_get_raw_fragment),
     ] {
-        let function = match name {
-            "getPath" | "getRawPath" => uri_get_path as crate::NativeFn,
-            "getQuery" | "getRawQuery" => uri_get_query,
-            _ => uri_get_fragment,
-        };
-        let _ = decode;
         shared.register_native(URI_CLASS, name, "()Ljava/lang/String;", function);
     }
     shared.register_native(URI_CLASS, "toString", "()Ljava/lang/String;", uri_to_string);
@@ -283,10 +286,15 @@ fn uri_init(
     args: &[Value],
 ) -> Result<Option<Value>, VmError> {
     let form = string_argument(shared, args, 0, "URI.<init>")?;
-    shared
-        .uri_state()
-        .uris
-        .insert(receiver, UriData::parse(&form));
+    let data = match UriData::parse(&form) {
+        Ok(data) => data,
+        Err(message) => {
+            let throwable =
+                crate::exceptions::new_throwable(shared, "java/net/URISyntaxException", message)?;
+            return Err(VmError::Thrown(throwable));
+        }
+    };
+    shared.uri_state().uris.insert(receiver, data);
     Ok(None)
 }
 
@@ -298,10 +306,9 @@ fn uri_create(
     args: &[Value],
 ) -> Result<Option<Value>, VmError> {
     let form = string_argument(shared, args, 0, "URI.create")?;
-    Ok(Some(Value::Ref(allocate_uri(
-        shared,
-        UriData::parse(&form),
-    )?)))
+    let data = UriData::parse(&form)
+        .map_err(|message| VmError::Native(format!("URI.create: {message}")))?;
+    Ok(Some(Value::Ref(allocate_uri(shared, data)?)))
 }
 
 fn uri_get_scheme(
@@ -326,6 +333,20 @@ fn uri_get_scheme_specific_part(
     _args: &[Value],
 ) -> Result<Option<Value>, VmError> {
     let data = uri_data(shared, receiver, "URI.getSchemeSpecificPart")?;
+    Ok(Some(new_string(
+        shared,
+        decode(&data.scheme_specific_part()),
+    )))
+}
+
+fn uri_get_raw_scheme_specific_part(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    _args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let data = uri_data(shared, receiver, "URI.getRawSchemeSpecificPart")?;
     Ok(Some(new_string(shared, data.scheme_specific_part())))
 }
 
@@ -353,6 +374,24 @@ fn uri_is_opaque(
     Ok(Some(Value::Int(i32::from(opaque))))
 }
 
+fn optional_string(shared: &Shared, text: Option<String>) -> Value {
+    match text {
+        Some(text) => new_string(shared, text),
+        None => Value::Ref(ObjRef::NULL),
+    }
+}
+
+fn authority_text(data: &UriData) -> Option<String> {
+    data.authority.clone()
+}
+
+fn user_info_text(data: &UriData) -> Option<String> {
+    data.authority
+        .as_deref()
+        .and_then(|authority| authority.rsplit_once('@'))
+        .map(|(user, _)| user.to_owned())
+}
+
 fn uri_get_authority(
     shared: &Shared,
     _thread: &ThreadState,
@@ -360,14 +399,24 @@ fn uri_get_authority(
     receiver: ObjRef,
     _args: &[Value],
 ) -> Result<Option<Value>, VmError> {
-    let authority = uri_data(shared, receiver, "URI.getAuthority")?.authority;
-    Ok(Some(match authority {
-        Some(authority) => new_string(shared, authority),
-        None => Value::Ref(ObjRef::NULL),
-    }))
+    let data = uri_data(shared, receiver, "URI.getAuthority")?;
+    Ok(Some(optional_string(
+        shared,
+        authority_text(&data).map(|authority| decode(&authority)),
+    )))
 }
 
-/// The user-info part of the authority (`user@`), or null.
+fn uri_get_raw_authority(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    _args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let data = uri_data(shared, receiver, "URI.getRawAuthority")?;
+    Ok(Some(optional_string(shared, authority_text(&data))))
+}
+
 fn uri_get_user_info(
     shared: &Shared,
     _thread: &ThreadState,
@@ -375,15 +424,22 @@ fn uri_get_user_info(
     receiver: ObjRef,
     _args: &[Value],
 ) -> Result<Option<Value>, VmError> {
-    let authority = uri_data(shared, receiver, "URI.getUserInfo")?.authority;
-    let user = authority
-        .as_deref()
-        .and_then(|authority| authority.rsplit_once('@'))
-        .map(|(user, _)| user.to_owned());
-    Ok(Some(match user {
-        Some(user) => new_string(shared, user),
-        None => Value::Ref(ObjRef::NULL),
-    }))
+    let data = uri_data(shared, receiver, "URI.getUserInfo")?;
+    Ok(Some(optional_string(
+        shared,
+        user_info_text(&data).map(|user| decode(&user)),
+    )))
+}
+
+fn uri_get_raw_user_info(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    _args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let data = uri_data(shared, receiver, "URI.getRawUserInfo")?;
+    Ok(Some(optional_string(shared, user_info_text(&data))))
 }
 
 /// The host part of the authority, without the port.
@@ -435,8 +491,19 @@ fn uri_get_path(
     receiver: ObjRef,
     _args: &[Value],
 ) -> Result<Option<Value>, VmError> {
-    let path = uri_data(shared, receiver, "URI.getPath")?.path;
-    Ok(Some(new_string(shared, decode_path(&path))))
+    let data = uri_data(shared, receiver, "URI.getPath")?;
+    Ok(Some(new_string(shared, decode_path(&data.path))))
+}
+
+fn uri_get_raw_path(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    _args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let data = uri_data(shared, receiver, "URI.getRawPath")?;
+    Ok(Some(new_string(shared, data.path)))
 }
 
 fn uri_get_query(
@@ -446,11 +513,22 @@ fn uri_get_query(
     receiver: ObjRef,
     _args: &[Value],
 ) -> Result<Option<Value>, VmError> {
-    let query = uri_data(shared, receiver, "URI.getQuery")?.query;
-    Ok(Some(match query {
-        Some(query) => new_string(shared, decode(&query)),
-        None => Value::Ref(ObjRef::NULL),
-    }))
+    let data = uri_data(shared, receiver, "URI.getQuery")?;
+    Ok(Some(optional_string(
+        shared,
+        data.query.map(|query| decode(&query)),
+    )))
+}
+
+fn uri_get_raw_query(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    _args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let data = uri_data(shared, receiver, "URI.getRawQuery")?;
+    Ok(Some(optional_string(shared, data.query)))
 }
 
 fn uri_get_fragment(
@@ -460,11 +538,22 @@ fn uri_get_fragment(
     receiver: ObjRef,
     _args: &[Value],
 ) -> Result<Option<Value>, VmError> {
-    let fragment = uri_data(shared, receiver, "URI.getFragment")?.fragment;
-    Ok(Some(match fragment {
-        Some(fragment) => new_string(shared, decode(&fragment)),
-        None => Value::Ref(ObjRef::NULL),
-    }))
+    let data = uri_data(shared, receiver, "URI.getFragment")?;
+    Ok(Some(optional_string(
+        shared,
+        data.fragment.map(|fragment| decode(&fragment)),
+    )))
+}
+
+fn uri_get_raw_fragment(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    _args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let data = uri_data(shared, receiver, "URI.getRawFragment")?;
+    Ok(Some(optional_string(shared, data.fragment)))
 }
 
 fn uri_to_string(
@@ -524,7 +613,7 @@ fn uri_resolve_string(
     let base = uri_data(shared, receiver, "URI.resolve")?;
     Ok(Some(Value::Ref(allocate_uri(
         shared,
-        base.resolve(&UriData::parse(&form)),
+        base.resolve(&UriData::parse(&form).map_err(VmError::Native)?),
     )?)))
 }
 
@@ -618,6 +707,46 @@ fn uri_compare_to(
 }
 
 // --- parsing helpers -------------------------------------------------------
+
+/// The RFC 3986 character set: printable ASCII except the excluded delimiters, with `%`
+/// allowed only as a complete escape. A non-ASCII character must be percent-encoded, as the
+/// JDK's `URI` constructor requires.
+fn validate_component(text: &str, what: &str) -> Result<(), String> {
+    let bytes = text.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if byte == b'%' {
+            let high = bytes.get(index + 1).and_then(|byte| hex_digit(*byte));
+            let low = bytes.get(index + 2).and_then(|byte| hex_digit(*byte));
+            if high.is_none() || low.is_none() {
+                return Err(format!("Illegal character in {what} at index {index}"));
+            }
+            index += 3;
+            continue;
+        }
+        if byte <= b' '
+            || byte >= 0x7f
+            || matches!(
+                byte,
+                b'<' | b'>' | b'"' | b'{' | b'}' | b'|' | b'\\' | b'^' | b'`'
+            )
+        {
+            return Err(format!("Illegal character in {what} at index {index}"));
+        }
+        index += 1;
+    }
+    Ok(())
+}
+
+fn hex_digit(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
 
 fn split_scheme(spec: &str) -> Option<(&str, &str)> {
     let colon = spec.find(':')?;
