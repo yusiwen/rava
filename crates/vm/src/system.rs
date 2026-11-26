@@ -121,8 +121,8 @@ pub fn register_natives(shared: &Shared) {
             "()Ljava/lang/String;",
             runtime_bean_name as crate::NativeFn,
         ),
-        ("getStartTime", "()J", runtime_bean_zero_long),
-        ("getUptime", "()J", runtime_bean_zero_long),
+        ("getStartTime", "()J", runtime_bean_start_time),
+        ("getUptime", "()J", runtime_bean_uptime),
         ("getVmName", "()Ljava/lang/String;", runtime_bean_vm_name),
         ("getVmVendor", "()Ljava/lang/String;", runtime_bean_vendor),
         ("getVmVersion", "()Ljava/lang/String;", runtime_bean_version),
@@ -653,14 +653,24 @@ fn runtime_bean_name(
     Ok(Some(Value::Ref(shared.heap().allocate_string(name))))
 }
 
-fn runtime_bean_zero_long(
-    _shared: &Shared,
+fn runtime_bean_start_time(
+    shared: &Shared,
     _thread: &ThreadState,
     _loader: LoaderId,
     _receiver: ObjRef,
     _args: &[Value],
 ) -> Result<Option<Value>, VmError> {
-    Ok(Some(Value::Long(0)))
+    Ok(Some(Value::Long(shared.start_time_millis())))
+}
+
+fn runtime_bean_uptime(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    _args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    Ok(Some(Value::Long(shared.uptime_millis())))
 }
 
 fn runtime_bean_vm_name(

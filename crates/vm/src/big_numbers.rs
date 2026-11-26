@@ -165,6 +165,31 @@ pub fn register_natives(shared: &Shared) {
     shared.register_native(BIG_INTEGER_CLASS, "hashCode", "()I", big_integer_hash_code);
 }
 
+/// Install `BigInteger.ZERO`/`ONE`/`TEN` into the statics table.
+///
+/// The C1 stub has no `<clinit>`, so a `getstatic` of one of these would otherwise read
+/// null. The objects are ordinary instances whose values live in the side table.
+pub fn install_constants(shared: &Shared) -> Result<(), VmError> {
+    let class = shared.load_library_class(BIG_INTEGER_CLASS)?;
+    let mut values = Vec::new();
+    for (name, value) in [("ZERO", 0i128), ("ONE", 1i128), ("TEN", 10i128)] {
+        let object = shared.allocate_instance(class)?;
+        shared.big_number_state().insert_integer(object, value);
+        values.push((name, object));
+    }
+    let entry = shared
+        .entry(class)
+        .ok_or_else(|| VmError::Loader(format!("class id {} is not loaded", class.0)))?;
+    let mut statics = entry.statics.lock().expect("static field lock poisoned");
+    for (name, object) in values {
+        statics.insert(
+            (name.to_owned(), "Ljava/math/BigInteger;".to_owned()),
+            Value::Ref(object),
+        );
+    }
+    Ok(())
+}
+
 fn heap_error(error: crate::HeapError) -> VmError {
     VmError::Native(error.to_string())
 }
@@ -549,5 +574,21 @@ fn big_integer_hash_code(
     _args: &[Value],
 ) -> Result<Option<Value>, VmError> {
     let value = integer_value(shared, receiver, "BigInteger.hashCode")?;
-    Ok(Some(Value::Int(value as i64 as i32)))
+    // `BigInteger.hashCode`: fold `31 * hash + word` over the magnitude's 32-bit words,
+    // most significant first, ignoring the sign. `-1` hashes as `1`, and `2^32` as `31`.
+    let mut magnitude = value.unsigned_abs();
+    if magnitude == 0 {
+        return Ok(Some(Value::Int(0)));
+    }
+    let mut words = Vec::new();
+    while magnitude != 0 {
+        words.push(magnitude as u32);
+        magnitude >>= 32;
+    }
+    words.reverse();
+    let mut hash = 0i32;
+    for word in words {
+        hash = hash.wrapping_mul(31).wrapping_add(word as i32);
+    }
+    Ok(Some(Value::Int(hash)))
 }
