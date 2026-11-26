@@ -73,6 +73,7 @@ pub fn register_all(shared: &Shared) -> Result<(), VmError> {
     // a zone and a pattern, and the state lives in the VM side table.
     java_time::register_natives(shared);
     big_numbers::register_natives(shared);
+    big_numbers::install_constants(shared)?;
     random::register_natives(shared);
     uri::register_natives(shared);
     io_file::register_natives(shared);

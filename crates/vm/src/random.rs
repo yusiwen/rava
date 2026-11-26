@@ -56,23 +56,31 @@ fn heap_error(error: crate::HeapError) -> VmError {
     VmError::Native(error.to_string())
 }
 
-/// One xorshift64* step.
-fn next_word(state: &mut u64) -> u64 {
-    let mut value = *state;
-    value ^= value >> 12;
-    value ^= value << 25;
-    value ^= value >> 27;
-    *state = value;
-    value.wrapping_mul(0x2545_F491_4F6C_DD1D)
+/// `java.util.Random`'s 48-bit linear congruential generator. The constants and the seed
+/// scramble are the JDK's, so a fixed seed produces the JDK's sequence.
+const MULTIPLIER: u64 = 0x0005_DEEC_E66D;
+const ADDEND: u64 = 0xB;
+const MASK: u64 = (1 << 48) - 1;
+
+fn set_seed(state: &mut u64, seed: i64) {
+    *state = ((seed as u64) ^ MULTIPLIER) & MASK;
 }
 
-fn seeded(receiver: ObjRef, seed: u64) -> u64 {
-    if seed == 0 {
-        // xorshift cannot leave the all-zero state.
-        (receiver.identity_hash() as u64) | 1
-    } else {
-        seed
-    }
+/// `Random.next(bits)`: one LCG step and the high `bits` bits of the new state.
+fn next_bits(state: &mut u64, bits: u32) -> u32 {
+    *state = state.wrapping_mul(MULTIPLIER).wrapping_add(ADDEND) & MASK;
+    (*state >> (48 - bits)) as u32
+}
+
+fn state_mut<'a>(
+    state: &'a mut RandomState,
+    receiver: ObjRef,
+    method: &str,
+) -> Result<&'a mut u64, VmError> {
+    state
+        .states
+        .get_mut(&receiver)
+        .ok_or_else(|| VmError::Native(format!("{method}: Random has no state")))
 }
 
 fn random_init(
@@ -87,10 +95,10 @@ fn random_init(
         .map(|duration| duration.as_nanos() as u64)
         .unwrap_or(0x9E37_79B9_7F4A_7C15)
         ^ (receiver.identity_hash() as u64);
-    shared
-        .random_state()
-        .states
-        .insert(receiver, seeded(receiver, seed));
+    let mut state = shared.random_state();
+    let slot = state.states.entry(receiver).or_insert(0);
+    // The clock and the receiver identity uniquify two unseeded generators.
+    set_seed(slot, seed as i64);
     Ok(None)
 }
 
@@ -108,20 +116,25 @@ fn random_init_seed(
             return Err(VmError::Native("Random.setSeed expects a long".to_owned()));
         }
     };
-    shared
-        .random_state()
-        .states
-        .insert(receiver, seeded(receiver, seed));
+    let mut state = shared.random_state();
+    let slot = state.states.entry(receiver).or_insert(0);
+    set_seed(slot, seed as i64);
     Ok(None)
 }
 
-fn step(shared: &Shared, receiver: ObjRef, method: &str) -> Result<u64, VmError> {
+fn next_u32(shared: &Shared, receiver: ObjRef, method: &str) -> Result<u32, VmError> {
     let mut state = shared.random_state();
-    let value = state
-        .states
-        .get_mut(&receiver)
-        .ok_or_else(|| VmError::Native(format!("{method}: Random has no state")))?;
-    Ok(next_word(value))
+    let slot = state_mut(&mut state, receiver, method)?;
+    Ok(next_bits(slot, 32))
+}
+
+fn next_u64(shared: &Shared, receiver: ObjRef, method: &str) -> Result<u64, VmError> {
+    let mut state = shared.random_state();
+    let slot = state_mut(&mut state, receiver, method)?;
+    // `Random.nextLong`: `((long) next(32) << 32) + next(32)`.
+    let high = u64::from(next_bits(slot, 32));
+    let low = u64::from(next_bits(slot, 32));
+    Ok((high << 32) + low)
 }
 
 fn random_next_int(
@@ -132,7 +145,7 @@ fn random_next_int(
     _args: &[Value],
 ) -> Result<Option<Value>, VmError> {
     Ok(Some(Value::Int(
-        step(shared, receiver, "Random.nextInt")? as i32
+        next_u32(shared, receiver, "Random.nextInt")? as i32,
     )))
 }
 
@@ -144,16 +157,32 @@ fn random_next_int_bound(
     args: &[Value],
 ) -> Result<Option<Value>, VmError> {
     let bound = match args.first().copied() {
-        Some(Value::Int(value)) if value > 0 => value as u64,
+        Some(Value::Int(value)) if value > 0 => value as u32,
         _ => {
             return Err(VmError::Native(
                 "Random.nextInt(bound) expects a positive bound".to_owned(),
             ));
         }
     };
-    Ok(Some(Value::Int(
-        (step(shared, receiver, "Random.nextInt")? % bound) as i32,
-    )))
+    let mut state = shared.random_state();
+    let slot = state_mut(&mut state, receiver, "Random.nextInt")?;
+    // `Random.nextInt(int)`: reject the first value when it falls in the incomplete bucket,
+    // and scale a power-of-two bound. The `i32` arithmetic deliberately wraps like Java's.
+    let mut r = next_bits(slot, 31) as i32;
+    let m = bound as i32 - 1;
+    if bound & (bound - 1) == 0 {
+        r = (((bound as u64) * (r as u32 as u64)) >> 31) as i32;
+    } else {
+        loop {
+            let u = r;
+            r = (u as u32 % bound) as i32;
+            if u.wrapping_sub(r).wrapping_add(m) >= 0 {
+                break;
+            }
+            r = next_bits(slot, 31) as i32;
+        }
+    }
+    Ok(Some(Value::Int(r)))
 }
 
 fn random_next_long(
@@ -164,7 +193,7 @@ fn random_next_long(
     _args: &[Value],
 ) -> Result<Option<Value>, VmError> {
     Ok(Some(Value::Long(
-        step(shared, receiver, "Random.nextLong")? as i64,
+        next_u64(shared, receiver, "Random.nextLong")? as i64,
     )))
 }
 
@@ -175,9 +204,9 @@ fn random_next_boolean(
     receiver: ObjRef,
     _args: &[Value],
 ) -> Result<Option<Value>, VmError> {
-    Ok(Some(Value::Int(i32::from(
-        step(shared, receiver, "Random.nextBoolean")? & 1 == 1,
-    ))))
+    let mut state = shared.random_state();
+    let slot = state_mut(&mut state, receiver, "Random.nextBoolean")?;
+    Ok(Some(Value::Int(i32::from(next_bits(slot, 1) != 0))))
 }
 
 fn random_next_float(
@@ -187,7 +216,9 @@ fn random_next_float(
     receiver: ObjRef,
     _args: &[Value],
 ) -> Result<Option<Value>, VmError> {
-    let bits = (step(shared, receiver, "Random.nextFloat")? >> 40) as u32;
+    let mut state = shared.random_state();
+    let slot = state_mut(&mut state, receiver, "Random.nextFloat")?;
+    let bits = next_bits(slot, 24);
     Ok(Some(Value::Float(bits as f32 / (1u32 << 24) as f32)))
 }
 
@@ -198,8 +229,14 @@ fn random_next_double(
     receiver: ObjRef,
     _args: &[Value],
 ) -> Result<Option<Value>, VmError> {
-    let bits = step(shared, receiver, "Random.nextDouble")? >> 11;
-    Ok(Some(Value::Double(bits as f64 / (1u64 << 53) as f64)))
+    let mut state = shared.random_state();
+    let slot = state_mut(&mut state, receiver, "Random.nextDouble")?;
+    // `(((long) next(26) << 27) + next(27)) * 0x1.0p-53`.
+    let high = u64::from(next_bits(slot, 26));
+    let low = u64::from(next_bits(slot, 27));
+    Ok(Some(Value::Double(
+        (((high << 27) + low) as f64) * (1.0 / (1u64 << 53) as f64),
+    )))
 }
 
 fn random_next_bytes(
@@ -225,8 +262,8 @@ fn random_next_bytes(
             .states
             .get_mut(&receiver)
             .ok_or_else(|| VmError::Native("Random.nextBytes: Random has no state".to_owned()))?;
-        while bytes.len() < length {
-            bytes.extend_from_slice(&next_word(word).to_le_bytes());
+        for _ in 0..length {
+            bytes.push(next_bits(word, 8) as u8);
         }
     }
     bytes.truncate(length);
@@ -259,8 +296,8 @@ fn random_generate_seed(
         .get_mut(&receiver)
         .ok_or_else(|| VmError::Native("SecureRandom has no state".to_owned()))?;
     let mut bytes = Vec::with_capacity(count);
-    while bytes.len() < count {
-        bytes.extend_from_slice(&next_word(word).to_le_bytes());
+    for _ in 0..count {
+        bytes.push(next_bits(word, 8) as u8);
     }
     bytes.truncate(count);
     Ok(Some(Value::Ref(crate::resources::allocate_bytes(

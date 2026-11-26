@@ -486,7 +486,14 @@ fn instant_to_string(
     _args: &[Value],
 ) -> Result<Option<Value>, VmError> {
     let millis = instant_millis(shared, receiver)?;
-    let text = format_epoch(millis, &utc_zone(), "yyyy-MM-dd'T'HH:mm:ss.SSS'Z'")?;
+    // `Instant.toString` prints the fraction only when it is non-zero, and always ends in
+    // `Z` (the UTC offset form is not used).
+    let mut text = format_epoch(millis, &utc_zone(), "yyyy-MM-dd'T'HH:mm:ss")?;
+    let sub_millis = millis.rem_euclid(1000);
+    if sub_millis != 0 {
+        text.push_str(&format!(".{sub_millis:03}"));
+    }
+    text.push('Z');
     Ok(Some(new_string(shared, text)))
 }
 
@@ -1853,15 +1860,48 @@ fn duration_to_string(
     _args: &[Value],
 ) -> Result<Option<Value>, VmError> {
     let (seconds, nanos) = duration_data(shared, receiver, "Duration.toString")?;
-    let mut text = String::from("PT");
-    if seconds != 0 {
-        text.push_str(&format!("{seconds}S"));
-    }
-    if nanos != 0 {
-        text.push_str(&format!(".{nanos:09}"));
-    }
     if seconds == 0 && nanos == 0 {
-        text.push_str("0S");
+        return Ok(Some(new_string(shared, "PT0S".to_owned())));
     }
-    Ok(Some(Value::Ref(shared.heap().allocate_string(text))))
+    // `Duration.toString`: hours/minutes/seconds, with a decimal fraction only when there
+    // are nanos; the JDK's `2 * nanos - NANOS_PER_SECOND` form keeps a negative duration's
+    // fraction on the right side of zero.
+    let hours = seconds / 3600;
+    let minutes = (seconds % 3600) / 60;
+    let secs = seconds % 60;
+    let mut text = String::from("PT");
+    if hours != 0 {
+        text.push_str(&format!("{hours}H"));
+    }
+    if minutes != 0 {
+        text.push_str(&format!("{minutes}M"));
+    }
+    if secs == 0 && nanos == 0 && text.len() > 2 {
+        return Ok(Some(new_string(shared, text)));
+    }
+    if secs < 0 && nanos > 0 {
+        if secs == -1 {
+            text.push_str("-0");
+        } else {
+            text.push_str(&format!("{}", secs + 1));
+        }
+    } else {
+        text.push_str(&format!("{secs}"));
+    }
+    if nanos > 0 {
+        let position = text.len();
+        if secs < 0 {
+            text.push_str(&format!("{}", 2 * i64::from(nanos) - 1_000_000_000));
+        } else {
+            text.push_str(&format!("{}", i64::from(nanos) + 1_000_000_000));
+        }
+        while text.ends_with('0') {
+            text.pop();
+        }
+        if position < text.len() {
+            text.replace_range(position..position + 1, ".");
+        }
+    }
+    text.push('S');
+    Ok(Some(new_string(shared, text)))
 }

@@ -176,6 +176,10 @@ pub struct Shared {
     /// When set, output is written through to the host's stdout/stderr as it happens
     /// instead of buffering for the runner's final flush.
     stream_output: AtomicBool,
+    /// When the VM was created, for `RuntimeMXBean.getUptime`.
+    start_instant: std::time::Instant,
+    /// The wall-clock start time in epoch milliseconds, for `getStartTime`.
+    start_epoch_millis: i64,
     /// One entry per `sun.misc.Unsafe` / `jdk.internal.misc.Unsafe` call the VM served.
     ///
     /// ADR-0005's acceptance requires a runtime log that contains only the open tier's
@@ -324,6 +328,11 @@ impl Shared {
             stderr: Mutex::new(Vec::new()),
             error_streams: Mutex::new(HashSet::new()),
             stream_output: AtomicBool::new(false),
+            start_instant: std::time::Instant::now(),
+            start_epoch_millis: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|duration| duration.as_millis() as i64)
+                .unwrap_or(0),
             unsafe_calls: Mutex::new(Vec::new()),
             jul: Mutex::new(crate::jul::JulState::default()),
             properties: Mutex::new(default_properties()),
@@ -2348,6 +2357,16 @@ impl Shared {
 
     pub fn output_streaming(&self) -> bool {
         self.stream_output.load(Ordering::Relaxed)
+    }
+
+    /// Milliseconds since this VM was created (`RuntimeMXBean.getUptime`).
+    pub fn uptime_millis(&self) -> i64 {
+        i64::try_from(self.start_instant.elapsed().as_millis()).unwrap_or(i64::MAX)
+    }
+
+    /// The VM's wall-clock start time in epoch milliseconds (`getStartTime`).
+    pub fn start_time_millis(&self) -> i64 {
+        self.start_epoch_millis
     }
 
     pub fn write_stdout(&self, bytes: &[u8]) {
