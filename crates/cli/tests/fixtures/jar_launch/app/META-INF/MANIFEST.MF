@@ -1,0 +1,5 @@
+Manifest-Version: 1.0
+Created-By: rava fixture
+Main-Class: demo.JarMain
+Class-Path: lib/helper.jar
+

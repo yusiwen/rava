@@ -4,8 +4,8 @@ A Java 17 runtime in Rust, built to run Spring — not just a corpus.
 
 ## Status
 
-**M0, M1, M2 and M3 are complete (2026-11-25); M4 is in progress (M4.1 and M4.2
-landed).** A pinned Spring
+**M0, M1, M2 and M3 are complete (2026-11-25); M4 is in progress (M4.1, M4.2 and
+M4.3 landed).** A pinned Spring
 `AnnotationConfigApplicationContext` starts on rava, returns its `hello` bean and exits
 0; the C2 gate additionally runs Proxy, CGLIB, Objenesis, Spring AOP and an
 `Unsafe` U0-only call log. The [project ledger](PROJECT.md) owns the per-slice record,
@@ -26,15 +26,17 @@ commands and evidence.
 
 Proven today: `compat check` resolves 1,047 classes and 4,851 member records with 0
 unresolved; the C1 metadata diff is 0 across 1,011 referenced classes; the workspace
-passes 514 tests plus `cargo fmt --all --check` and
+passes 537 tests plus `cargo fmt --all --check` and
 `cargo clippy --workspace --all-targets -- -D warnings`; and
 `RAVA_C2_ACCEPTANCE=1 cargo test -p rava-cli --test c2_gate` exits 0 with real Proxy,
 CGLIB, Objenesis, Spring AOP and an `Unsafe` U0-only log. M4.1 adds real `file:` and
 `jar:` classpath resources, `ClassLoader`/`Class` resource APIs and URL/stream natives
 (`cargo test -p rava-cli --test resources`); M4.2 adds `ServiceLoader` over
 `META-INF/services` with lazy provider construction and typed configuration errors
-(`cargo test -p rava-cli --test service_loader`). `-jar`, nested jars and the non-web Boot
-gate are next. Known gaps are listed in the
+(`cargo test -p rava-cli --test service_loader`); M4.3 adds executable-jar launch with
+`META-INF/MANIFEST.MF`, `Main-Class`, `Class-Path` and program arguments
+(`cargo test -p rava-cli --test jar_launch`). Nested jars and the non-web Boot gate are
+next. Known gaps are listed in the
 [M3 history note](docs/notes/M3.md); the local long/double slot bug (#52) is fixed, and
 `Class.getFields` (#53) is implemented against the observed C1 tree, whose 69/35/44
 closure boundary is documented in the
@@ -106,10 +108,18 @@ cargo run -p rava-cli -- run demo.HelloRun --stdlib stdlib/c1/classes --cp crate
 
 The same class is committed as a stored jar, so
 `--cp crates/cli/tests/fixtures/run/HelloRun.jar` is the jar form; `--cp` is repeatable
-and colon-separated. The runner's tests need no JDK:
+and colon-separated. The launcher also accepts an executable jar, reading its
+`Main-Class` and `Class-Path` without any `--cp`:
+
+```sh
+cargo run -p rava-cli -- -jar crates/cli/tests/fixtures/jar_launch/app.jar
+```
+
+The runner's tests need no JDK:
 
 ```sh
 cargo test -p rava-cli --test classpath_run
+cargo test -p rava-cli --test jar_launch
 ```
 
 The pinned target and jar set are checked with:

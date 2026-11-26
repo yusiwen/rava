@@ -25,14 +25,14 @@ use rava_vm::{ClassPathSource, ClassRef, LoaderId, Shared, Value, VmError, libra
 const MAIN_DESCRIPTOR: &str = "([Ljava/lang/String;)V";
 
 /// The default bootstrap class-library directory, relative to the process directory.
-const DEFAULT_STDLIB: &str = "stdlib/c1/classes";
+pub(crate) const DEFAULT_STDLIB: &str = "stdlib/c1/classes";
 
 /// Parsed `rava run` options.
-struct Options {
-    main_class: String,
-    stdlib: PathBuf,
-    classpath: Vec<PathBuf>,
-    program_args: Vec<String>,
+pub(crate) struct Options {
+    pub(crate) main_class: String,
+    pub(crate) stdlib: PathBuf,
+    pub(crate) classpath: Vec<PathBuf>,
+    pub(crate) program_args: Vec<String>,
 }
 
 enum Parsed {
@@ -66,9 +66,20 @@ pub fn command(args: &[String]) -> ExitCode {
 }
 
 fn execute(options: &Options) -> Result<(), String> {
-    let shared = Shared::with_library_dir(&options.stdlib);
     let classpath = ClassPathSource::from_paths(options.classpath.iter().cloned())
         .map_err(|error| format!("cannot build the classpath: {error}"))?;
+    execute_with(options, classpath)
+}
+
+/// Run `main` from an already-built classpath.
+///
+/// `rava run` builds its source from [`Options::classpath`]; `rava -jar` builds one from
+/// the executable jar and the manifest's `Class-Path` entries. Everything after the
+/// source — the one application loader, native registration, argument allocation and the
+/// `main([Ljava/lang/String;)V` call — is shared here, so the two commands cannot drift.
+/// The `classpath` field of `options` is not read by this function.
+pub(crate) fn execute_with(options: &Options, classpath: ClassPathSource) -> Result<(), String> {
+    let shared = Shared::with_library_dir(&options.stdlib);
     let loader = shared
         .add_loader(LoaderId::BOOTSTRAP, Arc::new(classpath))
         .map_err(|error| format!("cannot create the application loader: {error}"))?;

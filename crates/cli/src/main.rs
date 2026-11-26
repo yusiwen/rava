@@ -7,6 +7,7 @@ mod c1;
 mod check;
 mod compat;
 mod ct_sym;
+mod jar;
 mod manifest;
 mod run;
 mod stubs;
@@ -26,6 +27,7 @@ fn main() -> ExitCode {
     match command.as_str() {
         "compat" => compat::run(&rest),
         "run" => run::command(&rest),
+        "-jar" => jar::command(&rest),
         "-h" | "--help" | "help" => {
             print_usage();
             ExitCode::SUCCESS
@@ -43,6 +45,7 @@ fn print_usage() {
     println!();
     println!("commands:");
     println!("  run                run a class's main method from a classpath");
+    println!("  -jar <file>        run the Main-Class of an executable jar");
     println!("  compat target      print and validate the pinned compatibility target");
     println!("  compat manifest    generate or check the static surface manifest");
     println!("  compat stubs       write the signature-only stub class library");
