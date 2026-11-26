@@ -7,8 +7,8 @@ A Java 17 runtime in Rust, built to run Spring — not just a corpus.
 **M0, M1, M2, M3 and M4 are complete (2026-11-26).** A pinned Spring
 `AnnotationConfigApplicationContext` starts on rava, returns its `hello` bean and exits
 0; the C2 gate additionally runs Proxy, CGLIB, Objenesis, Spring AOP and an
-`Unsafe` U0-only call log. The [project ledger](PROJECT.md) owns the per-slice record,
-commands and evidence.
+`Unsafe` U0-only call log. The [project ledger](PROJECT.md) owns the status and the slice
+index; the [slice records](docs/slices/README.md) own the per-slice commands and evidence.
 
 | Milestone | Scope | Status |
 | :--- | :--- | :--- |
@@ -87,7 +87,8 @@ Reactive web (Spring WebFlux) is a later target, not part of the first acceptanc
 - [ADR index](docs/adr/README.md) — the accepted decision stack.
 - [Explanation index](docs/explanation/README.md) — how the mechanisms run, starting with the C1 metadata diff and the Spring context.
 - [History notes](docs/notes/README.md) — what happened, including the M2 Spring blocker chain and the M3 CGLIB/AOP lessons.
-- [Project ledger](PROJECT.md) — phase status, milestones, decision log.
+- [Slice records](docs/slices/README.md) — what each slice delivered, its boundary and its evidence.
+- [Project ledger](PROJECT.md) — phase status, milestones, slice index, decision log, resume.
 
 Start with the requirements and the ADRs; the open questions are all resolved and
 remain as a decision record.

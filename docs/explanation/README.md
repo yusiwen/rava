@@ -4,7 +4,8 @@ Explanation documents answer **how a rava mechanism runs end to end**. They are 
 the ledger, not a decision record, and not a replacement for the code: they name the
 entry point, the data flow, the artifacts and the commands that prove the description.
 
-`PROJECT.md` owns state (what is done, which slice, which gate). The ADRs own the
+`PROJECT.md` owns status (which phase, which slice, which gate) and `docs/slices/` owns
+the per-slice record. The ADRs own the
 reasoning (why this design and not another). The class-library READMEs own the state of
 their trees. This directory owns the mechanism narrative and the interpretation of
 evidence that spans those files.

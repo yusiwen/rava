@@ -17,7 +17,8 @@ A milestone history note should contain:
 6. **Evidence** — commands, outputs and links to the ledger/explanation documents.
 
 One note covers a milestone (or a coherent slice cluster), not every individual slice:
-the per-slice state and counts remain in `PROJECT.md`. A later note can supersede a
+the per-slice state and evidence live in `docs/slices/`, and `PROJECT.md` keeps the
+status row. A later note can supersede a
 lesson, but an accepted decision is still an ADR, not a note.
 
 ## Index
