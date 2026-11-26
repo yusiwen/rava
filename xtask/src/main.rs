@@ -1,7 +1,7 @@
 //! Repository tasks, run as `cargo xtask <task>`.
 //!
-//! `ci` is the local acceptance entry point: formatting, lints and tests, stopping at
-//! the first failure.
+//! `ci` is the local acceptance entry point: document budgets, formatting, lints and
+//! tests, stopping at the first failure.
 
 use std::process::{Command, ExitCode};
 
@@ -33,6 +33,8 @@ fn main() -> ExitCode {
 
 fn ci() -> u8 {
     let steps: Vec<(&str, Vec<&str>)> = vec![
+        // Cheapest check first: it only reads Markdown.
+        ("bash", vec!["scripts/doc-check.sh", "."]),
         ("cargo", vec!["fmt", "--all", "--check"]),
         (
             "cargo",

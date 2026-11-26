@@ -12,9 +12,9 @@ happened in a milestone and what it taught; explanation documents
 One `##` heading per slice, three labelled paragraphs in this order:
 
 ```markdown
-## M4.1 — Classpath resources — 2026-11-26
+## <id> — <the ledger's description> — <date the acceptance ran>
 
-**Acceptance.** `cargo test -p rava-cli --test resources` — exit 0.
+**Acceptance.** <the command from PROJECT.md> — exit 0.
 
 **Delivered.** What landed, in the order a reader needs it: the new types, the seam they
 plug into, the behaviour that became observable.
