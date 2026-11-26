@@ -55,6 +55,8 @@ Every entry closed with the same workspace gate, so the entries do not repeat it
   touched the Spring path (M2.23–M2.30, M3.7, M4).
 - `RAVA_C2_ACCEPTANCE=1 cargo test -p rava-cli --test c2_gate` from M3.7 on.
 - `RAVA_BOOT_ACCEPTANCE=1 cargo test -p rava-cli --test boot_nonweb` for M4.5.
+- The CI `acceptance` job (`.github/workflows/ci.yml`) fetches `compat/jars` and runs the
+  Boot, Spring and C2 gates with their `RAVA_*` variables; `cargo xtask ci` stays jar-free.
 - `cargo test -p rava-cli`, `cargo test -p rava-interp` and `cargo test -p rava-vm` for one
   crate's suite. Plain `cargo test` skips the jar-dependent acceptances; the `RAVA_*`
   variables turn a missing jar into a failure.

@@ -115,7 +115,7 @@ It runs a real Spring context with `proxyBeanMethods = true`, a bare CGLIB
 modes. It asserts the generated classes are in the application loader, every method
 with `Code` verifies, and the `Unsafe` log contains only U0. The run needs the fetched
 `compat/jars/`; the command sets `RAVA_C2_ACCEPTANCE=1` so a missing jar fails rather
-than silently skipping. The mechanism is explained in
+than silently skipping, and CI runs it in the `acceptance` job. The mechanism is explained in
 [`dynamic-code.md`](dynamic-code.md); the blocker chain is in
 [`docs/notes/M3.md`](../notes/M3.md). This does not make every C2 surface complete:
 Access checks remain open, and the verifier is not a full type verifier. The mixed
@@ -129,12 +129,16 @@ $ RAVA_SPRING_ACCEPTANCE=1 cargo test -p rava-cli --test spring_context
 test spring_annotation_context_starts_and_exposes_the_bean ... ok
 ```
 
-The test is opt-in because it needs the fetched `compat/jars/`. On a CI checkout without
-the jars it prints a skip and returns; `cargo xtask ci` therefore stays green without
-claiming C3. The run proves one real `AnnotationConfigApplicationContext` starts, one
-`@Bean String` is created, and the context closes. It does not prove the broader C3
-surface or any Boot/web path. The runtime path is explained in
-[`spring-context.md`](spring-context.md).
+The three acceptance commands (the Boot gate, this Spring smoke and the C2 gate) are
+opt-in in a local checkout because they need the fetched `compat/jars/`; `cargo xtask ci`
+stays jar-free and does not claim C2–C4. CI is not a local checkout: the `acceptance` job
+in [`ci.yml`](../../.github/workflows/ci.yml) fetches the pinned set with
+`bash compat/fetch-jars.sh`, recompiles the Boot fixture from its committed source with
+JDK 17, and runs `boot_nonweb`, `spring_context` and `c2_gate` with their `RAVA_*`
+variables, so a missing jar fails the job instead of skipping it. The Spring run proves
+one real `AnnotationConfigApplicationContext` starts, one `@Bean String` is created, and
+the context closes. It does not prove the broader C3 surface or any Boot/web path. The
+runtime path is explained in [`spring-context.md`](spring-context.md).
 
 **C4** has no implementation yet; the reference application and HTTP/Spring suites are
 M6–M7. The 35-jar target and the `reference-app` source are pinned now so the later

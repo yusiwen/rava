@@ -14,8 +14,10 @@ generated, and what makes a result acceptable evidence?
 | Opt-in Spring acceptance | `RAVA_SPRING_ACCEPTANCE=1 cargo test -p rava-cli --test spring_context` | A real `AnnotationConfigApplicationContext` starts and yields the `hello` bean. |
 
 These layers answer different questions. `cargo xtask ci` does not fetch jars, run a
-real JDK reflection differential, or claim C0–C4. The Spring test does not replace the
-manifest/link/metadata checks.
+real JDK reflection differential, or claim C0–C4. The CI `acceptance` job does fetch the
+pinned jars and runs the Boot, Spring and C2 gates (`boot_nonweb`, `spring_context`,
+`c2_gate`), so a green `ci` job and a green `acceptance` job answer different parts of
+the claim; the Spring test does not replace the manifest/link/metadata checks.
 
 ## Workspace gate
 
