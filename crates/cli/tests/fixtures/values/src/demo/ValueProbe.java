@@ -4,6 +4,8 @@ import java.lang.management.ManagementFactory;
 import java.math.BigInteger;
 import java.time.Duration;
 import java.time.Instant;
+import java.time.ZoneId;
+import java.time.format.DateTimeFormatter;
 import java.util.Random;
 
 /**
@@ -41,6 +43,30 @@ public final class ValueProbe {
 
     public static String durationFraction() {
         return Duration.ofMillis(1500).toString();
+    }
+
+    public static String newYorkTime() {
+        return DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm")
+                .withZone(ZoneId.of("America/New_York"))
+                .format(Instant.ofEpochMilli(1735689600000L));
+    }
+
+    public static String newYorkSummerTime() {
+        return DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm")
+                .withZone(ZoneId.of("America/New_York"))
+                .format(Instant.ofEpochMilli(1751328000000L));
+    }
+
+    public static String shanghaiTime() {
+        return DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm")
+                .withZone(ZoneId.of("Asia/Shanghai"))
+                .format(Instant.ofEpochMilli(1735689600000L));
+    }
+
+    public static String utcTime() {
+        return DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm")
+                .withZone(ZoneId.of("UTC"))
+                .format(Instant.ofEpochMilli(1735689600000L));
     }
 
     public static String randomSequence() {

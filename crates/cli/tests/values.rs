@@ -105,6 +105,19 @@ fn instant_and_duration_to_string_match_the_jdk() {
 }
 
 #[test]
+fn named_zones_use_the_tzif_rules_at_the_instant() {
+    if !std::path::Path::new("/usr/share/zoneinfo/America/New_York").exists() {
+        eprintln!("skipping the named-zone test: /usr/share/zoneinfo is absent");
+        return;
+    }
+    let fixture = fixture();
+    assert_eq!(string(&fixture, "newYorkTime"), "2024-12-31 19:00");
+    assert_eq!(string(&fixture, "newYorkSummerTime"), "2025-06-30 20:00");
+    assert_eq!(string(&fixture, "shanghaiTime"), "2025-01-01 08:00");
+    assert_eq!(string(&fixture, "utcTime"), "2025-01-01 00:00");
+}
+
+#[test]
 fn random_with_a_fixed_seed_follows_the_java_lcg() {
     let fixture = fixture();
     assert_eq!(

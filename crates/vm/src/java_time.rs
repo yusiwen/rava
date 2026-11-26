@@ -21,11 +21,12 @@
 //!   requested, which is a typed error rather than a silently English result).
 //!
 //! `systemDefault` resolves the host zone from `/etc/timezone` and `/etc/localtime` (a
-//! TZif v1/v2 file) at startup. The offset is captured once, so a long-running process
-//! that crosses a DST transition keeps the startup offset: full zone-rule lookups are a
-//! later slice. When the host zone cannot be read the offset is UTC. `Locale` is inert:
-//! month, weekday and AM/PM text is always English, which is what the pinned logging
-//! formats use.
+//! TZif v1/v2 file). A named `ZoneId.of(id)` reads `/usr/share/zoneinfo/<id>`, and the
+//! formatter samples that TZif table at the instant it prints, so a zone with DST keeps
+//! the right offset on both sides of a transition; an unknown id is a typed error. When
+//! the host zone cannot be read the offset is UTC. `Locale` is inert for pattern text
+//! (month, weekday and AM/PM are English); `String.format` uses the locale's decimal
+//! separator.
 //!
 //! The pattern renderer supports the letters the logging stack uses and their ordinary
 //! neighbours: `y`, `M`, `d`, `D`, `H`, `h`, `m`, `s`, `S`, `X`, `Z`, `z`, `E`, `a`,
@@ -80,11 +81,13 @@ impl TimeState {
     }
 }
 
-/// A zone identity and the UTC offset captured for it at startup.
+/// A zone identity, the offset observed at startup and (for a named zone) the TZif data
+/// the formatter samples at the instant being printed.
 #[derive(Debug, Clone)]
 struct ZoneInfo {
     id: String,
     offset_seconds: i32,
+    tzif: Option<Vec<u8>>,
 }
 
 /// One `DateTimeFormatter`: the pattern, an optional zone and an inert locale.
@@ -378,11 +381,8 @@ fn zone_of(
     args: &[Value],
 ) -> Result<Option<Value>, VmError> {
     let id = string_argument(shared, args, 0, "ZoneId.of")?;
-    let offset_seconds = offset_for_id(&id);
-    Ok(Some(Value::Ref(allocate_zone(
-        shared,
-        ZoneInfo { id, offset_seconds },
-    )?)))
+    let zone = zone_info_for_id(&id)?;
+    Ok(Some(Value::Ref(allocate_zone(shared, zone)?)))
 }
 
 fn zone_get_id(
@@ -831,6 +831,7 @@ fn utc_zone() -> ZoneInfo {
     ZoneInfo {
         id: "UTC".to_owned(),
         offset_seconds: 0,
+        tzif: None,
     }
 }
 
@@ -862,30 +863,64 @@ fn host_zone() -> ZoneInfo {
             })
         })
         .unwrap_or_else(|| "UTC".to_owned());
-    let offset_seconds = std::fs::read("/etc/localtime")
-        .ok()
-        .and_then(|bytes| tzif_offset(&bytes, now_millis().div_euclid(1000)))
+    let tzif = std::fs::read("/etc/localtime").ok();
+    let offset_seconds = tzif
+        .as_deref()
+        .and_then(|bytes| tzif_offset(bytes, now_millis().div_euclid(1000)))
         .unwrap_or(0);
-    ZoneInfo { id, offset_seconds }
+    ZoneInfo {
+        id,
+        offset_seconds,
+        tzif,
+    }
 }
 
-/// The offset for a zone id when the zone rules are unavailable.
+/// The offset of `zone` at `millis`: the host TZif transition table when the zone has
+/// one, otherwise the fixed offset observed at startup.
+fn zone_offset_at(zone: &ZoneInfo, millis: i64) -> i32 {
+    zone.tzif
+        .as_deref()
+        .and_then(|bytes| tzif_offset(bytes, millis.div_euclid(1000)))
+        .unwrap_or(zone.offset_seconds)
+}
+
+/// Resolve a zone id: `UTC`-family names, the fixed `+HH:MM` offsets, or a named zone read
+/// from the host's `/usr/share/zoneinfo` TZif database.
 ///
-/// `UTC`/`GMT` and the fixed `+HH:MM` forms are honoured; any other id keeps the offset
-/// the host zone reported, because the pinned logging formats request offsets, not
-/// arbitrary zones.
-fn offset_for_id(id: &str) -> i32 {
+/// A named zone keeps the TZif data, so the formatter samples the offset at the instant it
+/// prints instead of freezing the startup offset. An unknown id is a typed error rather
+/// than silently falling back to the host zone.
+fn zone_info_for_id(id: &str) -> Result<ZoneInfo, VmError> {
     if matches!(id, "UTC" | "GMT" | "UT" | "Z") {
-        return 0;
+        return Ok(utc_zone());
     }
-    let Some(rest) = id.strip_prefix(['+', '-']) else {
-        return host_zone().offset_seconds;
-    };
-    let sign = if id.starts_with('-') { -1 } else { 1 };
-    let (hours, minutes) = rest.split_once(':').unwrap_or((rest, "0"));
-    let hours: i32 = hours.parse().unwrap_or(0);
-    let minutes: i32 = minutes.parse().unwrap_or(0);
-    sign * (hours * 3600 + minutes * 60)
+    if let Some(rest) = id.strip_prefix(['+', '-']) {
+        let sign = if id.starts_with('-') { -1 } else { 1 };
+        let (hours, minutes) = rest.split_once(':').unwrap_or((rest, "0"));
+        let hours: i32 = hours
+            .parse()
+            .map_err(|_| VmError::Native(format!("unknown time-zone ID: {id}")))?;
+        let minutes: i32 = minutes
+            .parse()
+            .map_err(|_| VmError::Native(format!("unknown time-zone ID: {id}")))?;
+        return Ok(ZoneInfo {
+            id: id.to_owned(),
+            offset_seconds: sign * (hours * 3600 + minutes * 60),
+            tzif: None,
+        });
+    }
+    if id.is_empty() || id.starts_with('/') || id.contains("..") {
+        return Err(VmError::Native(format!("unknown time-zone ID: {id}")));
+    }
+    let path = std::path::Path::new("/usr/share/zoneinfo").join(id);
+    let bytes =
+        std::fs::read(&path).map_err(|_| VmError::Native(format!("unknown time-zone ID: {id}")))?;
+    let offset_seconds = tzif_offset(&bytes, now_millis().div_euclid(1000)).unwrap_or(0);
+    Ok(ZoneInfo {
+        id: id.to_owned(),
+        offset_seconds,
+        tzif: Some(bytes),
+    })
 }
 
 fn now_millis() -> i64 {
@@ -1041,7 +1076,8 @@ struct Fields {
 }
 
 fn fields_of(millis: i64, zone: &ZoneInfo) -> Fields {
-    let local = millis + i64::from(zone.offset_seconds) * 1000;
+    let offset_seconds = zone_offset_at(zone, millis);
+    let local = millis + i64::from(offset_seconds) * 1000;
     let days = local.div_euclid(86_400_000);
     let of_day = local.rem_euclid(86_400_000);
     let (year, month, day) = civil_from_days(days);
@@ -1061,7 +1097,7 @@ fn fields_of(millis: i64, zone: &ZoneInfo) -> Fields {
         millis,
         day_of_year,
         weekday,
-        offset_seconds: zone.offset_seconds,
+        offset_seconds,
     }
 }
 
