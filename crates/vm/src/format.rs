@@ -2,7 +2,9 @@
 //!
 //! The runtime class is [`crate::HeapObject::MessageFormat`], a dedicated heap shape that
 //! holds the pattern text; the C1 stub declares no instance field for it and this slice
-//! does not invent one. A `Locale` is accepted by the two-argument constructor but not
+//! does not invent one. The `Locale`-taking `String.format` uses the locale's decimal
+//! separator for `%f`/`%e`; other locale-sensitive conversions stay a typed error. A
+//! `MessageFormat` `Locale` is accepted by the two-argument constructor but not
 //! stored, because the supported formatting subset is locale-independent.
 //!
 //! The implemented surface is the smallest one Spring's `MessageSourceSupport` static
@@ -669,14 +671,23 @@ fn string_format(
 ) -> Result<Option<Value>, VmError> {
     let pattern = string_argument(shared, args, 0, "String.format")?;
     let arguments = argument_array(shared, args.get(1).copied(), "String.format")?;
-    let text = format_java(shared, thread, &pattern, &arguments, "String.format")?;
+    // The no-locale form uses the default locale's decimal separator, as the JDK does.
+    let separator = decimal_separator(&crate::java_time::host_locale());
+    let text = format_java(
+        shared,
+        thread,
+        &pattern,
+        &arguments,
+        "String.format",
+        separator,
+    )?;
     Ok(Some(Value::Ref(shared.heap().allocate_string(text))))
 }
 
 /// `String.format(Locale, String, Object...)`.
 ///
-/// The locale is ignored: the supported conversions are locale-independent, and a
-/// locale-sensitive conversion is a typed error rather than a silently wrong locale.
+/// The locale supplies the decimal separator for `%f`/`%e`; other locale-sensitive
+/// conversions remain typed errors rather than silently-wrong text.
 fn string_format_locale(
     shared: &Shared,
     thread: &ThreadState,
@@ -686,7 +697,22 @@ fn string_format_locale(
 ) -> Result<Option<Value>, VmError> {
     let pattern = string_argument(shared, args, 1, "String.format")?;
     let arguments = argument_array(shared, args.get(2).copied(), "String.format")?;
-    let text = format_java(shared, thread, &pattern, &arguments, "String.format")?;
+    let tag = match args.first().copied() {
+        Some(Value::Ref(reference)) if !reference.is_null() => shared
+            .time_state()
+            .locale_tag(reference)
+            .unwrap_or_default(),
+        _ => String::new(),
+    };
+    let separator = decimal_separator(&tag);
+    let text = format_java(
+        shared,
+        thread,
+        &pattern,
+        &arguments,
+        "String.format",
+        separator,
+    )?;
     Ok(Some(Value::Ref(shared.heap().allocate_string(text))))
 }
 
@@ -706,6 +732,7 @@ fn format_java(
     pattern: &str,
     arguments: &[Value],
     method: &'static str,
+    separator: char,
 ) -> Result<String, VmError> {
     let mut out = String::new();
     let mut next_argument = 0usize;
@@ -732,6 +759,24 @@ fn format_java(
                 continue;
             }
             _ => {}
+        }
+        // `%[argument_index$]`: an explicit 1-based index; otherwise the conversion takes
+        // the next argument in order. The digits are only an index when they end in `$`.
+        let mut argument_index = None;
+        {
+            let mut look = characters.clone();
+            let mut digits = 0usize;
+            let mut saw_digit = false;
+            while let Some(digit) = look.peek().and_then(|character| character.to_digit(10)) {
+                digits = digits * 10 + digit as usize;
+                look.next();
+                saw_digit = true;
+            }
+            if saw_digit && look.peek() == Some(&'$') {
+                characters = look;
+                characters.next();
+                argument_index = Some(digits);
+            }
         }
         let mut flags = FormatFlags::default();
         while let Some(flag) = characters.peek().copied() {
@@ -789,17 +834,18 @@ fn format_java(
                 "{method}: format string ended inside a conversion"
             )));
         };
-        let argument = arguments.get(next_argument).copied();
-        next_argument += 1;
+        let argument = match argument_index {
+            Some(index) if index >= 1 => arguments.get(index - 1).copied(),
+            Some(_) => None,
+            None => {
+                let argument = arguments.get(next_argument).copied();
+                next_argument += 1;
+                argument
+            }
+        };
+        let index = argument_index.unwrap_or(next_argument).saturating_sub(1);
         let mut text = format_conversion(
-            shared,
-            thread,
-            conversion,
-            argument,
-            precision,
-            flags,
-            next_argument - 1,
-            method,
+            shared, thread, conversion, argument, precision, flags, index, method, separator,
         )?;
         if flags.plus
             && !text.starts_with('-')
@@ -854,6 +900,7 @@ fn format_conversion(
     _flags: FormatFlags,
     index: usize,
     method: &'static str,
+    separator: char,
 ) -> Result<String, VmError> {
     let value = argument.ok_or_else(|| {
         VmError::Native(format!(
@@ -890,7 +937,7 @@ fn format_conversion(
             })
         }
         'c' | 'C' => {
-            let code = integral_value(shared, value, method)?;
+            let code = character_value(shared, value, method)?;
             let character = u32::try_from(code)
                 .ok()
                 .and_then(char::from_u32)
@@ -906,26 +953,44 @@ fn format_conversion(
                 text
             })
         }
-        'd' => Ok(integral_value(shared, value, method)?.to_string()),
-        'o' => Ok(format!("{:o}", integral_value(shared, value, method)?)),
-        'x' => Ok(format!("{:x}", integral_value(shared, value, method)?)),
-        'X' => Ok(format!("{:X}", integral_value(shared, value, method)?)),
+        'd' => {
+            let (value, _) = integral_value(shared, value, method)?;
+            Ok(value.to_string())
+        }
+        'o' | 'x' | 'X' => {
+            let (value, kind) = integral_value(shared, value, method)?;
+            // `Formatter` prints the value at its boxed width (`Byte` -> 2 hex digits,
+            // `Short` -> 4, `Integer` -> 8, `Long` -> 16), so `%x` of `-1` differs by type.
+            let bits = kind.bits();
+            let mask = if bits == 64 {
+                u64::MAX
+            } else {
+                (1u64 << bits) - 1
+            };
+            let masked = (value as u64) & mask;
+            Ok(match conversion {
+                'o' => format!("{masked:o}"),
+                'x' => format!("{masked:x}"),
+                _ => format!("{masked:X}"),
+            })
+        }
         'f' => {
             let number = floating_value(shared, value, method)?;
-            Ok(match precision {
+            let text = match precision {
                 Some(precision) => format!("{number:.precision$}"),
                 None => format!("{number:.6}"),
-            })
+            };
+            Ok(with_separator(text, separator))
         }
         'e' | 'E' => {
             let number = floating_value(shared, value, method)?;
             let precision = precision.unwrap_or(6);
-            let text = format!("{number:.precision$e}");
-            Ok(if conversion == 'E' {
-                text.to_uppercase()
-            } else {
-                text
-            })
+            Ok(scientific_text(
+                number,
+                precision,
+                conversion == 'E',
+                separator,
+            ))
         }
         'h' | 'H' => {
             let text = match value {
@@ -946,33 +1011,119 @@ fn format_conversion(
     }
 }
 
-/// An integer argument for `%d`/`%o`/`%x`/`%c`.
-fn integral_value(shared: &Shared, value: Value, method: &'static str) -> Result<i64, VmError> {
+/// The boxed width of an integral `%d`/`%o`/`%x` argument.
+#[derive(Debug, Clone, Copy)]
+enum IntegralKind {
+    Byte,
+    Short,
+    Integer,
+    Long,
+}
+
+impl IntegralKind {
+    fn bits(self) -> u32 {
+        match self {
+            Self::Byte => 8,
+            Self::Short => 16,
+            Self::Integer => 32,
+            Self::Long => 64,
+        }
+    }
+}
+
+/// An integer argument for `%d`/`%o`/`%x`: its value and the width it prints at.
+fn integral_value(
+    shared: &Shared,
+    value: Value,
+    method: &'static str,
+) -> Result<(i64, IntegralKind), VmError> {
     let Value::Ref(reference) = value else {
         return Err(VmError::Native(format!(
             "{method}: expected a boxed integral argument"
         )));
     };
     let heap = shared.heap();
-    let text = match heap.get(reference).map_err(heap_error)? {
+    match heap.get(reference).map_err(heap_error)? {
         crate::heap::HeapObject::Boxed(boxed) => match boxed {
-            crate::heap::BoxedPrimitive::Byte(value) => *value as i64,
-            crate::heap::BoxedPrimitive::Short(value) => *value as i64,
-            crate::heap::BoxedPrimitive::Integer(value) => *value as i64,
-            crate::heap::BoxedPrimitive::Long(value) => *value,
-            _ => {
-                return Err(VmError::Native(format!(
-                    "{method}: expected a boxed integral argument"
-                )));
+            crate::heap::BoxedPrimitive::Byte(value) => Ok((i64::from(*value), IntegralKind::Byte)),
+            crate::heap::BoxedPrimitive::Short(value) => {
+                Ok((i64::from(*value), IntegralKind::Short))
             }
-        },
-        _ => {
-            return Err(VmError::Native(format!(
+            crate::heap::BoxedPrimitive::Integer(value) => {
+                Ok((i64::from(*value), IntegralKind::Integer))
+            }
+            crate::heap::BoxedPrimitive::Long(value) => Ok((*value, IntegralKind::Long)),
+            _ => Err(VmError::Native(format!(
                 "{method}: expected a boxed integral argument"
-            )));
-        }
+            ))),
+        },
+        _ => Err(VmError::Native(format!(
+            "{method}: expected a boxed integral argument"
+        ))),
+    }
+}
+
+/// A `%c` argument: a `Character`, or one of the integral boxes the JDK also accepts.
+fn character_value(shared: &Shared, value: Value, method: &'static str) -> Result<i64, VmError> {
+    let Value::Ref(reference) = value else {
+        return Err(VmError::Native(format!(
+            "{method}: expected a character argument"
+        )));
     };
-    Ok(text)
+    let heap = shared.heap();
+    match heap.get(reference).map_err(heap_error)? {
+        crate::heap::HeapObject::Boxed(crate::heap::BoxedPrimitive::Character(value)) => {
+            Ok(i64::from(u32::from(*value)))
+        }
+        crate::heap::HeapObject::Boxed(crate::heap::BoxedPrimitive::Byte(value)) => {
+            Ok(i64::from(*value))
+        }
+        crate::heap::HeapObject::Boxed(crate::heap::BoxedPrimitive::Short(value)) => {
+            Ok(i64::from(*value))
+        }
+        crate::heap::HeapObject::Boxed(crate::heap::BoxedPrimitive::Integer(value)) => {
+            Ok(i64::from(*value))
+        }
+        _ => Err(VmError::Native(format!(
+            "{method}: expected a character argument"
+        ))),
+    }
+}
+
+/// The locale's decimal separator, for `%f`/`%e`.
+fn with_separator(text: String, separator: char) -> String {
+    if separator == '.' {
+        text
+    } else {
+        text.replace('.', &separator.to_string())
+    }
+}
+
+/// `%e`: the mantissa at `precision`, then `e±NN` with at least two exponent digits.
+fn scientific_text(number: f64, precision: usize, upper: bool, separator: char) -> String {
+    let text = format!("{number:.precision$e}");
+    let (mantissa, exponent) = text.split_once('e').unwrap_or((&text, "0"));
+    let exponent: i32 = exponent.parse().unwrap_or(0);
+    let sign = if exponent < 0 { '-' } else { '+' };
+    let marker = if upper { 'E' } else { 'e' };
+    format!(
+        "{}{marker}{sign}{:02}",
+        with_separator(mantissa.to_owned(), separator),
+        exponent.abs()
+    )
+}
+
+/// The `Locale`'s decimal separator by language. The JDK reads CLDR data; this table
+/// covers the comma-decimal languages and defaults to '.' for the rest, which is the
+/// boundary recorded in the module docs.
+fn decimal_separator(tag: &str) -> char {
+    let language = tag.split(['-', '_']).next().unwrap_or("");
+    match language {
+        "de" | "fr" | "it" | "es" | "pt" | "nl" | "pl" | "ru" | "tr" | "id" | "vi" | "ro"
+        | "cs" | "da" | "fi" | "nb" | "sv" | "el" | "hu" | "uk" | "bg" | "hr" | "sk" | "sl"
+        | "lt" | "lv" | "et" | "is" | "ca" | "eu" | "gl" => ',',
+        _ => '.',
+    }
 }
 
 /// A floating-point argument for `%f`/`%e`.
