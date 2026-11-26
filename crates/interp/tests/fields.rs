@@ -36,6 +36,8 @@ const PROBE: &str = "demo/FieldsProbe";
 const ACC_PUBLIC: u16 = 0x0001;
 const ACC_PRIVATE: u16 = 0x0002;
 const ACC_STATIC: u16 = 0x0008;
+const ACC_INTERFACE: u16 = 0x0200;
+const ACC_ABSTRACT: u16 = 0x0400;
 const ACC_PUBLIC_STATIC: u16 = ACC_PUBLIC | ACC_STATIC;
 
 /// The exact stock JDK 17 output of `demo.FieldsProbe.run()`.
@@ -200,13 +202,26 @@ fn orphan_bytes() -> Vec<u8> {
     builder.field(ACC_PUBLIC, "own", "I");
     builder.field(ACC_PRIVATE, "secret", "I");
     builder.field(ACC_PUBLIC | ACC_STATIC, "OWN_STATIC", "I");
+    let mut own_method = Assembler::new();
+    own_method.return_();
+    builder.method(
+        ACC_PUBLIC,
+        "ownMethod",
+        "()V",
+        Some((0, 1, own_method.finish().unwrap())),
+    );
     builder.build()
 }
 
 fn orphan_interface_bytes() -> Vec<u8> {
-    let mut builder = ClassBuilder::new("demo/OrphanInterface", "java/lang/Object", 61);
+    let mut builder = ClassBuilder::new("demo/OrphanInterface", "java/lang/Object", 61)
+        .with_access(ACC_PUBLIC | ACC_INTERFACE | ACC_ABSTRACT);
+    // `java/lang/Runnable` is in the C1 tree; `demo/MissingInterface` is not. The query must
+    // report the present one and skip the absent one.
+    builder.interface("java/lang/Runnable");
     builder.interface("demo/MissingInterface");
     builder.field(ACC_PUBLIC, "marked", "I");
+    builder.method(ACC_PUBLIC | ACC_ABSTRACT, "ownMethod", "()V", None);
     builder.build()
 }
 
@@ -220,6 +235,14 @@ fn helper_bytes() -> Vec<u8> {
     );
     let field_get_name =
         builder.method_ref("java/lang/reflect/Field", "getName", "()Ljava/lang/String;");
+    let class_get_methods = builder.method_ref(
+        "java/lang/Class",
+        "getMethods",
+        "()[Ljava/lang/reflect/Method;",
+    );
+    let class_get_interfaces =
+        builder.method_ref("java/lang/Class", "getInterfaces", "()[Ljava/lang/Class;");
+    let class_get_name = builder.method_ref("java/lang/Class", "getName", "()Ljava/lang/String;");
 
     let mut count = Assembler::new();
     count.aload(0);
@@ -245,6 +268,47 @@ fn helper_bytes() -> Vec<u8> {
         "firstName",
         "(Ljava/lang/Class;)Ljava/lang/String;",
         Some((2, 1, first_name.finish().unwrap())),
+    );
+
+    // `int methodCount(Class)`: `getMethods().length`.
+    let mut method_count = Assembler::new();
+    method_count.aload(0);
+    method_count.invokevirtual(class_get_methods);
+    method_count.arraylength();
+    method_count.ireturn();
+    builder.method(
+        ACC_PUBLIC_STATIC,
+        "methodCount",
+        "(Ljava/lang/Class;)I",
+        Some((1, 1, method_count.finish().unwrap())),
+    );
+
+    // `int interfaceCount(Class)`: `getInterfaces().length`.
+    let mut interface_count = Assembler::new();
+    interface_count.aload(0);
+    interface_count.invokevirtual(class_get_interfaces);
+    interface_count.arraylength();
+    interface_count.ireturn();
+    builder.method(
+        ACC_PUBLIC_STATIC,
+        "interfaceCount",
+        "(Ljava/lang/Class;)I",
+        Some((1, 1, interface_count.finish().unwrap())),
+    );
+
+    // `String firstInterfaceName(Class)`: `getInterfaces()[0].getName()`.
+    let mut first_interface = Assembler::new();
+    first_interface.aload(0);
+    first_interface.invokevirtual(class_get_interfaces);
+    first_interface.iconst(0);
+    first_interface.aaload();
+    first_interface.invokevirtual(class_get_name);
+    first_interface.areturn();
+    builder.method(
+        ACC_PUBLIC_STATIC,
+        "firstInterfaceName",
+        "(Ljava/lang/Class;)Ljava/lang/String;",
+        Some((2, 1, first_interface.finish().unwrap())),
     );
 
     builder.build()
@@ -336,4 +400,99 @@ fn an_omitted_superclass_or_interface_ends_the_branch_instead_of_failing() {
         ),
     );
     assert_eq!(interface_first, "marked");
+}
+
+/// `Class.getMethods()` and `Class.getInterfaces()` share the `getFields()` tolerance: an
+/// absent superclass or superinterface ends that branch, a present one is still reported,
+/// and the query answers instead of failing.
+#[test]
+fn get_methods_and_get_interfaces_skip_an_omitted_owner() {
+    let fixture = fixture();
+    let orphan = fixture
+        .shared
+        .define_class(LoaderId::BOOTSTRAP, "demo/Orphan", &orphan_bytes())
+        .expect("the orphan defines");
+    let orphan_interface = fixture
+        .shared
+        .define_class(
+            LoaderId::BOOTSTRAP,
+            "demo/OrphanInterface",
+            &orphan_interface_bytes(),
+        )
+        .expect("the interface orphan defines");
+    let helper = fixture
+        .shared
+        .define_class(LoaderId::BOOTSTRAP, "FieldsHelper", &helper_bytes())
+        .expect("the helper defines");
+    let orphan_object = fixture
+        .shared
+        .class_object(orphan)
+        .expect("the orphan class object");
+    let interface_object = fixture
+        .shared
+        .class_object(orphan_interface)
+        .expect("the interface orphan class object");
+
+    // `demo/Orphan` declares one public method (`ownMethod`); the absent `demo/MissingSuper`
+    // contributes nothing and does not fail the query.
+    assert_eq!(
+        int_value(ok_call(
+            &fixture,
+            helper,
+            "methodCount",
+            "(Ljava/lang/Class;)I",
+            vec![Value::Ref(orphan_object)],
+        )),
+        1,
+        "only ownMethod is reachable"
+    );
+    assert_eq!(
+        int_value(ok_call(
+            &fixture,
+            helper,
+            "interfaceCount",
+            "(Ljava/lang/Class;)I",
+            vec![Value::Ref(orphan_object)],
+        )),
+        0
+    );
+
+    // `demo/OrphanInterface` declares `ownMethod` and implements `java/lang/Runnable`
+    // (present) plus `demo/MissingInterface` (absent): the methods are ownMethod and
+    // Runnable.run, and the interface query reports Runnable only.
+    assert_eq!(
+        int_value(ok_call(
+            &fixture,
+            helper,
+            "methodCount",
+            "(Ljava/lang/Class;)I",
+            vec![Value::Ref(interface_object)],
+        )),
+        2,
+        "ownMethod plus Runnable.run; MissingInterface contributes nothing"
+    );
+    assert_eq!(
+        int_value(ok_call(
+            &fixture,
+            helper,
+            "interfaceCount",
+            "(Ljava/lang/Class;)I",
+            vec![Value::Ref(interface_object)],
+        )),
+        1,
+        "Runnable is present, MissingInterface is skipped"
+    );
+    assert_eq!(
+        string_value(
+            &fixture.shared,
+            ok_call(
+                &fixture,
+                helper,
+                "firstInterfaceName",
+                "(Ljava/lang/Class;)Ljava/lang/String;",
+                vec![Value::Ref(interface_object)],
+            ),
+        ),
+        "java.lang.Runnable"
+    );
 }

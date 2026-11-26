@@ -25,7 +25,7 @@ index; the [slice records](docs/slices/README.md) own the per-slice commands and
 
 Proven today: `compat check` resolves 1,047 classes and 4,851 member records with 0
 unresolved; the C1 metadata diff is 0 across 1,011 referenced classes; the workspace
-passes 560 tests plus `cargo fmt --all --check` and
+passes 562 tests plus `cargo fmt --all --check` and
 `cargo clippy --workspace --all-targets -- -D warnings`; and
 `RAVA_C2_ACCEPTANCE=1 cargo test -p rava-cli --test c2_gate` exits 0 with real Proxy,
 CGLIB, Objenesis, Spring AOP and an `Unsafe` U0-only log. M4.1 adds real `file:` and
