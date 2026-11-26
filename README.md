@@ -4,8 +4,7 @@ A Java 17 runtime in Rust, built to run Spring — not just a corpus.
 
 ## Status
 
-**M0, M1, M2 and M3 are complete (2026-11-25); M4 is in progress (M4.1, M4.2, M4.3
-and M4.4 landed).** A pinned Spring
+**M0, M1, M2, M3 and M4 are complete (2026-11-26).** A pinned Spring
 `AnnotationConfigApplicationContext` starts on rava, returns its `hello` bean and exits
 0; the C2 gate additionally runs Proxy, CGLIB, Objenesis, Spring AOP and an
 `Unsafe` U0-only call log. The [project ledger](PROJECT.md) owns the per-slice record,
@@ -17,7 +16,7 @@ commands and evidence.
 | M1 | Target lock, surface manifest, stub library and link-check | done |
 | M2 | C1 metadata, minimal class library, first Spring context | done |
 | M3 | C2 dynamic code: `Proxy`, CGLIB, Objenesis, `Lookup`, `Unsafe` U0 | done |
-| M4 | C3 resources and jars, `-jar`, non-web Boot | in progress |
+| M4 | C3 resources and jars, `-jar`, non-web Boot | done |
 | M5 | C3 concurrency and the Java memory model, references, cleaner, Tomcat | planned |
 | M6 | C4 reference web application | planned |
 | M7 | Spring test subset | planned |
@@ -26,7 +25,7 @@ commands and evidence.
 
 Proven today: `compat check` resolves 1,047 classes and 4,851 member records with 0
 unresolved; the C1 metadata diff is 0 across 1,011 referenced classes; the workspace
-passes 552 tests plus `cargo fmt --all --check` and
+passes 555 tests plus `cargo fmt --all --check` and
 `cargo clippy --workspace --all-targets -- -D warnings`; and
 `RAVA_C2_ACCEPTANCE=1 cargo test -p rava-cli --test c2_gate` exits 0 with real Proxy,
 CGLIB, Objenesis, Spring AOP and an `Unsafe` U0-only log. M4.1 adds real `file:` and
@@ -38,7 +37,11 @@ CGLIB, Objenesis, Spring AOP and an `Unsafe` U0-only log. M4.1 adds real `file:`
 (`cargo test -p rava-cli --test jar_launch`); M4.4 adds Spring Boot's nested-jar layout
 (`BOOT-INF/classes`, `BOOT-INF/lib/*.jar`, nested `jar:` URLs) and launches a Boot jar's
 `Start-Class` (or its ordinary `Main-Class`) over a Boot-aware class source
-(`cargo test -p rava-cli --test nested_jars`). The non-web Boot gate (M4.5) is next.
+(`cargo test -p rava-cli --test nested_jars`); M4.5 starts a real non-web Boot context
+and its `ApplicationRunner` on the pinned jars (`RAVA_BOOT_ACCEPTANCE=1 cargo test -p
+rava-cli --test boot_nonweb`) and prints `boot:started`. The fixture is a minimal
+`@SpringBootConfiguration` application without `@EnableAutoConfiguration`; the full
+auto-configuration graph is the next C3 increment, as the ledger's M4.5 boundary records.
 Known gaps are listed in the
 [M3 history note](docs/notes/M3.md); the local long/double slot bug (#52) is fixed, and
 `Class.getFields` (#53) is implemented against the observed C1 tree, whose 69/35/44
@@ -129,6 +132,14 @@ The launcher detects the `BOOT-INF/classes`/`BOOT-INF/lib` layout and runs the m
 classes, so this is a documented launcher substitution, not a run of Boot's `JarLauncher`
 or a `URLClassLoader`. A Boot layout's manifest `Class-Path` is ignored; see
 [the class-loading explanation](docs/explanation/class-loading-and-libraries.md#5d-spring-boot-nested-jars-m44).
+
+The M4.5 Boot gate (needs the fetched `compat/jars`):
+
+```console
+cargo run -p rava-cli -- run demo.BootNonWeb --stdlib stdlib/c1/classes \
+  --cp crates/cli/tests/fixtures/boot_nonweb/classes:$(ls compat/jars/*.jar | tr '\n' ':')
+# ends with: boot:started
+```
 
 The runner's tests need no JDK:
 

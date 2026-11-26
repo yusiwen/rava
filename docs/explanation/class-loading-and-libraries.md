@@ -274,6 +274,39 @@ without `Start-Class` (exit 1), an ordinary `Main-Class` in a Boot layout runnin
 central-directory) nested-jar order, and eager in-memory indexing of every nested jar
 (no lazy or streaming access).
 
+## 5e. Non-web Boot startup (M4.5)
+
+The M4.5 gate runs a real Boot application on the pinned `compat/jars` classpath:
+`SpringApplication` constructed from a `@SpringBootConfiguration` class, with
+`WebApplicationType.NONE`, and one `@Bean ApplicationRunner` that prints `boot:started`.
+The fixture deliberately omits `@EnableAutoConfiguration` (so it is not
+`@SpringBootApplication`): that keeps the gate about the Boot startup path rather than
+about Jackson, SSL, HTTP message converters and task-executor auto-configuration, which
+are the next C3 increment. The fixture is committed as source plus its
+`javac --release 17` class file, so the gate needs no JDK.
+
+The startup path exercises the ordinary loader/native machinery described above, not a
+Boot-specific path. The general gaps the run exposed and this slice filled include the
+`java.time` instant/zone/formatter/clock surface (logback's `CachingDateFormatter` and
+Boot's startup timing), `String.format`/`getBytes`/`chars`, `java.util.logging` and
+`java.beans` introspection, `LinkedBlockingQueue` (SLF4J 2's substitute provider),
+`InheritableThreadLocal`, `EnumSet`/`EnumMap`, Java `equals` and interface-default
+dispatch, record `equals`/`toString` bootstraps, `java.io` readers/files and
+`java.net.URI`, `java.lang.management.RuntimeMXBean`, `BigInteger`, `SecureRandom` and
+`BitSet`. Those are ordinary JDK classes with observed behavior; they are not stubs and
+they are not selected by class name for Boot.
+
+The M4.5 boundary is honest about the seams: the VM is single-threaded until M5
+(`Thread.start` does not run the task, `CountDownLatch.await` and
+`LinkedBlockingQueue.put`/`take` fail only when they would block, no executor factory
+creates workers); a missing class literal throws the JVM's catchable
+`NoClassDefFoundError`; an omitted C1 superclass ends a resolution walk rather than
+inventing members; Java stack traces are not recorded, so `Throwable.getStackTrace`
+returns an empty array; and the full auto-configuration graph is beyond the gate. The
+gate runs the built CLI with the fixture classes plus every pinned jar, under a 64 MiB
+child stack and a timeout, and asserts exit 0 and `boot:started`
+(`RAVA_BOOT_ACCEPTANCE=1 cargo test -p rava-cli --test boot_nonweb`).
+
 ## 6. Native dispatch: registry before `Code`
 
 C1 methods generally have **no `Code` and no `ACC_NATIVE`**. The registry is keyed by
@@ -348,6 +381,7 @@ $ cargo test -p rava-cli --test classpath_run       # directory/jar/order/missin
 $ cargo test -p rava-cli --test resources          # classpath resources, URLs and streams
 $ cargo test -p rava-cli --test service_loader     # META-INF/services and lazy providers
 $ cargo test -p rava-cli --test nested_jars         # Boot nested jars, URLs, Start-Class
+$ RAVA_BOOT_ACCEPTANCE=1 cargo test -p rava-cli --test boot_nonweb  # non-web Boot startup
 $ cargo run -p rava-cli -- compat check             # manifest + synthetic link tree
 $ RAVA_SPRING_ACCEPTANCE=1 cargo test -p rava-cli --test spring_context
 ```
