@@ -16,11 +16,22 @@
 //! A `null` probe is the JDK's `Objects.equals(null, element)` case: null matches null and
 //! nothing else. A non-null probe calls the probe's own `equals(element)`, the receiver
 //! order the JDK collections use.
+//!
+//! Map key and value operations follow the same rule for the listed operations; `put`
+//! keeps the stored key object when an equal key arrives, and `IdentityHashMap` is the
+//! exception (reference identity, including a `Map`-typed call, which checks the receiver's
+//! runtime class). Map copy constructors and the set bulk operations still copy with the
+//! `rava-vm` rule; they are tracked separately.
 
 use rava_vm::collections::{
     ARRAY_DEQUE_CLASS, ARRAY_LIST_CLASS, CONCURRENT_LINKED_DEQUE_CLASS,
     CONCURRENT_LINKED_QUEUE_CLASS, COPY_ON_WRITE_ARRAY_LIST_CLASS, COPY_ON_WRITE_ARRAY_SET_CLASS,
     HASH_SET_CLASS, LINKED_HASH_SET_CLASS, LINKED_LIST_CLASS, TREE_SET_CLASS,
+};
+use rava_vm::maps::{
+    CONCURRENT_HASH_MAP_CLASS, ENUM_MAP_CLASS, HASH_MAP_CLASS, HASHTABLE_CLASS,
+    IDENTITY_HASH_MAP_CLASS, LINKED_HASH_MAP_CLASS, PROPERTIES_CLASS, TREE_MAP_CLASS,
+    WEAK_HASH_MAP_CLASS,
 };
 use rava_vm::{HeapObject, LoaderId, ObjRef, Shared, ThreadState, Value, VmError};
 
@@ -50,6 +61,22 @@ const SET_TYPES: [&str; 8] = [
     "java/util/AbstractSet",
     "java/util/AbstractCollection",
     "java/util/Collection",
+];
+
+/// The map classes whose key and value comparisons call Java `equals`. `IdentityHashMap`
+/// is excluded: its JDK contract is reference identity, which is the VM's default; a call
+/// through the `Map` interface still checks the receiver's runtime class below.
+const MAP_TYPES: [&str; 10] = [
+    HASH_MAP_CLASS,
+    LINKED_HASH_MAP_CLASS,
+    TREE_MAP_CLASS,
+    WEAK_HASH_MAP_CLASS,
+    CONCURRENT_HASH_MAP_CLASS,
+    HASHTABLE_CLASS,
+    PROPERTIES_CLASS,
+    ENUM_MAP_CLASS,
+    "java/util/Map",
+    "java/util/AbstractMap",
 ];
 
 /// Install the `equals`-based membership overrides.
@@ -115,6 +142,436 @@ pub fn register_natives(shared: &Shared) {
     ] {
         shared.register_native(class, "equals", "(Ljava/lang/Object;)Z", map_equals);
     }
+    for class in MAP_TYPES {
+        register_map_membership(shared, class);
+    }
+}
+
+/// Install the `equals`-based key and value operations for one map class or interface.
+fn register_map_membership(shared: &Shared, class: &'static str) {
+    for (name, descriptor, function) in [
+        (
+            "get",
+            "(Ljava/lang/Object;)Ljava/lang/Object;",
+            map_get as rava_vm::NativeFn,
+        ),
+        (
+            "getOrDefault",
+            "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;",
+            map_get_or_default,
+        ),
+        ("containsKey", "(Ljava/lang/Object;)Z", map_contains_key),
+        ("containsValue", "(Ljava/lang/Object;)Z", map_contains_value),
+        (
+            "put",
+            "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;",
+            map_put,
+        ),
+        (
+            "putIfAbsent",
+            "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;",
+            map_put_if_absent,
+        ),
+        (
+            "computeIfAbsent",
+            "(Ljava/lang/Object;Ljava/util/function/Function;)Ljava/lang/Object;",
+            map_compute_if_absent,
+        ),
+        (
+            "remove",
+            "(Ljava/lang/Object;)Ljava/lang/Object;",
+            map_remove,
+        ),
+        (
+            "remove",
+            "(Ljava/lang/Object;Ljava/lang/Object;)Z",
+            map_remove_pair,
+        ),
+    ] {
+        shared.register_native(class, name, descriptor, function);
+    }
+}
+
+/// A map receiver's entries `(key, value)`, cloned so no heap lock is held across Java.
+fn map_entries(
+    shared: &Shared,
+    receiver: ObjRef,
+    method: &'static str,
+) -> Result<Vec<(Value, Value)>, VmError> {
+    let heap = shared.heap();
+    match heap.get(receiver) {
+        Ok(HeapObject::Map(map)) => Ok(map.entries.clone()),
+        Ok(_) => Err(VmError::Native(format!(
+            "{method} receiver is not a java.util.Map"
+        ))),
+        Err(error) => Err(VmError::Native(error.to_string())),
+    }
+}
+
+/// Whether the receiver's runtime class is `IdentityHashMap` (identity comparisons).
+fn map_uses_identity(shared: &Shared, receiver: ObjRef) -> Result<bool, VmError> {
+    let class = shared
+        .heap()
+        .object_class(receiver)
+        .map_err(|error| VmError::Native(error.to_string()))?;
+    let name = shared
+        .entry(class)
+        .map(|entry| entry.name.clone())
+        .unwrap_or_default();
+    Ok(name == IDENTITY_HASH_MAP_CLASS)
+}
+
+/// The JDK's key/value comparison for this receiver: Java `equals`, or identity.
+fn map_values_equal(
+    shared: &Shared,
+    thread: &ThreadState,
+    identity: bool,
+    probe: Value,
+    stored: Value,
+) -> Result<bool, VmError> {
+    if identity {
+        return Ok(probe == stored);
+    }
+    objects_equal(shared, thread, probe, stored).map_err(interp_to_vm)
+}
+
+fn interp_to_vm(error: InterpError) -> VmError {
+    match error {
+        InterpError::Vm(error) => error,
+        InterpError::Thrown(throwable) => VmError::Thrown(throwable),
+        other => VmError::Native(other.to_string()),
+    }
+}
+
+/// The position of `probe` in `entries`, by the receiver's comparison rule.
+fn map_position(
+    shared: &Shared,
+    thread: &ThreadState,
+    identity: bool,
+    entries: &[(Value, Value)],
+    probe: Value,
+) -> Result<Option<usize>, VmError> {
+    for (position, (key, _)) in entries.iter().enumerate() {
+        if map_values_equal(shared, thread, identity, probe, *key)? {
+            return Ok(Some(position));
+        }
+    }
+    Ok(None)
+}
+
+/// Record a `LinkedHashMap` access-order touch after a successful read or update.
+fn touch_map_entry(shared: &Shared, receiver: ObjRef, position: usize) -> Result<(), VmError> {
+    let mut heap = shared.heap();
+    if !heap
+        .map_access_order(receiver)
+        .map_err(|error| VmError::Native(error.to_string()))?
+    {
+        return Ok(());
+    }
+    let entries = heap
+        .map_mut(receiver)
+        .map_err(|error| VmError::Native(error.to_string()))?;
+    if position < entries.len() {
+        let entry = entries.remove(position);
+        entries.push(entry);
+    }
+    Ok(())
+}
+
+fn map_reference_argument(
+    args: &[Value],
+    position: usize,
+    method: &str,
+) -> Result<ObjRef, VmError> {
+    match args.get(position).copied() {
+        Some(Value::Ref(reference)) => Ok(reference),
+        Some(_) => Err(VmError::Native(format!(
+            "{method} expects a reference argument"
+        ))),
+        None => Err(VmError::Native(format!("{method} is missing its argument"))),
+    }
+}
+
+fn map_get(
+    shared: &Shared,
+    thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let key = map_reference_argument(args, 0, "Map.get")?;
+    let entries = map_entries(shared, receiver, "Map.get")?;
+    let identity = map_uses_identity(shared, receiver)?;
+    match map_position(shared, thread, identity, &entries, Value::Ref(key))? {
+        Some(position) => {
+            let value = entries[position].1;
+            touch_map_entry(shared, receiver, position)?;
+            Ok(Some(value))
+        }
+        None => Ok(Some(Value::Ref(ObjRef::NULL))),
+    }
+}
+
+fn map_contains_key(
+    shared: &Shared,
+    thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let key = map_reference_argument(args, 0, "Map.containsKey")?;
+    let entries = map_entries(shared, receiver, "Map.containsKey")?;
+    let identity = map_uses_identity(shared, receiver)?;
+    let found = map_position(shared, thread, identity, &entries, Value::Ref(key))?.is_some();
+    Ok(Some(Value::Int(i32::from(found))))
+}
+
+fn map_contains_value(
+    shared: &Shared,
+    thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let value = map_reference_argument(args, 0, "Map.containsValue")?;
+    let entries = map_entries(shared, receiver, "Map.containsValue")?;
+    let identity = map_uses_identity(shared, receiver)?;
+    for (_, stored) in &entries {
+        if map_values_equal(shared, thread, identity, Value::Ref(value), *stored)? {
+            return Ok(Some(Value::Int(1)));
+        }
+    }
+    Ok(Some(Value::Int(0)))
+}
+
+fn map_put(
+    shared: &Shared,
+    thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let key = map_reference_argument(args, 0, "Map.put")?;
+    let value = map_reference_argument(args, 1, "Map.put")?;
+    let entries = map_entries(shared, receiver, "Map.put")?;
+    let identity = map_uses_identity(shared, receiver)?;
+    let position = map_position(shared, thread, identity, &entries, Value::Ref(key))?;
+    let previous = {
+        let mut heap = shared.heap();
+        let entries = heap
+            .map_mut(receiver)
+            .map_err(|error| VmError::Native(error.to_string()))?;
+        match position {
+            Some(position) => std::mem::replace(&mut entries[position].1, Value::Ref(value)),
+            None => {
+                entries.push((Value::Ref(key), Value::Ref(value)));
+                Value::Ref(ObjRef::NULL)
+            }
+        }
+    };
+    if let Some(position) = position {
+        // An update of an existing key is an access for an access-ordered map.
+        touch_map_entry(shared, receiver, position)?;
+    }
+    Ok(Some(previous))
+}
+
+fn map_put_if_absent(
+    shared: &Shared,
+    thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let key = map_reference_argument(args, 0, "Map.putIfAbsent")?;
+    let value = map_reference_argument(args, 1, "Map.putIfAbsent")?;
+    let entries = map_entries(shared, receiver, "Map.putIfAbsent")?;
+    let identity = map_uses_identity(shared, receiver)?;
+    let position = map_position(shared, thread, identity, &entries, Value::Ref(key))?;
+    match position {
+        Some(position) => {
+            let existing = entries[position].1;
+            if existing != Value::Ref(ObjRef::NULL) {
+                touch_map_entry(shared, receiver, position)?;
+                return Ok(Some(existing));
+            }
+            // A mapping to null is replaced, as `putIfAbsent` does on the JDK.
+            {
+                let mut heap = shared.heap();
+                let entries = heap
+                    .map_mut(receiver)
+                    .map_err(|error| VmError::Native(error.to_string()))?;
+                entries[position].1 = Value::Ref(value);
+            }
+            touch_map_entry(shared, receiver, position)?;
+            Ok(Some(Value::Ref(ObjRef::NULL)))
+        }
+        None => {
+            shared
+                .heap()
+                .map_mut(receiver)
+                .map_err(|error| VmError::Native(error.to_string()))?
+                .push((Value::Ref(key), Value::Ref(value)));
+            Ok(Some(Value::Ref(ObjRef::NULL)))
+        }
+    }
+}
+
+fn map_get_or_default(
+    shared: &Shared,
+    thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let key = map_reference_argument(args, 0, "Map.getOrDefault")?;
+    let fallback = map_reference_argument(args, 1, "Map.getOrDefault")?;
+    let entries = map_entries(shared, receiver, "Map.getOrDefault")?;
+    let identity = map_uses_identity(shared, receiver)?;
+    match map_position(shared, thread, identity, &entries, Value::Ref(key))? {
+        Some(position) => {
+            let value = entries[position].1;
+            touch_map_entry(shared, receiver, position)?;
+            Ok(Some(value))
+        }
+        None => Ok(Some(Value::Ref(fallback))),
+    }
+}
+
+fn map_compute_if_absent(
+    shared: &Shared,
+    thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let key = map_reference_argument(args, 0, "Map.computeIfAbsent")?;
+    let function = map_reference_argument(args, 1, "Map.computeIfAbsent")?;
+    let entries = map_entries(shared, receiver, "Map.computeIfAbsent")?;
+    let identity = map_uses_identity(shared, receiver)?;
+    let position = map_position(shared, thread, identity, &entries, Value::Ref(key))?;
+    if let Some(position) = position {
+        let existing = entries[position].1;
+        if existing != Value::Ref(ObjRef::NULL) {
+            touch_map_entry(shared, receiver, position)?;
+            return Ok(Some(existing));
+        }
+    }
+    // The JDK runs the function before storing, and a null result stores nothing.
+    let computed = call_function(shared, thread, function, Value::Ref(key))?;
+    let value = match computed {
+        Some(value) => value,
+        None => return Ok(Some(Value::Ref(ObjRef::NULL))),
+    };
+    if value == Value::Ref(ObjRef::NULL) {
+        return Ok(Some(Value::Ref(ObjRef::NULL)));
+    }
+    let mut heap = shared.heap();
+    let entries = heap
+        .map_mut(receiver)
+        .map_err(|error| VmError::Native(error.to_string()))?;
+    match position {
+        Some(position) => entries[position].1 = value,
+        None => entries.push((Value::Ref(key), value)),
+    }
+    Ok(Some(value))
+}
+
+fn call_function(
+    shared: &Shared,
+    thread: &ThreadState,
+    function: ObjRef,
+    argument: Value,
+) -> Result<Option<Value>, VmError> {
+    if function.is_null() {
+        return Err(VmError::Native(
+            "Map.computeIfAbsent received a null Function".to_owned(),
+        ));
+    }
+    // A lambda call site is a `LambdaObject`, not a class with a `Code` body; the
+    // interpreter's SAM invocation is the only way to run it.
+    let lambda = {
+        let heap = shared.heap();
+        match heap.get(function) {
+            Ok(HeapObject::Lambda(lambda)) => Some(lambda.clone()),
+            _ => None,
+        }
+    };
+    if let Some(lambda) = lambda {
+        return crate::lambda::invoke_sam(shared, thread, &lambda, vec![argument])
+            .map_err(interp_to_vm);
+    }
+    let class =
+        runtime_class(shared, function).map_err(|error| VmError::Native(error.to_string()))?;
+    let (entry, _) = resolve_virtual(
+        shared,
+        class,
+        "apply",
+        "(Ljava/lang/Object;)Ljava/lang/Object;",
+    )
+    .map_err(|error| VmError::Native(error.to_string()))?;
+    run_instance_method(
+        shared,
+        thread,
+        entry.id,
+        "apply",
+        "(Ljava/lang/Object;)Ljava/lang/Object;",
+        function,
+        vec![argument],
+    )
+    .map_err(interp_to_vm)
+}
+
+fn map_remove(
+    shared: &Shared,
+    thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let key = map_reference_argument(args, 0, "Map.remove")?;
+    let entries = map_entries(shared, receiver, "Map.remove")?;
+    let identity = map_uses_identity(shared, receiver)?;
+    let Some(position) = map_position(shared, thread, identity, &entries, Value::Ref(key))? else {
+        return Ok(Some(Value::Ref(ObjRef::NULL)));
+    };
+    let removed = shared
+        .heap()
+        .map_mut(receiver)
+        .map_err(|error| VmError::Native(error.to_string()))?
+        .remove(position);
+    Ok(Some(removed.1))
+}
+
+fn map_remove_pair(
+    shared: &Shared,
+    thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let key = map_reference_argument(args, 0, "Map.remove")?;
+    let value = map_reference_argument(args, 1, "Map.remove")?;
+    let entries = map_entries(shared, receiver, "Map.remove")?;
+    let identity = map_uses_identity(shared, receiver)?;
+    let Some(position) = map_position(shared, thread, identity, &entries, Value::Ref(key))? else {
+        return Ok(Some(Value::Int(0)));
+    };
+    if !map_values_equal(
+        shared,
+        thread,
+        identity,
+        Value::Ref(value),
+        entries[position].1,
+    )? {
+        return Ok(Some(Value::Int(0)));
+    }
+    shared
+        .heap()
+        .map_mut(receiver)
+        .map_err(|error| VmError::Native(error.to_string()))?
+        .remove(position);
+    Ok(Some(Value::Int(1)))
 }
 
 /// Snapshot a list's elements, releasing the heap lock before any Java call.
@@ -390,28 +847,41 @@ fn map_equals(
     if left.len() != right.len() {
         return Ok(Some(Value::Int(0)));
     }
-    for (key, value) in &left {
-        let mut matched = false;
-        for (other_key, other_value) in &right {
-            let keys_equal = match objects_equal(shared, thread, *key, *other_key) {
-                Ok(equal) => equal,
-                Err(InterpError::Thrown(throwable)) => return Err(VmError::Thrown(throwable)),
-                Err(error) => return Err(VmError::Native(error.to_string())),
-            };
-            if !keys_equal {
-                continue;
-            }
-            let values_equal = match objects_equal(shared, thread, *value, *other_value) {
-                Ok(equal) => equal,
-                Err(InterpError::Thrown(throwable)) => return Err(VmError::Thrown(throwable)),
-                Err(error) => return Err(VmError::Native(error.to_string())),
-            };
-            if values_equal {
-                matched = true;
-                break;
+    // `IdentityHashMap.equals` is its own contract: the argument must be an
+    // `IdentityHashMap`, and every key and value must be the same reference. It does not
+    // fall back to `AbstractMap.equals`.
+    if map_uses_identity(shared, receiver)? {
+        if !map_uses_identity(shared, other)? {
+            return Ok(Some(Value::Int(0)));
+        }
+        for (key, value) in &left {
+            let matched = right
+                .iter()
+                .any(|(other_key, other_value)| other_key == key && other_value == value);
+            if !matched {
+                return Ok(Some(Value::Int(0)));
             }
         }
-        if !matched {
+        return Ok(Some(Value::Int(1)));
+    }
+    // `AbstractMap.equals`: for each entry in this map, the argument's own `get` (with the
+    // argument's equality rule) must find the same key, and the value's `equals` must
+    // accept the stored value.
+    let right_identity = map_uses_identity(shared, other)?;
+    for (key, value) in &left {
+        let Some(position) = map_position(shared, thread, right_identity, &right, *key)? else {
+            return Ok(Some(Value::Int(0)));
+        };
+        let other_value = right[position].1;
+        let values_equal = match value {
+            Value::Ref(reference) if reference.is_null() => other_value == Value::Ref(ObjRef::NULL),
+            _ => match objects_equal(shared, thread, *value, other_value) {
+                Ok(equal) => equal,
+                Err(InterpError::Thrown(throwable)) => return Err(VmError::Thrown(throwable)),
+                Err(error) => return Err(VmError::Native(error.to_string())),
+            },
+        };
+        if !values_equal {
             return Ok(Some(Value::Int(0)));
         }
     }

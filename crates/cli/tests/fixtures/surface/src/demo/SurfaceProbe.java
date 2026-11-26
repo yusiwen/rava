@@ -4,6 +4,7 @@ import java.beans.PropertyDescriptor;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -138,6 +139,118 @@ public final class SurfaceProbe {
             // The native snapshot has two elements; the consumer counts them.
         }
         return count[0];
+    }
+
+    /** `Map.get` calls the probe key's Java `equals` (collection_equality). */
+    public static boolean mapGetUsesEquals() {
+        Map<Object, Object> map = new HashMap<>();
+        map.put(new Key(3), "x");
+        return "x".equals(map.get(new Key(3)));
+    }
+
+    /** `Map.containsKey` calls the probe key's Java `equals`. */
+    public static boolean mapContainsKeyUsesEquals() {
+        Map<Object, Object> map = new HashMap<>();
+        map.put(new Key(4), "x");
+        return map.containsKey(new Key(4));
+    }
+
+    /** A second equal-key `put` replaces the value and keeps one entry. */
+    public static boolean mapPutReplacesEqualKey() {
+        Map<Object, Object> map = new HashMap<>();
+        map.put(new Key(5), "a");
+        map.put(new Key(5), "b");
+        return map.size() == 1 && "b".equals(map.get(new Key(5)));
+    }
+
+    /** `Map.getOrDefault` finds an equal key and returns its value. */
+    public static boolean mapGetOrDefaultUsesEquals() {
+        Map<Object, Object> map = new HashMap<>();
+        map.put(new Key(6), "value");
+        return "value".equals(map.getOrDefault(new Key(6), "default"));
+    }
+
+    /** `Map.remove(Object)` calls the probe key's Java `equals`. */
+    public static boolean mapRemoveUsesEquals() {
+        Map<Object, Object> map = new HashMap<>();
+        map.put(new Key(7), "value");
+        return "value".equals(map.remove(new Key(7))) && map.isEmpty();
+    }
+
+    /** `Map.remove(Object, Object)` compares both the key and the value. */
+    public static boolean mapRemovePairUsesEquals() {
+        Map<Object, Object> map = new HashMap<>();
+        map.put(new Key(8), "value");
+        return map.remove(new Key(8), "value") && map.isEmpty();
+    }
+
+    /** `Map.containsValue` calls the probe value's Java `equals`. */
+    public static boolean mapContainsValueUsesEquals() {
+        Map<String, Object> map = new HashMap<>();
+        map.put("k", new Key(9));
+        return map.containsValue(new Key(9));
+    }
+
+    /** `Map.putIfAbsent` keeps an existing value for an equal key. */
+    public static boolean mapPutIfAbsentUsesEquals() {
+        Map<Object, Object> map = new HashMap<>();
+        map.put(new Key(10), "a");
+        Object previous = map.putIfAbsent(new Key(10), "b");
+        return "a".equals(previous) && "a".equals(map.get(new Key(10))) && map.size() == 1;
+    }
+
+    /** `Map.computeIfAbsent` computes once for an equal key. */
+    public static int mapComputeIfAbsent() {
+        Map<String, Integer> map = new HashMap<>();
+        int computed = map.computeIfAbsent("k", key -> 42);
+        return computed + map.get("k");
+    }
+
+    /** `IdentityHashMap` stays reference-based and stores both equal keys. */
+    public static int identityMapStoresBoth() {
+        IdentityHashMap<Object, Object> map = new IdentityHashMap<>();
+        map.put(new Key(11), "a");
+        map.put(new Key(11), "b");
+        return map.size();
+    }
+
+    /** A `Map`-typed call on an `IdentityHashMap` still compares by identity. */
+    public static boolean identityMapInterfaceCall() {
+        Map<Object, Object> map = new IdentityHashMap<>();
+        map.put(new Key(12), "a");
+        return map.get(new Key(12)) == null && map.size() == 1;
+    }
+
+    /** The `Map` default (`computeIfAbsent`) keeps identity keys apart. */
+    public static boolean identityMapComputeIfAbsent() {
+        Map<Object, Object> map = new IdentityHashMap<>();
+        map.put(new Key(13), "a");
+        Object computed = map.computeIfAbsent(new Key(13), key -> "b");
+        return "b".equals(computed) && map.size() == 2;
+    }
+
+    /** The `Map` default (`remove(k, v)`) does not remove a distinct equal key. */
+    public static boolean identityMapRemovePair() {
+        Map<Object, Object> map = new IdentityHashMap<>();
+        map.put(new Key(14), "a");
+        return !map.remove(new Key(14), "a") && map.size() == 1;
+    }
+
+    /** `IdentityHashMap.equals` is identity-based and only accepts another identity map. */
+    public static boolean identityMapEquals() {
+        IdentityHashMap<Object, Object> left = new IdentityHashMap<>();
+        IdentityHashMap<Object, Object> right = new IdentityHashMap<>();
+        Object key = new Key(15);
+        left.put(key, "value");
+        right.put(key, "value");
+        boolean same = left.equals(right);
+        right.clear();
+        right.put(new Key(15), "value");
+        boolean distinct = left.equals(right);
+        Map<Object, Object> hashMap = new HashMap<>();
+        hashMap.put(new Key(15), "value");
+        boolean cross = left.equals(hashMap);
+        return same && !distinct && !cross;
     }
 
     /** The three-argument `PropertyDescriptor` constructor (bean_support). */
