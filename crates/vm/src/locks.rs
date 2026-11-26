@@ -74,7 +74,7 @@ pub fn register_natives(shared: &Shared) {
 
     shared.register_native(COUNT_DOWN_LATCH_CLASS, "<init>", "(I)V", latch_init);
     shared.register_native(COUNT_DOWN_LATCH_CLASS, "countDown", "()V", latch_count_down);
-    shared.register_native(COUNT_DOWN_LATCH_CLASS, "getCount", "()I", latch_get_count);
+    shared.register_native(COUNT_DOWN_LATCH_CLASS, "getCount", "()J", latch_get_count);
     shared.register_native(COUNT_DOWN_LATCH_CLASS, "await", "()V", latch_await);
     shared.register_native(
         COUNT_DOWN_LATCH_CLASS,
@@ -294,9 +294,9 @@ fn latch_get_count(
         .latch_state()
         .get(&receiver)
         .ok_or_else(|| VmError::Native("CountDownLatch has no count".to_owned()))?;
-    let count = i32::try_from(count)
-        .map_err(|_| VmError::Native("CountDownLatch count exceeds an int".to_owned()))?;
-    Ok(Some(Value::Int(count)))
+    let count = i64::try_from(count)
+        .map_err(|_| VmError::Native("CountDownLatch count exceeds a long".to_owned()))?;
+    Ok(Some(Value::Long(count)))
 }
 
 /// `CountDownLatch.await()`: return only when the count is already zero.
