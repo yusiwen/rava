@@ -20,3 +20,38 @@ jobs:
           toolchain: 1.100.0
           components: rustfmt, clippy
       - run: cargo xtask ci
+
+  # The milestone gates need the fetched pinned jars. They are opt-in for a local
+  # checkout (`cargo xtask ci` stays jar-free), but a green `ci` job without them proves
+  # nothing about M4/M3/C3, so this job fetches the set and runs the three acceptances.
+  acceptance:
+    name: acceptance
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.100.0
+      - name: Fetch the pinned jars
+        timeout-minutes: 8
+        run: bash compat/fetch-jars.sh
+      - name: Rebuild the Boot fixture from source
+        run: |
+          mkdir -p "${{ runner.temp }}/boot-fixture"
+          javac --release 17 -cp "$(ls compat/jars/*.jar | tr '\n' ':')" \
+            -d "${{ runner.temp }}/boot-fixture" \
+            crates/cli/tests/fixtures/boot_nonweb/src/demo/BootNonWeb.java
+      - name: Run the acceptance gates
+        env:
+          RAVA_BOOT_ACCEPTANCE: '1'
+          RAVA_BOOT_FIXTURE_CLASSES: ${{ runner.temp }}/boot-fixture
+          RAVA_SPRING_ACCEPTANCE: '1'
+          RAVA_C2_ACCEPTANCE: '1'
+        run: |
+          cargo test -p rava-cli \
+            --test boot_nonweb --test spring_context --test c2_gate

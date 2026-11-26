@@ -31,3 +31,11 @@ and their optional C3 dependencies) is the next target, not this gate; enabling 
 would make the gate about those auto-configurations instead of Boot startup. This is a
 documented scope boundary, not a hidden failure: the fixture uses the real Boot classes
 and the real startup path, with a smaller application.
+
+## CI runs the source, not only the committed class
+
+The CI `acceptance` job recompiles `src/demo/BootNonWeb.java` with JDK 17 and points the
+gate at the result with `RAVA_BOOT_FIXTURE_CLASSES`, so CI cannot pass on a stale class
+file. A local checkout without a JDK runs the committed `classes/`, and
+`committed_fixture_has_the_declared_annotations_and_shape` pins that class's version,
+annotation set and entry points without a compiler.

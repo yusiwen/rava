@@ -14,11 +14,20 @@
 //! The child runs with a 64 MiB stack (`ulimit -s 65536`) because Boot's startup nests the
 //! interpreter deeply, and it is killed after [`TIMEOUT`] so a regression that deadlocks
 //! fails instead of hanging `cargo test`.
+//!
+//! `RAVA_BOOT_FIXTURE_CLASSES` points the run at another classes directory: the CI
+//! `acceptance` job recompiles `src/demo/BootNonWeb.java` with JDK 17 and runs that, so the
+//! gate always exercises the committed source rather than a possibly stale class file.
+//! Without the variable the committed `classes/` is used, so a checkout needs no JDK.
+//! [`committed_fixture_has_the_declared_annotations_and_shape`] pins the committed class's
+//! annotation set, class-file version and entry points without a compiler.
 
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
 use std::time::{Duration, Instant};
+
+use rava_classfile::ClassFile;
 
 /// The pinned set's jar count (`compat/jars.lock` and `compat/targets.toml` agree on 35).
 const PINNED_JAR_COUNT: usize = 35;
@@ -48,6 +57,14 @@ fn jars_dir() -> PathBuf {
 
 fn fixture() -> PathBuf {
     manifest_dir().join("tests/fixtures/boot_nonweb")
+}
+
+/// The classes directory the gate runs: the committed one, or the rebuild the CI
+/// `acceptance` job produced from the same source.
+fn fixture_classes() -> PathBuf {
+    std::env::var_os("RAVA_BOOT_FIXTURE_CLASSES")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| fixture().join("classes"))
 }
 
 fn acceptance_mode() -> bool {
@@ -121,7 +138,7 @@ fn require_jars() -> Option<Vec<String>> {
 
 fn classpath(jars: &[String]) -> String {
     let mut entries = Vec::with_capacity(jars.len() + 1);
-    entries.push(fixture().join("classes").to_string_lossy().into_owned());
+    entries.push(fixture_classes().to_string_lossy().into_owned());
     for name in jars {
         entries.push(jars_dir().join(name).to_string_lossy().into_owned());
     }
@@ -182,7 +199,7 @@ fn boot_nonweb_application_starts_and_prints_the_marker() {
     let Some(jars) = require_jars() else {
         return;
     };
-    if std::env::var_os("RAVA_BOOT_ACCEPTANCE").is_none() {
+    if !acceptance_mode() {
         eprintln!("skipping the M4.5 Boot acceptance run: set RAVA_BOOT_ACCEPTANCE=1 to run it");
         return;
     }
@@ -228,5 +245,60 @@ fn boot_fixture_class_is_committed() {
     assert!(
         fixture().join("src/demo/BootNonWeb.java").is_file(),
         "the fixture source is committed so the class file can be rebuilt"
+    );
+}
+
+/// The committed class still declares the fixture the gate claims to run.
+///
+/// The gate itself cannot see a drift between `src/demo/BootNonWeb.java` and the committed
+/// class: an edited source without a rebuild would run the old application. CI recompiles
+/// the source with JDK 17 (`RAVA_BOOT_FIXTURE_CLASSES`), and this test pins the committed
+/// class's shape without a compiler: Java 17, a `@SpringBootConfiguration` context, no
+/// `@EnableAutoConfiguration`/`@SpringBootApplication`, and the two entry points.
+#[test]
+fn committed_fixture_has_the_declared_annotations_and_shape() {
+    let class = fixture().join("classes/demo/BootNonWeb.class");
+    let bytes = fs::read(&class).expect("the committed fixture class is readable");
+    let metadata = ClassFile::parse(&bytes)
+        .expect("the committed fixture parses")
+        .metadata()
+        .expect("the committed fixture metadata decodes");
+
+    assert_eq!(
+        metadata.major_version, 61,
+        "the fixture must be compiled with `javac --release 17`"
+    );
+    let annotations: Vec<&str> = metadata
+        .annotations
+        .iter()
+        .map(|annotation| annotation.type_descriptor.as_str())
+        .collect();
+    assert!(
+        annotations.contains(&"Lorg/springframework/boot/SpringBootConfiguration;"),
+        "the fixture must be a Boot configuration, found {annotations:?}"
+    );
+    assert!(
+        !annotations.iter().any(|descriptor| {
+            descriptor.contains("EnableAutoConfiguration")
+                || descriptor.contains("SpringBootApplication")
+        }),
+        "the M4.5 fixture must not enable auto-configuration, found {annotations:?}"
+    );
+    let has_method = |name: &str, descriptor: &str| {
+        metadata
+            .methods
+            .iter()
+            .any(|method| method.name == name && method.descriptor == descriptor)
+    };
+    assert!(
+        has_method("main", "([Ljava/lang/String;)V"),
+        "the fixture's main(String[]) entry point is missing"
+    );
+    assert!(
+        has_method(
+            "bootMarker",
+            "()Lorg/springframework/boot/ApplicationRunner;"
+        ),
+        "the fixture's @Bean ApplicationRunner is missing"
     );
 }
