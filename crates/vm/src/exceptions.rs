@@ -5,10 +5,12 @@
 //! these constructors runs. The object itself is an ordinary instance, so `athrow`,
 //! handler matching and `getClass()` behave exactly as for a compiled throwable.
 //!
-//! Only construction, `getMessage`, `getLocalizedMessage`, `getCause`, `initCause`,
-//! `toString` and a no-op `printStackTrace` are modelled. Stack traces, suppressed
-//! exceptions and `fillInStackTrace` are M5/M6 work; `getCause` returns null unless
-//! `initCause` set it, which is the JDK's behavior for a constructor without a cause.
+//! Construction, `getMessage`, `getLocalizedMessage`, `getCause`, `initCause`, `toString`,
+//! `printStackTrace`, `addSuppressed`/`getSuppressed` and an empty `getStackTrace` are
+//! modelled. Stack frames and `fillInStackTrace` are M5/M6 work, so the trace has no
+//! `at …` lines; it does print the class/header, the `Caused by:` chain and the
+//! `Suppressed:` entries. `getCause` returns null unless the constructor or `initCause`
+//! recorded a cause, which is the JDK's behavior for a throwable without one.
 
 use crate::VmError;
 use crate::heap::ObjRef;
@@ -240,17 +242,56 @@ fn throwable_print_stack_trace(
     receiver: ObjRef,
     _args: &[Value],
 ) -> Result<Option<Value>, VmError> {
+    // The frame lines are absent (no Java frame metadata), but the diagnostic value of a
+    // trace is mostly the class/message and the cause chain, which this VM does have.
+    let mut text = format!("{}\n", throwable_header(shared, receiver));
+    let mut seen = vec![receiver];
+    let mut cause = shared.throwable_cause(receiver);
+    while let Some(current) = cause {
+        if seen.contains(&current) {
+            break;
+        }
+        seen.push(current);
+        text.push_str(&format!(
+            "Caused by: {}\n",
+            throwable_header(shared, current)
+        ));
+        for suppressed in shared.throwable_suppressed(current) {
+            text.push_str(&format!(
+                "Suppressed: {}\n",
+                throwable_header(shared, suppressed)
+            ));
+        }
+        cause = shared.throwable_cause(current);
+    }
+    for suppressed in shared.throwable_suppressed(receiver) {
+        text.push_str(&format!(
+            "Suppressed: {}\n",
+            throwable_header(shared, suppressed)
+        ));
+    }
+    shared.write_stderr(text.as_bytes());
+    Ok(None)
+}
+
+/// `Throwable.toString()`'s text: the class name, then the message when one was recorded.
+fn throwable_header(shared: &Shared, reference: ObjRef) -> String {
     let class = {
         let heap = shared.heap();
-        heap.object_class(receiver).map_err(heap_error)?
+        heap.object_class(reference).map_err(heap_error)
     };
-    let name = shared
-        .entry(class)
-        .map(|entry| entry.name.replace('/', "."))
+    let name = class
+        .ok()
+        .and_then(|class| {
+            shared
+                .entry(class)
+                .map(|entry| entry.name.replace('/', "."))
+        })
         .unwrap_or_else(|| "java.lang.Throwable".to_owned());
-    let message = shared.throwable_message(receiver).unwrap_or_default();
-    shared.write_stderr(format!("{name}: {message}\n").as_bytes());
-    Ok(None)
+    match shared.throwable_message(reference) {
+        Some(message) if !message.is_empty() => format!("{name}: {message}"),
+        _ => name,
+    }
 }
 
 fn throwable_fill_in_stack_trace(
@@ -264,27 +305,51 @@ fn throwable_fill_in_stack_trace(
 }
 
 fn throwable_add_suppressed(
-    _shared: &Shared,
+    shared: &Shared,
     _thread: &ThreadState,
     _loader: LoaderId,
-    _receiver: ObjRef,
-    _args: &[Value],
+    receiver: ObjRef,
+    args: &[Value],
 ) -> Result<Option<Value>, VmError> {
+    let Some(Value::Ref(suppressed)) = args.first().copied() else {
+        return Err(VmError::Native(
+            "Throwable.addSuppressed expects a Throwable argument".to_owned(),
+        ));
+    };
+    if suppressed.is_null() {
+        return Err(VmError::Native(
+            "Throwable.addSuppressed received null".to_owned(),
+        ));
+    }
+    if suppressed == receiver {
+        return Err(VmError::Native(
+            "Throwable.addSuppressed: self-suppression is not permitted".to_owned(),
+        ));
+    }
+    shared.add_throwable_suppressed(receiver, suppressed);
     Ok(None)
 }
 
-/// `Throwable.getSuppressed()`: an empty array until suppressed exceptions are stored.
+/// `Throwable.getSuppressed()`: the recorded suppressed exceptions, in declaration order.
 fn throwable_get_suppressed(
     shared: &Shared,
     _thread: &ThreadState,
     _loader: LoaderId,
-    _receiver: ObjRef,
+    receiver: ObjRef,
     _args: &[Value],
 ) -> Result<Option<Value>, VmError> {
+    let suppressed = shared.throwable_suppressed(receiver);
     let class = shared.load_library_class("java/lang/Throwable")?;
     let array = shared
         .heap()
-        .allocate_array(crate::heap::ClassRef::Named(class), 0);
+        .allocate_array(crate::heap::ClassRef::Named(class), suppressed.len());
+    {
+        let mut heap = shared.heap();
+        let slots = heap.array_mut(array).map_err(heap_error)?;
+        for (slot, reference) in slots.elements.iter_mut().zip(suppressed) {
+            *slot = Value::Ref(reference);
+        }
+    }
     Ok(Some(Value::Ref(array)))
 }
 

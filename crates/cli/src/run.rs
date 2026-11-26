@@ -84,6 +84,9 @@ pub(crate) fn execute_with(
     classpath: Arc<dyn ClassSource>,
 ) -> Result<(), String> {
     let shared = Shared::with_library_dir(&options.stdlib);
+    // Write output through as it happens: a program that hangs or is killed otherwise
+    // loses everything printed before the runner's final flush.
+    shared.set_output_streaming(true);
     let loader = shared
         .add_loader(LoaderId::BOOTSTRAP, classpath)
         .map_err(|error| format!("cannot create the application loader: {error}"))?;
@@ -166,23 +169,6 @@ pub(crate) fn execute_with(
         MAIN_DESCRIPTOR,
         vec![Value::Ref(args_array)],
     );
-
-    // Flush what the program printed even when it failed: a Java program that prints and
-    // then throws has still printed. Diagnostics captured by `java.util.logging` go to
-    // stderr, so they never disturb the program's `System.out`.
-    use std::io::Write;
-    let output = shared.stdout();
-    if !output.is_empty() {
-        std::io::stdout()
-            .write_all(output.as_bytes())
-            .map_err(|error| format!("cannot write stdout: {error}"))?;
-    }
-    let diagnostics = shared.stderr();
-    if !diagnostics.is_empty() {
-        std::io::stderr()
-            .write_all(diagnostics.as_bytes())
-            .map_err(|error| format!("cannot write stderr: {error}"))?;
-    }
 
     result.map_err(|error| describe_error(&shared, error))?;
     Ok(())

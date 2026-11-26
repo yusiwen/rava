@@ -145,7 +145,10 @@ throw can cross several frames while preserving the same object. Native function
 `VmError::Thrown`, which `InterpError::from` converts to the same path.
 
 The current exception support does not synthesize `NullPointerException` for a null
-`athrow`, does not produce stack traces, and does not duplicate `finally` blocks.
+`athrow`, does not produce stack traces, and does not duplicate `finally` blocks. The
+throwable side table does record the message, the cause and suppressed exceptions, so
+`printStackTrace()` prints the header, a `Caused by:` chain and `Suppressed:` entries even
+though every trace lacks `at …` frame lines; `addSuppressed`/`getSuppressed` round-trip.
 
 ## 6. Safepoints and re-entry
 

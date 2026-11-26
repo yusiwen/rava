@@ -13,8 +13,10 @@
 //!
 //! The minimal standard streams are installed here as well: the C1 stubs carry no
 //! initializer `Code`, so `System.out`/`System.err` must be written into the statics table
-//! before Java code reads them. Both streams write to [`Shared::stdout`]; this slice has
-//! one captured output stream and no separate error stream.
+//! before Java code reads them. The error stream is registered with
+//! [`Shared::register_error_stream`], so `System.err` writes reach the error capture and
+//! never the program's stdout. A runner can also enable [`Shared::set_output_streaming`],
+//! which writes both streams through to the host as bytes are produced.
 
 use crate::VmError;
 use crate::heap::{HeapObject, ObjRef};
@@ -162,7 +164,7 @@ fn print_stream_write(
             ));
         }
     };
-    shared.write_stdout(&[byte]);
+    shared.write_output(receiver, &[byte]);
     Ok(None)
 }
 
@@ -230,7 +232,7 @@ fn print_stream_write_range(
             _ => 0,
         })
         .collect();
-    shared.write_stdout(&bytes);
+    shared.write_output(receiver, &bytes);
     Ok(None)
 }
 
@@ -267,6 +269,9 @@ fn install_system_streams(shared: &Shared) -> Result<(), VmError> {
         ("err".to_owned(), PRINT_STREAM_DESCRIPTOR.to_owned()),
         Value::Ref(err),
     );
+    drop(statics);
+    // `System.err` writes reach the error capture, not `System.out`.
+    shared.register_error_stream(err);
     Ok(())
 }
 
@@ -279,7 +284,7 @@ fn print_stream_println_string(
     args: &[Value],
 ) -> Result<Option<Value>, VmError> {
     let text = string_argument(shared, receiver, args, "println")?;
-    shared.write_stdout(format!("{text}\n").as_bytes());
+    shared.write_output(receiver, format!("{text}\n").as_bytes());
     Ok(None)
 }
 
@@ -292,7 +297,7 @@ fn print_stream_println(
     _args: &[Value],
 ) -> Result<Option<Value>, VmError> {
     require_receiver(receiver, "PrintStream.println")?;
-    shared.write_stdout(b"\n");
+    shared.write_output(receiver, b"\n");
     Ok(None)
 }
 
@@ -305,7 +310,7 @@ fn print_stream_print_string(
     args: &[Value],
 ) -> Result<Option<Value>, VmError> {
     let text = string_argument(shared, receiver, args, "print")?;
-    shared.write_stdout(text.as_bytes());
+    shared.write_output(receiver, text.as_bytes());
     Ok(None)
 }
 
