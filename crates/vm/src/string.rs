@@ -782,13 +782,13 @@ fn string_intern(
 /// The `String.valueOf(Object)`-shaped text of a reference.
 ///
 /// A string and a builder contribute their content, every wrapper its `toString` text
-/// (so a boxed `Double` renders as a Java double), and null the text `"null"`. Any other object uses the VM's `Object.toString` shape
-/// (`ClassName@hexIdentityHash`) instead of dispatching a Java `toString` override: a VM
-/// native cannot re-enter the interpreter. The shape is the one
-/// [`crate::object::runtime_binary_name`] and `ObjRef::identity_hash` produce for
-/// `Object.toString`, so the two agree wherever the JDK would call the default `toString`.
-/// An array uses its array class's JDK descriptor-form name, so `String.valueOf(int[])`
-/// is the default `[I@hex` shape.
+/// (so a boxed `Double` renders as a Java double), and null the text `"null"`. For any
+/// other object the runner installs a resolver (`rava_interp::object_text`) that runs the
+/// receiver's Java `toString`; when the class does not override it (resolution lands on
+/// `java.lang.Object`) or no runner installed the resolver (a VM-only test), the structural
+/// `ClassName@hexIdentityHash` shape is used. An array uses its array class's JDK
+/// descriptor-form name, so `String.valueOf(int[])` is the default `[I@hex` shape; class
+/// objects, lambdas and the container shapes keep the structural text.
 ///
 /// [`crate::collections`] reuses this for `StringBuilder.append(Object)`.
 pub(crate) fn object_text(
