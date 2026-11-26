@@ -29,6 +29,7 @@ documents are added when there is something to record.
 | [`explanation/compatibility-gates.md`](explanation/compatibility-gates.md) | explanation | C0–C4 commands/artifacts, `compat check`, the Spring smoke, and where `cargo xtask ci` belongs |
 | [`explanation/class-loading-and-libraries.md`](explanation/class-loading-and-libraries.md) | explanation | sources, loader identity/delegation, the two `stdlib` trees, classpath resources, executable-jar launch, nested-jar and non-web Boot startup, and native dispatch |
 | [`explanation/interpreter-execution.md`](explanation/interpreter-execution.md) | explanation | decoded IR/frames, static/instance dispatch, native ABI, exceptions, `invokedynamic`, lambdas and streams |
+| [`explanation/runtime-library.md`](explanation/runtime-library.md) | explanation | strings, boxed primitives, collections, text formatting and streams: representation, equality rules and limits |
 | [`explanation/reflection-and-metadata.md`](explanation/reflection-and-metadata.md) | explanation | C1 metadata → class/member/annotation/generic `Type`, lookup, invocation and boundaries |
 | [`explanation/c1-metadata.md`](explanation/c1-metadata.md) | explanation | C1 levels, the 1,011/36 `ct.sym` split, normalization, and what “differences 0” does and does not prove |
 | [`explanation/spring-context.md`](explanation/spring-context.md) | explanation | the real Spring `AnnotationConfigApplicationContext` path from `rava run` to the `hello` bean |
