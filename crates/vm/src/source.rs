@@ -25,6 +25,15 @@ pub trait ClassSource: Send + Sync + std::fmt::Debug {
         Ok(None)
     }
 
+    /// Every copy of one non-class resource this source supplies, in its own order.
+    ///
+    /// A directory or a jar holds a name at most once, so the default is
+    /// [`ClassSource::read_resource`] wrapped in a list. A classpath is the source that
+    /// can supply the same name more than once, and therefore overrides this.
+    fn read_resources(&self, name: &str) -> Result<Vec<Vec<u8>>, VmError> {
+        Ok(self.read_resource(name)?.into_iter().collect())
+    }
+
     /// The external URL forms of one resource, in this source's own order.
     fn resource_urls(&self, _name: &str) -> Result<Vec<String>, VmError> {
         Ok(Vec::new())
@@ -121,6 +130,19 @@ impl ClassSource for ClassPathSource {
             }
         }
         Ok(None)
+    }
+
+    /// Every copy of `name` in classpath order: a directory and a jar can both hold it.
+    fn read_resources(&self, name: &str) -> Result<Vec<Vec<u8>>, VmError> {
+        let mut resources = Vec::new();
+        for entry in &self.entries {
+            let found = match entry {
+                ClassPathEntry::Directory(source) => source.read_resources(name)?,
+                ClassPathEntry::Jar(source) => source.read_resources(name)?,
+            };
+            resources.extend(found);
+        }
+        Ok(resources)
     }
 
     fn resource_urls(&self, name: &str) -> Result<Vec<String>, VmError> {
@@ -617,6 +639,54 @@ mod tests {
             source.resource_names("demo/").unwrap(),
             vec!["demo/data.txt", "demo/data.txt"]
         );
+    }
+
+    #[test]
+    fn classpath_read_resources_returns_every_copy_in_order() {
+        let first = scratch("all-resources-first");
+        let second = scratch("all-resources-second");
+        for (root, payload) in [
+            (&first, b"first".as_slice()),
+            (&second, b"second".as_slice()),
+        ] {
+            std::fs::create_dir_all(root.join("META-INF/services")).unwrap();
+            std::fs::write(root.join("META-INF/services/demo.Service"), payload).unwrap();
+        }
+
+        let source = ClassPathSource::from_paths([first, second]).unwrap();
+        assert_eq!(
+            source
+                .read_resources("META-INF/services/demo.Service")
+                .unwrap(),
+            vec![b"first".to_vec(), b"second".to_vec()]
+        );
+        // The single-resource view still reports only the first copy.
+        assert_eq!(
+            source
+                .read_resource("META-INF/services/demo.Service")
+                .unwrap()
+                .as_deref(),
+            Some(&b"first"[..])
+        );
+        assert!(
+            source
+                .read_resources("META-INF/services/demo.Missing")
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn classpath_read_resources_collects_a_directory_and_a_jar() {
+        let directory = scratch("all-resources-directory");
+        std::fs::write(directory.join("Hello.class"), b"directory-bytes").unwrap();
+        let jar = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/hello.jar");
+
+        let source = ClassPathSource::from_paths([directory, jar]).unwrap();
+        let resources = source.read_resources("Hello.class").unwrap();
+        assert_eq!(resources.len(), 2);
+        assert_eq!(resources[0], b"directory-bytes");
+        assert_eq!(&resources[1][..4], &[0xCA, 0xFE, 0xBA, 0xBE]);
     }
 
     #[test]

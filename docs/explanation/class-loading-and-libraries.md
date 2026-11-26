@@ -35,6 +35,7 @@ The abstraction is in [`crates/vm/src/source.rs`](../../crates/vm/src/source.rs)
 pub trait ClassSource: Send + Sync + Debug {
     fn read(&self, binary_name: &str) -> Result<Option<Vec<u8>>, VmError>;
     fn read_resource(&self, name: &str) -> Result<Option<Vec<u8>>, VmError>;
+    fn read_resources(&self, name: &str) -> Result<Vec<Vec<u8>>, VmError>;
     fn resource_urls(&self, name: &str) -> Result<Vec<String>, VmError>;
     fn resource_names(&self, prefix: &str) -> Result<Vec<String>, VmError>;
 }
@@ -50,7 +51,7 @@ Three implementations exist:
 | :--- | :--- |
 | `DirectorySource` | Reads `<root>/<binary/name>.class`; a missing file is `None`, other I/O errors are `VmError::Io`. Resources use a `file:/<absolute-path>` URL and `resource_names` walks files under the prefix. |
 | `JarSource` | Reads the zip central directory once; stored and DEFLATE entries are supported; Zip64 is rejected; `read` converts the binary name to `<name>.class`. Resources use `jar:file:/<absolute-jar>!/<entry>`; `entry_names`/`class_entry_names`/`read_entry` are the scanner-facing views used by the manifest tool. |
-| `ClassPathSource` | An ordered list of directories and jars; the first entry that returns `Some` wins, matching Java classpath order. Resource URLs/names concatenate in that same order. A nonexistent path fails when the source is built, rather than silently changing the search. |
+| `ClassPathSource` | An ordered list of directories and jars; the first entry that returns `Some` wins, matching Java classpath order. Resource URLs/names concatenate in that same order, and `read_resources` returns every matching entry in that order rather than only the first. A nonexistent path fails when the source is built, rather than silently changing the search. |
 
 The manifest tool scans jars through `JarSource::class_entry_names`, not through the
 runtime loader; the runner uses `ClassPathSource` as an application source.
@@ -154,6 +155,46 @@ resources` asserts the exact directory-first output, both URL protocols and payl
 `Iterator.remove`, `URLDecoder.decode`, `Properties.load` and `Arrays.stream(Object[])`
 were added because returning real bytes exposed those existing Spring paths.
 
+## 5b. `ServiceLoader` and `META-INF/services` (M4.2)
+
+`java.util.ServiceLoader.load` reads the provider-configuration resource
+`META-INF/services/<service binary name>`. This is the one caller that must see **every**
+copy of a resource, so `ClassSource::read_resources` returns all copies a source holds and
+`ClassPathSource` concatenates them in classpath order; `Shared::read_resources` walks the
+loader chain parent-first, exactly like `resource_urls`, while `read_resource` keeps its
+first-match behavior. A provider name line ignores a `#` comment, surrounding whitespace
+and blank lines; the remaining order is the file order across the concatenated resources.
+Duplicate provider classes are kept once, as the JDK's provider set does.
+
+`ServiceLoader.load` only loads and validates provider classes: each dotted configuration
+name is normalized to the internal `a/b/C` form and loaded through the selected loader,
+then checked with `reflection::named_assignable`, so the provider has the same class
+identity as an ordinary `ldc`/`Class.forName`/`ClassLoader.loadClass` lookup. A missing
+class or one that does not implement the service is a typed `VmError::Native` naming the
+provider. No provider is allocated or constructed until `Iterator.next`; the loader and
+its iterator carry their service class, defining loader, provider classes and cursor in
+an `ObjRef`-keyed side table in `Shared` (its no-lock probe is
+`SharedLock::ServiceLoaders` and the values own no Java references, so it adds no roots).
+The iterator is an ordinary `java.util.Iterator` heap object.
+`rava-interp::service_loader` overrides `hasNext`/`next`:
+`hasNext` reads the cursor, and `next` allocates the provider and runs `<init>()V` through
+`run_instance_method`, so class initialization and constructor effects happen on first
+use. Every iterator without service state falls back to the VM's snapshot iterator, which
+keeps ordinary collection iteration unchanged. `remove` on a service iterator stays a
+typed error because its snapshot has no mutable source.
+
+The committed `crates/cli/tests/fixtures/service_loader/` fixture puts the
+`demo.HelloGreeter` provider file in the directory classpath and the `demo.WorldGreeter`
+one in `providers.jar`, so both orders are observable. Provider static initializers and
+constructors print `clinit:`/`init:` lines after `after-hasNext`, which is the laziness
+proof. `cargo test -p rava-cli --test service_loader` also covers the explicit
+`ClassLoader` overload, a null loader selecting bootstrap, a missing service as an empty
+iteration, the provider's internal-name class identity, and typed errors for a
+primitive/array service type and a non-assignable provider. Remaining limits: one
+provider name per line, no module layer or `loadInstalled`, no
+`Provider`/`stream`/`findFirst` surface, and no `ServiceConfigurationError` object (the
+failures stay typed VM errors).
+
 ## 6. Native dispatch: registry before `Code`
 
 C1 methods generally have **no `Code` and no `ACC_NATIVE`**. The registry is keyed by
@@ -206,6 +247,9 @@ native fallback instead. This is a deliberate C1/M2 boundary, not a JDK-equivale
   `URLStreamHandler`, and no charset table (`URLDecoder` decodes UTF-8).
 - No module layer, multi-release selection, nested jars, manifest `Class-Path`, `-jar`,
   wildcard/remote classpath or class unloading.
+- `ServiceLoader` reads `META-INF/services` only: one provider name per line, no
+  `loadInstalled`/module layer, no `Provider`/`stream`/`findFirst`, and a configuration
+  failure is a typed VM error rather than a `ServiceConfigurationError` object.
 - Parent-first only; there is no child-first/OSGi-style loader yet.
 - `link-check` resolves declarations on the owner; it does not walk supertypes or verify
   stubs.
@@ -221,11 +265,12 @@ $ cargo test -p rava-vm --test loader_identity      # (loader, name) identity an
 $ cargo test -p rava-vm --test c1_runtime           # C1 tree as bootstrap, metadata without Code
 $ cargo test -p rava-cli --test classpath_run       # directory/jar/order/missing main
 $ cargo test -p rava-cli --test resources          # classpath resources, URLs and streams
+$ cargo test -p rava-cli --test service_loader     # META-INF/services and lazy providers
 $ cargo run -p rava-cli -- compat check             # manifest + synthetic link tree
 $ RAVA_SPRING_ACCEPTANCE=1 cargo test -p rava-cli --test spring_context
 ```
 
-The first three are regular workspace tests; `compat check` needs the fetched jars and
+The first five are regular workspace tests; `compat check` needs the fetched jars and
 the Spring test is opt-in for the same reason. The compatibility-level interpretation is
 in [`compatibility-gates.md`](compatibility-gates.md).
 
@@ -234,6 +279,8 @@ in [`compatibility-gates.md`](compatibility-gates.md).
 - [`crates/vm/src/source.rs`](../../crates/vm/src/source.rs) — sources/classpath.
 - [`crates/vm/src/loader.rs`](../../crates/vm/src/loader.rs) — identity, table, delegation.
 - [`crates/vm/src/shared.rs`](../../crates/vm/src/shared.rs) — locks, caches, roots, registry entry points.
+- [`crates/vm/src/services.rs`](../../crates/vm/src/services.rs) — `ServiceLoader` side-table state.
+- [`crates/interp/src/service_loader.rs`](../../crates/interp/src/service_loader.rs) — `ServiceLoader` natives and lazy provider construction.
 - [`crates/cli/src/run.rs`](../../crates/cli/src/run.rs) — startup path.
 - [`crates/vm/src/library.rs`](../../crates/vm/src/library.rs) — native installation.
 - [`stdlib/README.md`](../../stdlib/README.md), [`stdlib/c1/README.md`](../../stdlib/c1/README.md) — tree state.
