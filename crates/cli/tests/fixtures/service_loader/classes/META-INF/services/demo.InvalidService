@@ -1,0 +1,2 @@
+# This class does not implement demo.InvalidService; load must reject it.
+demo.NotAGreeter

@@ -1,0 +1,4 @@
+# The M4.2 directory provider-configuration file.
+# A '#' starts a comment, blank lines are skipped, and surrounding space is trimmed.
+
+   demo.HelloGreeter   # the directory provider

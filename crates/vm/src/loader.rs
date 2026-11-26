@@ -265,6 +265,26 @@ impl ClassTable {
         Ok(None)
     }
 
+    /// Every copy of one resource, parent-first and then in each source's own order.
+    ///
+    /// Unlike [`ClassTable::read_resource`], this does not stop at the first match: a
+    /// bootstrap source, a directory and a jar can each supply the name, which is what
+    /// `ServiceLoader` needs for `META-INF/services`.
+    pub(crate) fn read_resources(
+        &self,
+        loader: LoaderId,
+        name: &str,
+    ) -> Result<Vec<Vec<u8>>, VmError> {
+        self.require_loader(loader)?;
+        let chain = self.chain(loader);
+        let mut resources = Vec::new();
+        for candidate in chain.iter().rev() {
+            let source = self.loaders[candidate.index()].source.clone();
+            resources.extend(source.read_resources(name)?);
+        }
+        Ok(resources)
+    }
+
     fn require_loader(&self, loader: LoaderId) -> Result<(), VmError> {
         if loader.index() >= self.loaders.len() {
             return Err(VmError::Loader(format!(

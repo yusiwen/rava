@@ -1946,8 +1946,12 @@ fn allocate_reference_array(
     reference
 }
 
-/// `Iterator.hasNext()`.
-fn iterator_has_next(
+/// `Iterator.hasNext()` for the VM's snapshot iterator.
+///
+/// `rava_interp::service_loader` overrides the `java/util/Iterator` registry entry to
+/// serve its lazy iterator and delegates every other receiver here, so this stays the one
+/// snapshot implementation.
+pub fn iterator_has_next(
     shared: &Shared,
     _thread: &ThreadState,
     _loader: LoaderId,
@@ -1971,7 +1975,10 @@ fn iterator_has_next(
 }
 
 /// `Iterator.next()`: the element at the current position and advance.
-fn iterator_next(
+///
+/// This is the snapshot fallback for receivers without service state; see
+/// [`iterator_has_next`].
+pub fn iterator_next(
     shared: &Shared,
     _thread: &ThreadState,
     _loader: LoaderId,

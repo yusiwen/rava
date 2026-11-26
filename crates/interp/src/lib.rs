@@ -41,6 +41,7 @@ pub mod method_handles;
 pub mod object_methods;
 pub mod proxy;
 pub mod reflect_invoke;
+pub mod service_loader;
 pub mod streams;
 pub mod unsafe_natives;
 

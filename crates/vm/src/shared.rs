@@ -57,6 +57,9 @@ pub enum SharedLock {
     UnsafeCalls,
     /// The URL, URL-connection and input-stream side table (M4.1).
     Resources,
+    /// The `java.util.ServiceLoader` and service-iterator side table (M4.2). It holds
+    /// class and loader identities, never heap handles, so it contributes no roots.
+    ServiceLoaders,
 }
 
 impl fmt::Display for SharedLock {
@@ -79,6 +82,7 @@ impl fmt::Display for SharedLock {
             Self::Stderr => write!(f, "stderr"),
             Self::UnsafeCalls => write!(f, "Unsafe call log"),
             Self::Resources => write!(f, "resource side table"),
+            Self::ServiceLoaders => write!(f, "service-loader side table"),
         }
     }
 }
@@ -186,6 +190,12 @@ pub struct Shared {
     /// [`HeapObject`] variant. [`Shared::roots`] reports the keys, so the attachment is
     /// a strong owner until a collector defines its lifetime.
     resources: Mutex<crate::resources::ResourceState>,
+    /// The service type, defining loader, provider classes and iteration cursor behind
+    /// each `java.util.ServiceLoader` and service iterator. Like the resource table it is
+    /// keyed by [`ObjRef`] rather than a new [`HeapObject`] variant, so both objects stay
+    /// ordinary class instances. The values name classes and loaders only, so the table
+    /// owns no Java references and contributes no roots.
+    services: Mutex<crate::services::ServiceState>,
     hooks: Hooks,
 }
 
@@ -250,6 +260,7 @@ impl Shared {
             accessible: Mutex::new(HashSet::new()),
             throwable_messages: Mutex::new(HashMap::new()),
             resources: Mutex::new(crate::resources::ResourceState::default()),
+            services: Mutex::new(crate::services::ServiceState::default()),
             hooks: Hooks::default(),
         }
     }
@@ -1510,6 +1521,17 @@ impl Shared {
             .expect("resource side-table lock poisoned")
     }
 
+    /// Lock the `ServiceLoader` side table for a short, scoped operation.
+    ///
+    /// The guard must be released before a Java call: instantiating a provider re-enters
+    /// the interpreter, which probes this lock. `rava_interp::service_loader` clones the
+    /// state it needs and drops the guard before running a constructor.
+    pub fn service_state(&self) -> MutexGuard<'_, crate::services::ServiceState> {
+        self.services
+            .lock()
+            .expect("service-loader side-table lock poisoned")
+    }
+
     /// Every URL for a resource, parent-first through the loader chain.
     ///
     /// The bootstrap source is consulted first, then the application or child loader; the
@@ -1528,6 +1550,18 @@ impl Shared {
             .read()
             .expect("class table lock poisoned")
             .read_resource(loader, name)
+    }
+
+    /// Every copy of one resource, parent-first and then in each source's own order.
+    ///
+    /// `ClassLoader.getResource` stops at the first copy; `ServiceLoader` must not. A
+    /// bootstrap source, a directory and a jar can each supply the same name, so the
+    /// order here is the bootstrap source first and then the application/child chain.
+    pub fn read_resources(&self, loader: LoaderId, name: &str) -> Result<Vec<Vec<u8>>, VmError> {
+        self.classes
+            .read()
+            .expect("class table lock poisoned")
+            .read_resources(loader, name)
     }
 
     pub fn thread_state(&self, id: u64) -> ThreadState {
@@ -1925,6 +1959,11 @@ impl Shared {
         {
             let _guard = self.resources.try_lock().map_err(|_| LockHeld {
                 lock: SharedLock::Resources,
+            })?;
+        }
+        {
+            let _guard = self.services.try_lock().map_err(|_| LockHeld {
+                lock: SharedLock::ServiceLoaders,
             })?;
         }
         Ok(())

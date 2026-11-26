@@ -77,7 +77,8 @@ fn execute(options: &Options) -> Result<(), String> {
     // `Method.invoke`/`Constructor.newInstance` and
     // `InvocationHandler.invokeDefault` live in the interpreter because they re-enter it;
     // a runner that wants reflection must install them explicitly. The same is true of
-    // `MethodHandle.invoke*` (M3.4).
+    // `MethodHandle.invoke*` (M3.4) and the M4.2 `ServiceLoader` natives, which construct
+    // each provider through `run_instance_method` on first use.
     rava_interp::reflect_invoke::register_natives(&shared);
     rava_interp::method_handles::register_natives(&shared);
     rava_interp::unsafe_natives::register_natives(&shared)
@@ -87,6 +88,10 @@ fn execute(options: &Options) -> Result<(), String> {
     rava_interp::streams::register_natives(&shared);
     rava_interp::futures::register_natives(&shared);
     rava_interp::object_methods::register_natives(&shared);
+    // M4.2: `ServiceLoader.load`/`iterator` and the lazy `Iterator.hasNext`/`next`
+    // overrides. This must follow `library::register_all`, because the overrides replace
+    // the snapshot iterator entries and delegate to them for ordinary iterators.
+    rava_interp::service_loader::register_natives(&shared);
 
     let main_class = match shared.load_class(loader, &options.main_class) {
         Ok(class) => class,
