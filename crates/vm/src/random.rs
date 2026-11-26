@@ -5,11 +5,11 @@
 //! `random.*` property is requested, but the constructor must exist for the environment
 //! to initialize.
 //!
-//! The C1 stubs declare no fields, so each generator's state is a `u64` in the
-//! [`Shared::random_state`] side table keyed by [`ObjRef`]. The generator is an
-//! xorshift64* sequence seeded from the clock and the object's identity hash. It is not a
-//! cryptographic generator: a `SecureRandom` here has the same observable stream shape as
-//! `Random`, which is a documented M4 boundary (no entropy source, no algorithm name).
+//! The C1 stubs declare no fields, so each generator's state is a 48-bit word in the
+//! [`Shared::random_state`] side table keyed by [`ObjRef`]. `Random` runs the JDK's linear
+//! congruential generator, so a fixed seed reproduces the JDK's sequence. `SecureRandom`
+//! shares that stream: there is no entropy source and no algorithm name, which is a
+//! documented boundary (not a cryptographic generator).
 
 use std::collections::HashMap;
 
