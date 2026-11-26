@@ -503,7 +503,10 @@ fn file_to_uri(
     let form = format!("file:{}", path.to_string_lossy());
     let class = shared.load_library_class("java/net/URI")?;
     let object = shared.allocate_instance(class)?;
-    shared.uri_state().insert(object, form);
+    shared
+        .uri_state()
+        .insert(object, form)
+        .map_err(VmError::Native)?;
     Ok(Some(Value::Ref(object)))
 }
 
