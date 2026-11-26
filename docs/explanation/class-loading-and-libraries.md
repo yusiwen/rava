@@ -304,6 +304,13 @@ are called** and **476 are neither called by the gate nor covered by another tes
 per-module tests for the interpreter-side surface and the M5 boundary are
 `crates/cli/tests/surface.rs` and `crates/cli/tests/m5_boundary.rs`.
 
+Rendering the startup log line is real work, not formatting: Boot wraps it in a
+`LogMessage` and formats it through `String.valueOf`, so the run parses each
+`META-INF/MANIFEST.MF` with `java.util.jar.Manifest`/`Attributes`, asks
+`Class.getPackage`/`Package` for the application version, and only then prints
+`Starting application using Java 17 with PID …`. Those APIs are the general
+manifest/package surface in `crates/vm/src/manifest.rs`, not a Boot special case.
+
 The M4.5 boundary is honest about the seams: the VM is single-threaded until M5
 (`Thread.start` does not run the task, `CountDownLatch.await` and
 `LinkedBlockingQueue.put`/`take` fail only when they would block, no executor factory

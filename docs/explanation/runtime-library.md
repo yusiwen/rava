@@ -85,9 +85,14 @@ the bulk set operations are tracked separately from the per-element queries abov
 
 `StringBuilder` and `StringBuffer` are builders over the same UTF-8 storage with UTF-16
 unit semantics; a `setLength`/`deleteCharAt`/`append(char)` that would leave a lone
-surrogate is a typed error. `append(Object)` uses the `String.valueOf` conversion rather
-than a virtual `toString`, for the same re-entrancy reason; `String.valueOf` covers `Object`
-and the primitive overloads and renders `null` as `"null"`.
+surrogate is a typed error. `String.valueOf`, `StringBuilder`/`StringBuffer.append(Object)`,
+the `%s` conversion of `String.format`/`Formatter`/`MessageFormat`, concatenation,
+`Objects.toString` and `Arrays.toString` render an object through its Java `toString`,
+using the resolver in `crates/interp/src/object_text.rs` that the runner installs after the
+VM library. A class that does not override `toString` resolves to `Object.toString` and
+keeps the `ClassName@hex` shape; arrays, class objects, lambdas, lists/maps and the
+wrapper/builder shapes keep the VM's structural text. A VM-only test sees the structural
+text because the resolver lives in the interpreter.
 
 `java.text.MessageFormat` stores the pattern verbatim and parses it on each call: literal
 text, `{index}`, repeated indices, the JDK's single-quote rules, an absent argument's

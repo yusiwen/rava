@@ -2,6 +2,7 @@ package demo;
 
 import java.beans.PropertyDescriptor;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.IdentityHashMap;
@@ -251,6 +252,60 @@ public final class SurfaceProbe {
         hashMap.put(new Key(15), "value");
         boolean cross = left.equals(hashMap);
         return same && !distinct && !cross;
+    }
+
+    /** A class with its own `toString`, so the text path must dispatch it. */
+    static final class Plain {
+        @Override
+        public String toString() {
+            return "plain!";
+        }
+    }
+
+    /** `String.valueOf(Object)` calls the receiver's `toString`. */
+    public static boolean stringValueOfUsesToString() {
+        Object value = new Plain();
+        return "plain!".equals(String.valueOf(value));
+    }
+
+    /** String concatenation renders an object through its `toString`. */
+    public static boolean concatUsesToString() {
+        return "1:plain!".equals("1:" + new Plain());
+    }
+
+    /** `String.format("%s")` calls the receiver's `toString`. */
+    public static boolean formatUsesToString() {
+        return "plain!".equals(String.format("%s", new Plain()));
+    }
+
+    /** `StringBuilder.append(Object)` calls the receiver's `toString`. */
+    public static boolean builderAppendUsesToString() {
+        StringBuilder builder = new StringBuilder();
+        builder.append((Object) new Plain());
+        return "plain!".equals(builder.toString());
+    }
+
+    /** `StringBuffer.append(Object)` calls the receiver's `toString`. */
+    public static boolean bufferAppendUsesToString() {
+        StringBuffer buffer = new StringBuffer();
+        buffer.append((Object) new Plain());
+        return "plain!".equals(buffer.toString());
+    }
+
+    /** `Objects.toString` calls the receiver's `toString`. */
+    public static boolean objectsToStringUsesToString() {
+        return "plain!".equals(Objects.toString(new Plain()));
+    }
+
+    /** `Arrays.toString` renders an object element through its `toString`. */
+    public static boolean arraysToStringUsesToString() {
+        return "[plain!]".equals(Arrays.toString(new Object[] {new Plain()}));
+    }
+
+    /** A class without a `toString` override keeps the structural `ClassName@hex` text. */
+    public static boolean defaultToStringStaysStructural() {
+        String text = String.valueOf(new Object());
+        return text.startsWith("java.lang.Object@");
     }
 
     /** The three-argument `PropertyDescriptor` constructor (bean_support). */

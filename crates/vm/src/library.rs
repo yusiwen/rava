@@ -27,8 +27,8 @@ use crate::value::Value;
 use crate::{
     annotation, arrays, atomic, beans, big_numbers, bitset, boxed, charset, class_loader,
     collections, direct_buffer, exceptions, format, generic, instance, io_file, java_time, jul,
-    locks, maps, math, method_handles, modules, object, proxy, random, references, reflection,
-    regex, resources, string, system, thread_natives, uri,
+    locks, manifest, maps, math, method_handles, modules, object, proxy, random, references,
+    reflection, regex, resources, string, system, thread_natives, uri,
 };
 
 /// `java.lang.System`'s binary-stable internal name.
@@ -53,6 +53,7 @@ pub fn register_all(shared: &Shared) -> Result<(), VmError> {
     collections::register_natives(shared);
     collections::install_empty_constants(shared)?;
     maps::register_natives(shared);
+    manifest::register_natives(shared);
     boxed::register_natives(shared);
     reflection::register_natives(shared);
     generic::register_natives(shared);

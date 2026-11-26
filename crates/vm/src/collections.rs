@@ -1117,13 +1117,13 @@ fn string_builder_append_string(
 
 fn string_builder_append_object(
     shared: &Shared,
-    _thread: &ThreadState,
+    thread: &ThreadState,
     _loader: LoaderId,
     receiver: ObjRef,
     args: &[Value],
 ) -> Result<Option<Value>, VmError> {
     let reference = reference_argument(args, 0, "StringBuilder.append")?;
-    let text = object_text(shared, reference, "StringBuilder.append")?;
+    let text = object_text(shared, thread, reference, "StringBuilder.append")?;
     append_text(shared, receiver, &text, "StringBuilder.append")
 }
 

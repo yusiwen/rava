@@ -318,7 +318,7 @@ fn copy_array(
 
 fn arrays_to_string(
     shared: &Shared,
-    _thread: &ThreadState,
+    thread: &ThreadState,
     _loader: LoaderId,
     _receiver: ObjRef,
     args: &[Value],
@@ -337,7 +337,7 @@ fn arrays_to_string(
         parts.push(match element {
             Value::Ref(reference) if reference.is_null() => "null".to_owned(),
             Value::Ref(reference) => {
-                crate::string::object_text(shared, reference, "Arrays.toString")?
+                crate::string::object_text(shared, thread, reference, "Arrays.toString")?
             }
             Value::Int(value) => value.to_string(),
             Value::Long(value) => value.to_string(),

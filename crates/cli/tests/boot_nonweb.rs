@@ -231,6 +231,16 @@ fn boot_nonweb_application_starts_and_prints_the_marker() {
         stdout.contains("boot:started"),
         "the application started but did not print the marker\nstdout:\n{stdout}\nstderr:\n{stderr}"
     );
+    // Boot's startup line is a `LogMessage` rendered through `String.valueOf`; an identity
+    // string here means the toString path stopped dispatching Java `toString` (#73).
+    assert!(
+        !stdout.contains("$SupplierMessage@"),
+        "the startup log line is an object identity, not a rendered message\nstdout:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("Starting "),
+        "the startup log line is missing\nstdout:\n{stdout}"
+    );
 }
 
 /// The fixture class file is committed and part of the classpath even before the jars exist.

@@ -793,6 +793,7 @@ fn string_intern(
 /// [`crate::collections`] reuses this for `StringBuilder.append(Object)`.
 pub(crate) fn object_text(
     shared: &Shared,
+    thread: &ThreadState,
     reference: ObjRef,
     method: &str,
 ) -> Result<String, VmError> {
@@ -821,6 +822,14 @@ pub(crate) fn object_text(
     match text {
         Text::Known(text) => Ok(text),
         Text::Other => {
+            // A Java object's own `toString` is the JDK's text. The runner installs the
+            // resolver from `rava-interp` because running the method re-enters the
+            // interpreter; without it (a VM-only test) the structural shape stays.
+            if let Some(hook) = shared.hooks().object_text_hook() {
+                if let Some(text) = hook(shared, thread, reference)? {
+                    return Ok(text);
+                }
+            }
             let name = crate::object::runtime_binary_name(shared, reference)
                 .map_err(|error| VmError::Native(format!("{method}: {error}")))?;
             Ok(format!("{name}@{:x}", reference.identity_hash() as u32))
@@ -878,7 +887,7 @@ pub fn double_text(value: f64) -> String {
 /// `toString` override gets `ClassName@hex`.
 fn string_value_of_object(
     shared: &Shared,
-    _thread: &ThreadState,
+    thread: &ThreadState,
     _loader: LoaderId,
     _receiver: ObjRef,
     args: &[Value],
@@ -898,7 +907,7 @@ fn string_value_of_object(
     if is_string {
         return Ok(Some(Value::Ref(reference)));
     }
-    let text = object_text(shared, reference, "String.valueOf")?;
+    let text = object_text(shared, thread, reference, "String.valueOf")?;
     Ok(Some(new_string(shared, text)))
 }
 
