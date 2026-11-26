@@ -67,6 +67,9 @@ const STREAM_CLASS: &str = "java/util/stream/Stream";
 /// The internal name of the base stream interface.
 const BASE_STREAM_CLASS: &str = "java/util/stream/BaseStream";
 
+/// The internal name of the primitive `int` stream interface.
+const INT_STREAM_CLASS: &str = "java/util/stream/IntStream";
+
 /// The internal name of the spliterator interface.
 const SPLITERATOR_CLASS: &str = "java/util/Spliterator";
 
@@ -184,7 +187,14 @@ fn same_shape_stream(
     elements: Vec<Value>,
 ) -> Result<ObjRef, VmError> {
     let parallel = stream_parallel_flag(shared, receiver)?;
-    Ok(shared.heap().allocate_stream(elements, parallel))
+    let class = {
+        let heap = shared.heap();
+        match heap.get(receiver).map_err(heap_error)? {
+            HeapObject::Stream(stream) => stream.class,
+            _ => None,
+        }
+    };
+    Ok(shared.heap().allocate_stream(elements, parallel, class))
 }
 
 /// The runtime class of any reference, resolved through the class object.
@@ -565,7 +575,7 @@ fn stream_support_stream(
     let parallel = boolean_argument(args, 1, "StreamSupport.stream")?;
     let elements = drain_spliterator(shared, thread, spliterator)?;
     Ok(Some(Value::Ref(
-        shared.heap().allocate_stream(elements, parallel),
+        shared.heap().allocate_stream(elements, parallel, None),
     )))
 }
 
@@ -589,7 +599,7 @@ fn drain_spliterator(
         }
     }
     let class = runtime_class(shared, spliterator)?;
-    let destination = shared.heap().allocate_stream(Vec::new(), false);
+    let destination = shared.heap().allocate_stream(Vec::new(), false, None);
     let consumer = shared.heap().allocate_sink(destination);
     loop {
         let advanced = run_instance_method(
@@ -623,9 +633,11 @@ fn stream_empty(
     _receiver: ObjRef,
     _args: &[Value],
 ) -> Result<Option<Value>, VmError> {
-    Ok(Some(Value::Ref(
-        _shared.heap().allocate_stream(Vec::new(), false),
-    )))
+    Ok(Some(Value::Ref(_shared.heap().allocate_stream(
+        Vec::new(),
+        false,
+        None,
+    ))))
 }
 
 /// `Stream.of(T)`.
@@ -637,9 +649,11 @@ fn stream_of_one(
     args: &[Value],
 ) -> Result<Option<Value>, VmError> {
     let value = args.first().copied().unwrap_or(Value::Ref(ObjRef::NULL));
-    Ok(Some(Value::Ref(
-        shared.heap().allocate_stream(vec![value], false),
-    )))
+    Ok(Some(Value::Ref(shared.heap().allocate_stream(
+        vec![value],
+        false,
+        None,
+    ))))
 }
 
 /// `Stream.of(T...)`.
@@ -656,7 +670,7 @@ fn stream_of_many(
         heap.array(array).map_err(heap_error)?.elements.to_vec()
     };
     Ok(Some(Value::Ref(
-        shared.heap().allocate_stream(elements, false),
+        shared.heap().allocate_stream(elements, false, None),
     )))
 }
 
@@ -677,7 +691,7 @@ fn stream_of_nullable(
         _ => Vec::new(),
     };
     Ok(Some(Value::Ref(
-        shared.heap().allocate_stream(elements, false),
+        shared.heap().allocate_stream(elements, false, None),
     )))
 }
 
@@ -694,7 +708,7 @@ fn stream_concat(
     let mut elements = stream_elements(shared, left, "Stream.concat")?;
     elements.extend(stream_elements(shared, right, "Stream.concat")?);
     Ok(Some(Value::Ref(
-        shared.heap().allocate_stream(elements, false),
+        shared.heap().allocate_stream(elements, false, None),
     )))
 }
 
@@ -876,7 +890,7 @@ fn stream_sequential(
 ) -> Result<Option<Value>, VmError> {
     let elements = stream_elements(shared, receiver, "BaseStream.sequential")?;
     Ok(Some(Value::Ref(
-        shared.heap().allocate_stream(elements, false),
+        shared.heap().allocate_stream(elements, false, None),
     )))
 }
 
@@ -890,7 +904,7 @@ fn stream_parallel(
 ) -> Result<Option<Value>, VmError> {
     let elements = stream_elements(shared, receiver, "BaseStream.parallel")?;
     Ok(Some(Value::Ref(
-        shared.heap().allocate_stream(elements, true),
+        shared.heap().allocate_stream(elements, true, None),
     )))
 }
 
@@ -1518,7 +1532,7 @@ fn collection_stream(
 ) -> Result<Option<Value>, VmError> {
     let (elements, _) = collection_snapshot(shared, receiver, "Collection.stream")?;
     Ok(Some(Value::Ref(
-        shared.heap().allocate_stream(elements, false),
+        shared.heap().allocate_stream(elements, false, None),
     )))
 }
 
@@ -1532,7 +1546,7 @@ fn collection_parallel_stream(
 ) -> Result<Option<Value>, VmError> {
     let (elements, _) = collection_snapshot(shared, receiver, "Collection.parallelStream")?;
     Ok(Some(Value::Ref(
-        shared.heap().allocate_stream(elements, true),
+        shared.heap().allocate_stream(elements, true, None),
     )))
 }
 
@@ -2041,6 +2055,23 @@ fn optional_or_else_throw(
     }
 }
 
+/// `Optional.orElseThrow()`: the value, or a typed empty-Optional error.
+fn optional_or_else_throw_no_supplier(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    _args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    match shared.heap().optional(receiver).map_err(heap_error)? {
+        Some(value) => Ok(Some(value)),
+        None => Err(VmError::Native(
+            "Optional.orElseThrow on an empty Optional (NoSuchElementException is not synthesized)"
+                .to_owned(),
+        )),
+    }
+}
+
 /// `Optional.ifPresent(Consumer)`.
 fn optional_if_present(
     shared: &Shared,
@@ -2150,6 +2181,7 @@ fn map_for_each(
 
 /// Register every M2.24 native.
 pub fn register_natives(shared: &Shared) {
+    register_int_stream_natives(shared);
     // Stream sources.
     shared.register_native(
         "java/util/stream/StreamSupport",
@@ -2541,6 +2573,11 @@ pub fn register_natives(shared: &Shared) {
             optional_or_else_throw,
         ),
         (
+            "orElseThrow",
+            "()Ljava/lang/Object;",
+            optional_or_else_throw_no_supplier,
+        ),
+        (
             "ifPresent",
             "(Ljava/util/function/Consumer;)V",
             optional_if_present,
@@ -2609,4 +2646,187 @@ fn sink_accept(
         .elements
         .push(value);
     Ok(None)
+}
+
+/// Register the `java.util.stream.IntStream` surface.
+///
+/// `String.chars()` is the source; `allMatch`/`anyMatch`/`noneMatch` and `filter` take an
+/// `IntPredicate` (`(I)Z`), whose element is an `int` value. The eager pipeline keeps the
+/// `IntStream` class tag so chained primitive-stream calls resolve here.
+fn register_int_stream_natives(shared: &Shared) {
+    shared.register_native(
+        INT_STREAM_CLASS,
+        "allMatch",
+        "(Ljava/util/function/IntPredicate;)Z",
+        int_stream_all_match,
+    );
+    shared.register_native(
+        INT_STREAM_CLASS,
+        "anyMatch",
+        "(Ljava/util/function/IntPredicate;)Z",
+        int_stream_any_match,
+    );
+    shared.register_native(
+        INT_STREAM_CLASS,
+        "noneMatch",
+        "(Ljava/util/function/IntPredicate;)Z",
+        int_stream_none_match,
+    );
+    shared.register_native(
+        INT_STREAM_CLASS,
+        "filter",
+        "(Ljava/util/function/IntPredicate;)Ljava/util/stream/IntStream;",
+        int_stream_filter,
+    );
+    shared.register_native(INT_STREAM_CLASS, "count", "()J", int_stream_count);
+    shared.register_native(INT_STREAM_CLASS, "sum", "()I", int_stream_sum);
+    shared.register_native(INT_STREAM_CLASS, "toArray", "()[I", int_stream_to_array);
+}
+
+/// A stream's elements as `i32`s, or a typed error when an element is not an int.
+fn int_stream_values(shared: &Shared, receiver: ObjRef, method: &str) -> Result<Vec<i32>, VmError> {
+    let mut values = Vec::new();
+    for element in stream_elements(shared, receiver, method)? {
+        match element {
+            Value::Int(value) => values.push(value),
+            _ => {
+                return Err(VmError::Native(format!(
+                    "{method} found a non-int element in an IntStream"
+                )));
+            }
+        }
+    }
+    Ok(values)
+}
+
+fn int_predicate(
+    shared: &Shared,
+    thread: &ThreadState,
+    predicate: ObjRef,
+    value: i32,
+) -> Result<bool, VmError> {
+    match call_sam(
+        shared,
+        thread,
+        predicate,
+        "test",
+        "(I)Z",
+        vec![Value::Int(value)],
+    )? {
+        Some(Value::Int(result)) => Ok(result != 0),
+        _ => Err(VmError::Native(
+            "IntPredicate.test did not return a boolean".to_owned(),
+        )),
+    }
+}
+
+fn int_stream_all_match(
+    shared: &Shared,
+    thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let predicate = reference_argument(args, 0, "IntStream.allMatch")?;
+    for value in int_stream_values(shared, receiver, "IntStream.allMatch")? {
+        if !int_predicate(shared, thread, predicate, value)? {
+            return Ok(Some(Value::Int(0)));
+        }
+    }
+    Ok(Some(Value::Int(1)))
+}
+
+fn int_stream_any_match(
+    shared: &Shared,
+    thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let predicate = reference_argument(args, 0, "IntStream.anyMatch")?;
+    for value in int_stream_values(shared, receiver, "IntStream.anyMatch")? {
+        if int_predicate(shared, thread, predicate, value)? {
+            return Ok(Some(Value::Int(1)));
+        }
+    }
+    Ok(Some(Value::Int(0)))
+}
+
+fn int_stream_none_match(
+    shared: &Shared,
+    thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let predicate = reference_argument(args, 0, "IntStream.noneMatch")?;
+    for value in int_stream_values(shared, receiver, "IntStream.noneMatch")? {
+        if int_predicate(shared, thread, predicate, value)? {
+            return Ok(Some(Value::Int(0)));
+        }
+    }
+    Ok(Some(Value::Int(1)))
+}
+
+fn int_stream_filter(
+    shared: &Shared,
+    thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let predicate = reference_argument(args, 0, "IntStream.filter")?;
+    let mut kept = Vec::new();
+    for value in int_stream_values(shared, receiver, "IntStream.filter")? {
+        if int_predicate(shared, thread, predicate, value)? {
+            kept.push(Value::Int(value));
+        }
+    }
+    Ok(Some(Value::Ref(same_shape_stream(shared, receiver, kept)?)))
+}
+
+fn int_stream_count(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    _args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let count = stream_elements(shared, receiver, "IntStream.count")?.len();
+    Ok(Some(Value::Long(count as i64)))
+}
+
+fn int_stream_sum(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    _args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let sum = int_stream_values(shared, receiver, "IntStream.sum")?
+        .into_iter()
+        .fold(0i32, i32::wrapping_add);
+    Ok(Some(Value::Int(sum)))
+}
+
+fn int_stream_to_array(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    _args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let values = int_stream_values(shared, receiver, "IntStream.toArray")?;
+    let array = shared.heap().allocate_array(
+        ClassRef::Primitive(rava_vm::PrimitiveKind::Int),
+        values.len(),
+    );
+    {
+        let mut heap = shared.heap();
+        let slots = heap.array_mut(array).map_err(heap_error)?;
+        for (slot, value) in slots.elements.iter_mut().zip(values) {
+            *slot = Value::Int(value);
+        }
+    }
+    Ok(Some(Value::Ref(array)))
 }

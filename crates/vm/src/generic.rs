@@ -331,10 +331,32 @@ fn resolve_class_type(
     class_type: &ClassTypeSignature,
 ) -> Result<ObjRef, VmError> {
     if class_type.arguments.is_empty() && class_type.owner.is_none() {
-        let class = shared.load_class(context.loader, &class_type.name)?;
+        let class = match shared.load_class(context.loader, &class_type.name) {
+            Ok(class) => class,
+            Err(VmError::ClassNotFound { .. }) => {
+                let throwable = crate::exceptions::new_throwable(
+                    shared,
+                    "java/lang/NoClassDefFoundError",
+                    class_type.name.clone(),
+                )?;
+                return Err(VmError::Thrown(throwable));
+            }
+            Err(error) => return Err(error),
+        };
         return shared.class_object(class);
     }
-    let class = shared.load_class(context.loader, &class_type.name)?;
+    let class = match shared.load_class(context.loader, &class_type.name) {
+        Ok(class) => class,
+        Err(VmError::ClassNotFound { .. }) => {
+            let throwable = crate::exceptions::new_throwable(
+                shared,
+                "java/lang/NoClassDefFoundError",
+                class_type.name.clone(),
+            )?;
+            return Err(VmError::Thrown(throwable));
+        }
+        Err(error) => return Err(error),
+    };
     let owner = match &class_type.owner {
         Some(owner) => Some(resolve_class_type(shared, context, owner)?),
         // A signature that spells a member class without a `.Outer` suffix (`Map$Entry`)
@@ -554,7 +576,18 @@ fn class_get_generic_superclass(
     let Some(super_name) = metadata.super_class.clone() else {
         return Ok(Some(Value::Ref(ObjRef::NULL)));
     };
-    let super_class = shared.load_class(loader, &super_name)?;
+    let super_class = match shared.load_class(loader, &super_name) {
+        Ok(class) => class,
+        Err(VmError::ClassNotFound { .. }) => {
+            let throwable = crate::exceptions::new_throwable(
+                shared,
+                "java/lang/NoClassDefFoundError",
+                super_name.clone(),
+            )?;
+            return Err(VmError::Thrown(throwable));
+        }
+        Err(error) => return Err(error),
+    };
     let object = shared.class_object(super_class)?;
     Ok(Some(Value::Ref(object)))
 }
@@ -589,7 +622,18 @@ fn class_get_generic_interfaces(
         }
     } else {
         for name in &metadata.interfaces {
-            let interface = shared.load_class(loader, name)?;
+            let interface = match shared.load_class(loader, name) {
+                Ok(interface) => interface,
+                Err(VmError::ClassNotFound { .. }) => {
+                    let throwable = crate::exceptions::new_throwable(
+                        shared,
+                        "java/lang/NoClassDefFoundError",
+                        name.clone(),
+                    )?;
+                    return Err(VmError::Thrown(throwable));
+                }
+                Err(error) => return Err(error),
+            };
             interfaces.push(shared.class_object(interface)?);
         }
     }

@@ -538,10 +538,19 @@ fn is_null(result: Result<Option<Value>, InterpError>) -> bool {
     }
 }
 
-fn assert_missing_class(result: Result<Option<Value>, InterpError>, name: &str) {
+fn assert_missing_class(fixture: &Fixture, result: Result<Option<Value>, InterpError>, name: &str) {
+    // A missing class literal is the JVM's `NoClassDefFoundError`, a catchable throwable;
+    // `Class.forName` uses `ClassNotFoundException` instead.
     match result {
-        Err(InterpError::Vm(VmError::ClassNotFound { name: found, .. })) => {
-            assert_eq!(found, name, "the missing class is named");
+        Err(InterpError::Thrown(throwable)) => {
+            let message = fixture
+                .shared
+                .throwable_message(throwable)
+                .unwrap_or_default();
+            assert!(
+                message.contains(name),
+                "the missing class is named, found {message:?}"
+            );
         }
         other => panic!("expected a missing-class error for {name:?}, found {other:?}"),
     }
@@ -742,6 +751,7 @@ fn missing_classes_and_malformed_descriptors_are_typed_errors() {
     let fixture = fixture();
 
     assert_missing_class(
+        &fixture,
         call_static(&fixture, "missingClass", "()Ljava/lang/Class;", Vec::new()),
         "MissingClass",
     );

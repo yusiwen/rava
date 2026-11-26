@@ -43,6 +43,12 @@ const LOG_RECORD_CLASS: &str = "java/util/logging/LogRecord";
 /// The `java.util.logging.Level` class.
 const LEVEL_CLASS: &str = "java/util/logging/Level";
 
+/// The `java.util.logging.LogManager` class.
+const LOG_MANAGER_CLASS: &str = "java/util/logging/LogManager";
+
+/// The `java.util.logging.Handler` class.
+const HANDLER_CLASS: &str = "java/util/logging/Handler";
+
 /// The default level of a logger whose name has no configuration, matching JUL's root
 /// logger default of `INFO`.
 const DEFAULT_LEVEL: LevelKind = LevelKind::Info;
@@ -63,6 +69,8 @@ pub struct JulState {
     pub loggers: HashMap<String, ObjRef>,
     /// The fields of every live `LogRecord`, keyed by its heap handle.
     pub records: HashMap<ObjRef, LogRecordData>,
+    /// The single `LogManager` object `getLogManager` returns.
+    pub log_manager: Option<ObjRef>,
 }
 
 /// Register the minimal `java.util.logging` natives.
@@ -115,6 +123,54 @@ pub fn register_natives(shared: &Shared) {
         "()Ljava/util/ResourceBundle;",
         logger_get_resource_bundle,
     );
+
+    shared.register_native(
+        LOG_MANAGER_CLASS,
+        "getLogManager",
+        "()Ljava/util/logging/LogManager;",
+        log_manager_get,
+    );
+    shared.register_native(
+        LOG_MANAGER_CLASS,
+        "getLogger",
+        "(Ljava/lang/String;)Ljava/util/logging/Logger;",
+        logger_get_logger,
+    );
+    shared.register_native(
+        LOGGER_CLASS,
+        "getHandlers",
+        "()[Ljava/util/logging/Handler;",
+        logger_get_handlers,
+    );
+    shared.register_native(
+        LOGGER_CLASS,
+        "addHandler",
+        "(Ljava/util/logging/Handler;)V",
+        logger_noop_handler,
+    );
+    shared.register_native(
+        LOGGER_CLASS,
+        "removeHandler",
+        "(Ljava/util/logging/Handler;)V",
+        logger_noop_handler,
+    );
+    shared.register_native(
+        LOGGER_CLASS,
+        "setLevel",
+        "(Ljava/util/logging/Level;)V",
+        logger_noop_handler,
+    );
+    shared.register_native(
+        LOGGER_CLASS,
+        "getLevel",
+        "()Ljava/util/logging/Level;",
+        logger_get_level,
+    );
+    shared.register_native(HANDLER_CLASS, "<init>", "()V", logger_noop_handler);
+
+    shared.register_native(LEVEL_CLASS, "intValue", "()I", level_int_value);
+    shared.register_native(LEVEL_CLASS, "getName", "()Ljava/lang/String;", level_name);
+    shared.register_native(LEVEL_CLASS, "toString", "()Ljava/lang/String;", level_name);
 
     shared.register_native(
         LOG_RECORD_CLASS,
@@ -480,4 +536,113 @@ fn log_record_get_logger_name(
         .unwrap_or_default();
     let text = shared.intern_string(&name);
     Ok(Some(Value::Ref(text)))
+}
+
+// ---------------------------------------------------------------------------
+// LogManager and the handler surface Boot's JUL bridge inspects
+// ---------------------------------------------------------------------------
+
+/// `LogManager.getLogManager()`: the one manager object.
+fn log_manager_get(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    _args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    if let Some(manager) = shared.jul().log_manager {
+        return Ok(Some(Value::Ref(manager)));
+    }
+    let class = shared.load_library_class(LOG_MANAGER_CLASS)?;
+    let manager = shared.allocate_instance(class)?;
+    shared.jul().log_manager = Some(manager);
+    Ok(Some(Value::Ref(manager)))
+}
+
+/// `Logger.getHandlers()`: an empty handler array.
+///
+/// The VM installs no JUL handlers of its own. Boot's bridge treats an empty array as "at
+/// most one console handler", so it installs the SLF4J bridge exactly as it would on a
+/// JVM with JUL's default configuration.
+fn logger_get_handlers(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    _args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let class = shared.load_library_class(HANDLER_CLASS)?;
+    let array = shared
+        .heap()
+        .allocate_array(crate::heap::ClassRef::Named(class), 0);
+    Ok(Some(Value::Ref(array)))
+}
+
+fn logger_noop_handler(
+    _shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    _args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    Ok(None)
+}
+
+/// `Logger.getLevel()`: the root default until per-logger levels exist.
+fn logger_get_level(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    _args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let class = shared.load_library_class(LEVEL_CLASS)?;
+    let constant = shared.enum_constant(class, "INFO")?;
+    Ok(Some(Value::Ref(constant)))
+}
+
+/// `Level.intValue()`: the JDK numeric value of the installed constant.
+fn level_int_value(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    _args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let kind = {
+        let heap = shared.heap();
+        match heap.get(receiver).map_err(heap_error)? {
+            HeapObject::LogLevel(kind) => *kind,
+            _ => {
+                return Err(VmError::Native(
+                    "Level.intValue called on a non-Level receiver".to_owned(),
+                ));
+            }
+        }
+    };
+    Ok(Some(Value::Int(kind.value())))
+}
+
+/// `Level.getName()`/`toString()`: the constant's name.
+fn level_name(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    _args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let kind = {
+        let heap = shared.heap();
+        match heap.get(receiver).map_err(heap_error)? {
+            HeapObject::LogLevel(kind) => *kind,
+            _ => {
+                return Err(VmError::Native(
+                    "Level.getName called on a non-Level receiver".to_owned(),
+                ));
+            }
+        }
+    };
+    Ok(Some(Value::Ref(
+        shared.heap().allocate_string(kind.name().to_owned()),
+    )))
 }

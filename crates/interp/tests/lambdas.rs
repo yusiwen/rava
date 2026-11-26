@@ -94,7 +94,7 @@ fn assembled_probe_bytes() -> Vec<u8> {
         METAFACTORY,
         "altMetafactory",
         ALT_METAFACTORY_DESCRIPTOR,
-        vec![no_flags, sam_type, static_length_handle, instance_type],
+        vec![sam_type, static_length_handle, instance_type, no_flags],
     );
     let alt_call = builder.invoke_dynamic(alt_bootstrap, "apply", &format!("(){INT_FN}"));
     let mut alt = Assembler::new();
@@ -109,10 +109,10 @@ fn assembled_probe_bytes() -> Vec<u8> {
         "altMetafactory",
         ALT_METAFACTORY_DESCRIPTOR,
         vec![
-            serializable_flags,
             sam_type,
             static_length_handle,
             instance_type,
+            serializable_flags,
         ],
     );
     let serializable_call =
@@ -745,23 +745,16 @@ fn unsupported_bootstrap_owner_is_a_typed_error() {
 fn serializable_alt_metafactory_and_missing_arguments_are_typed_errors() {
     let fixture = fixture();
 
-    let serializable = call(
+    // `FLAG_SERIALIZABLE` is accepted: the lambda object itself has no `writeReplace`, so
+    // serializing it fails later, but the call site still creates a working lambda.
+    let serializable = call_ref(
         &fixture,
         fixture.assembled,
         "serializable",
         &format!("(){INT_FN}"),
         Vec::new(),
-    )
-    .expect_err("serializable lambdas are out of scope");
-    match serializable {
-        InterpError::Vm(VmError::Native(detail)) => {
-            assert!(
-                detail.contains("serializable"),
-                "expected a serializable message, found {detail:?}"
-            );
-        }
-        other => panic!("expected a typed native error, found {other:?}"),
-    }
+    );
+    assert_eq!(apply(&fixture, serializable, "abcd"), 4);
 
     let missing = call(
         &fixture,

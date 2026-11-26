@@ -42,10 +42,31 @@ pub fn register_natives(shared: &Shared) {
         "()Ljava/lang/String;",
         string_to_string,
     );
+    shared.register_native("java/lang/String", "getBytes", "()[B", string_get_bytes);
+    shared.register_native(
+        "java/lang/String",
+        "getBytes",
+        "(Ljava/lang/String;)[B",
+        string_get_bytes_charset,
+    );
+    shared.register_native(
+        "java/lang/String",
+        "getBytes",
+        "(Ljava/nio/charset/Charset;)[B",
+        string_get_bytes_object,
+    );
     shared.register_native(
         "java/lang/String",
         "compareTo",
         "(Ljava/lang/String;)I",
+        string_compare_to,
+    );
+    // The `Comparable` bridge: `String` implements `Comparable<String>`, and a call through
+    // `Comparable.compareTo(Object)` resolves to the bridge declaration.
+    shared.register_native(
+        "java/lang/String",
+        "compareTo",
+        "(Ljava/lang/Object;)I",
         string_compare_to,
     );
     shared.register_native(
@@ -65,6 +86,42 @@ pub fn register_natives(shared: &Shared) {
         "substring",
         "(II)Ljava/lang/String;",
         string_substring_range,
+    );
+    shared.register_native(
+        "java/lang/String",
+        "subSequence",
+        "(II)Ljava/lang/CharSequence;",
+        string_substring_range,
+    );
+    shared.register_native(
+        "java/lang/String",
+        "chars",
+        "()Ljava/util/stream/IntStream;",
+        string_chars,
+    );
+    shared.register_native(
+        "java/lang/String",
+        "toUpperCase",
+        "()Ljava/lang/String;",
+        string_to_upper,
+    );
+    shared.register_native(
+        "java/lang/String",
+        "toUpperCase",
+        "(Ljava/util/Locale;)Ljava/lang/String;",
+        string_to_upper,
+    );
+    shared.register_native(
+        "java/lang/String",
+        "toLowerCase",
+        "()Ljava/lang/String;",
+        string_to_lower,
+    );
+    shared.register_native(
+        "java/lang/String",
+        "toLowerCase",
+        "(Ljava/util/Locale;)Ljava/lang/String;",
+        string_to_lower,
     );
     shared.register_native(
         "java/lang/String",
@@ -1514,6 +1571,133 @@ fn string_value_of_chars_range(
         .ok_or_else(|| VmError::Native("String.valueOf range is outside the array".to_owned()))?;
     let text = string_from_utf16(range, "String.valueOf")?;
     Ok(Some(new_string(shared, text)))
+}
+
+/// `String.getBytes()`: the UTF-8 bytes, the `file.encoding` this VM reports.
+fn string_get_bytes(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    _args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let text = receiver_text(shared, receiver)?;
+    Ok(Some(Value::Ref(crate::resources::allocate_bytes(
+        shared,
+        text.as_bytes(),
+    )?)))
+}
+
+/// `String.getBytes(String)`: the named charset must be UTF-8.
+fn string_get_bytes_charset(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let charset = string_argument(shared, args, 0, "String.getBytes")?;
+    if !charset.eq_ignore_ascii_case("UTF-8") && !charset.eq_ignore_ascii_case("UTF8") {
+        return Err(VmError::Native(format!(
+            "String.getBytes: charset {charset} is not supported (only UTF-8)"
+        )));
+    }
+    string_get_bytes(shared, _thread, _loader, receiver, &[])
+}
+
+/// `String.toUpperCase()`: Unicode upper case.
+///
+/// The `Locale` overload ignores the locale: the VM has no locale data, and Rust's
+/// Unicode mapping matches the root locale. A Turkish dotless-i mapping is the one case a
+/// locale changes, and it is documented as a boundary rather than silently approximated.
+fn string_to_upper(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    _args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let text = receiver_text(shared, receiver)?.to_uppercase();
+    Ok(Some(Value::Ref(shared.heap().allocate_string(text))))
+}
+
+/// `String.toLowerCase()`: Unicode lower case; the locale is ignored as for upper case.
+fn string_to_lower(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    _args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let text = receiver_text(shared, receiver)?.to_lowercase();
+    Ok(Some(Value::Ref(shared.heap().allocate_string(text))))
+}
+
+/// `String.chars()`: the UTF-16 code units as an `IntStream`.
+///
+/// The stream is the VM's eager stream shape, tagged with the `IntStream` interface so the
+/// `IntStream` natives receive it. A supplementary character is therefore two elements,
+/// exactly as `chars()` documents.
+fn string_chars(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    _args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let text = receiver_text(shared, receiver)?;
+    let class = shared.load_library_class("java/util/stream/IntStream")?;
+    let elements = text
+        .encode_utf16()
+        .map(|unit| Value::Int(i32::from(unit)))
+        .collect();
+    Ok(Some(Value::Ref(shared.heap().allocate_stream(
+        elements,
+        false,
+        Some(class),
+    ))))
+}
+
+/// `String.getBytes(Charset)`: the text in the named charset.
+fn string_get_bytes_object(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let Some(Value::Ref(charset)) = args.first().copied() else {
+        return Err(VmError::Native(
+            "String.getBytes expects a Charset".to_owned(),
+        ));
+    };
+    if charset.is_null() {
+        return Err(VmError::Native("String.getBytes: null Charset".to_owned()));
+    }
+    let name = shared
+        .charset_state()
+        .name(charset)
+        .ok_or_else(|| VmError::Native("String.getBytes: unknown Charset".to_owned()))?;
+    let text = receiver_text(shared, receiver)?;
+    let bytes = match name.as_str() {
+        "UTF-8" => text.into_bytes(),
+        "US-ASCII" => text
+            .chars()
+            .map(|character| u8::try_from(character as u32).unwrap_or(b'?'))
+            .collect(),
+        "ISO-8859-1" => text
+            .chars()
+            .map(|character| u8::try_from(character as u32).unwrap_or(b'?'))
+            .collect(),
+        other => {
+            return Err(VmError::Native(format!(
+                "String.getBytes: charset {other} is not supported"
+            )));
+        }
+    };
+    Ok(Some(Value::Ref(crate::resources::allocate_bytes(
+        shared, &bytes,
+    )?)))
 }
 
 #[cfg(test)]

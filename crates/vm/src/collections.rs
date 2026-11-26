@@ -62,6 +62,24 @@ pub const COPY_ON_WRITE_ARRAY_SET_CLASS: &str = "java/util/concurrent/CopyOnWrit
 /// The internal name of the array deque's runtime class.
 pub const ARRAY_DEQUE_CLASS: &str = "java/util/ArrayDeque";
 
+/// The internal name of the blocking queue's runtime class.
+///
+/// It shares the list shape (a FIFO sequence); only its capacity and the blocking
+/// operations that M5 owns are new.
+pub const LINKED_BLOCKING_QUEUE_CLASS: &str = "java/util/concurrent/LinkedBlockingQueue";
+
+/// The internal name of the legacy stack's runtime class.
+///
+/// It extends `java.util.Vector`, which the C1 tree does not project, so the VM models the
+/// stack as the list shape and supplies the stack's own operations.
+pub const STACK_CLASS: &str = "java/util/Stack";
+
+/// The internal name of the concurrent deque's runtime class.
+pub const CONCURRENT_LINKED_DEQUE_CLASS: &str = "java/util/concurrent/ConcurrentLinkedDeque";
+
+/// The internal name of the concurrent queue's runtime class.
+pub const CONCURRENT_LINKED_QUEUE_CLASS: &str = "java/util/concurrent/ConcurrentLinkedQueue";
+
 /// The internal name of the iterator interface.
 pub const ITERATOR_CLASS: &str = "java/util/Iterator";
 
@@ -262,7 +280,25 @@ pub fn register_natives(shared: &Shared) {
     for class in [LINKED_LIST_CLASS, COPY_ON_WRITE_ARRAY_LIST_CLASS] {
         register_list_surface(shared, class);
     }
-    register_deque_natives(shared);
+    register_deque_natives(shared, ARRAY_DEQUE_CLASS);
+    register_stack_natives(shared);
+    register_deque_natives(shared, CONCURRENT_LINKED_DEQUE_CLASS);
+    register_concurrent_queue_natives(shared);
+    register_queue_natives(shared);
+    // `CopyOnWriteArrayList` declares the absent-insertion pair itself; logback's
+    // `COWArrayList` subclass reaches `addIfAbsent` while it attaches an appender.
+    shared.register_native(
+        COPY_ON_WRITE_ARRAY_LIST_CLASS,
+        "addIfAbsent",
+        "(Ljava/lang/Object;)Z",
+        list_add_if_absent,
+    );
+    shared.register_native(
+        COPY_ON_WRITE_ARRAY_LIST_CLASS,
+        "addAllAbsent",
+        "(Ljava/util/Collection;)I",
+        list_add_all_absent,
+    );
     register_set_natives(shared);
     register_iterator_natives(shared);
     register_collections_natives(shared);
@@ -277,6 +313,27 @@ pub fn register_natives(shared: &Shared) {
         "nextElement",
         "()Ljava/lang/Object;",
         enumeration_next,
+    );
+    // `List.copyOf`/`Set.copyOf`/`Map.copyOf`: the immutable copies Spring's listener
+    // list and the factory loader build. They copy the elements; immutability itself is
+    // outside this slice, exactly as for `Collections.unmodifiableList`.
+    shared.register_native(
+        "java/util/List",
+        "copyOf",
+        "(Ljava/util/Collection;)Ljava/util/List;",
+        list_copy_of,
+    );
+    shared.register_native(
+        "java/util/Set",
+        "copyOf",
+        "(Ljava/util/Collection;)Ljava/util/Set;",
+        set_copy_of,
+    );
+    shared.register_native(
+        "java/util/Map",
+        "copyOf",
+        "(Ljava/util/Map;)Ljava/util/Map;",
+        map_copy_of,
     );
     // The abstract collection superclasses carry no initializer `Code` in the C1 stubs.
     for class in [
@@ -449,6 +506,7 @@ pub fn register_natives(shared: &Shared) {
 /// Register the `java.util.Collections` helpers Spring's static initializers use.
 fn register_collections_natives(shared: &Shared) {
     let class = "java/util/Collections";
+    shared.register_native(class, "reverse", "(Ljava/util/List;)V", collections_reverse);
     shared.register_native(
         class,
         "emptySet",
@@ -681,6 +739,20 @@ fn register_set_natives(shared: &Shared) {
             shared.register_native(class, name, descriptor, set_init);
         }
     }
+    // `TreeSet(Comparator)` keeps the comparator out of the set shape; this VM's sets are
+    // insertion-ordered, so the constructor only starts empty.
+    shared.register_native(
+        TREE_SET_CLASS,
+        "<init>",
+        "(Ljava/util/Comparator;)V",
+        set_init_comparator,
+    );
+    shared.register_native(
+        TREE_SET_CLASS,
+        "<init>",
+        "(Ljava/util/SortedSet;)V",
+        set_init,
+    );
     for class in [
         HASH_SET_CLASS,
         TREE_SET_CLASS,
@@ -783,6 +855,18 @@ fn register_set_natives(shared: &Shared) {
         "allOf",
         "(Ljava/lang/Class;)Ljava/util/EnumSet;",
         enum_set_none_of,
+    );
+    shared.register_native(
+        "java/util/EnumSet",
+        "copyOf",
+        "(Ljava/util/Collection;)Ljava/util/EnumSet;",
+        enum_set_copy_of,
+    );
+    shared.register_native(
+        "java/util/EnumSet",
+        "copyOf",
+        "(Ljava/util/EnumSet;)Ljava/util/EnumSet;",
+        enum_set_clone,
     );
 }
 
@@ -1585,6 +1669,44 @@ fn array_list_remove_object(
     };
     list.remove(position);
     Ok(Some(Value::Int(1)))
+}
+
+fn list_add_if_absent(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let value = reference_argument(args, 0, "CopyOnWriteArrayList.addIfAbsent")?;
+    let mut heap = shared.heap();
+    let list = heap.list_mut(receiver).map_err(heap_error)?;
+    if list.contains(&Value::Ref(value)) {
+        return Ok(Some(Value::Int(0)));
+    }
+    list.push(Value::Ref(value));
+    Ok(Some(Value::Int(1)))
+}
+
+fn list_add_all_absent(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let source = reference_argument(args, 0, "CopyOnWriteArrayList.addAllAbsent")?;
+    let values = collection_elements(shared, source, "CopyOnWriteArrayList.addAllAbsent")?;
+    let mut heap = shared.heap();
+    let list = heap.list_mut(receiver).map_err(heap_error)?;
+    let mut added = 0i32;
+    for value in values {
+        if !list.contains(&value) {
+            list.push(value);
+            added += 1;
+        }
+    }
+    Ok(Some(Value::Int(added)))
 }
 
 fn array_list_contains(
@@ -2829,6 +2951,45 @@ fn fixed_map(
     Ok(Some(Value::Ref(map)))
 }
 
+/// `EnumSet.copyOf(Collection)`: the collection's elements as an `EnumSet`.
+///
+/// The VM's enum set is the ordinary set shape with the `java.util.EnumSet` class; the
+/// element's enum type is carried by the elements themselves, so no separate enum-type
+/// field is needed. The JDK rejects an empty collection because it cannot infer the
+/// element type; this slice reports that as a typed error for the same reason.
+fn enum_set_copy_of(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let source = reference_argument(args, 0, "EnumSet.copyOf")?;
+    let values = collection_elements(shared, source, "EnumSet.copyOf")?;
+    if values.is_empty() {
+        // The JDK throws `IllegalArgumentException` here (the element type is unknown);
+        // a caller that guards the call catches it.
+        let throwable = crate::exceptions::new_throwable(
+            shared,
+            "java/lang/IllegalArgumentException",
+            "Collection is empty".to_owned(),
+        )?;
+        return Err(VmError::Thrown(throwable));
+    }
+    let class = shared.load_library_class("java/util/EnumSet")?;
+    let set = shared.heap().allocate_set(class);
+    for value in values {
+        let present = {
+            let heap = shared.heap();
+            contains_value(&heap, heap.set(set).map_err(heap_error)?, value)?
+        };
+        if !present {
+            shared.heap().set_mut(set).map_err(heap_error)?.push(value);
+        }
+    }
+    Ok(Some(Value::Ref(set)))
+}
+
 /// `EnumSet.noneOf(Class)`: an empty set of the enum type.
 ///
 /// The C1 tree has only the abstract `EnumSet`, so the set's runtime class is
@@ -3023,9 +3184,8 @@ fn enumeration_next(
     Ok(Some(value))
 }
 
-/// Register the `java.util.ArrayDeque` surface over the list shape.
-fn register_deque_natives(shared: &Shared) {
-    let class = ARRAY_DEQUE_CLASS;
+/// Register a `Deque` surface over the list shape.
+fn register_deque_natives(shared: &Shared, class: &'static str) {
     shared.register_native(class, "<init>", "()V", array_list_init);
     shared.register_native(class, "<init>", "(I)V", array_list_init_capacity);
     shared.register_native(
@@ -3082,6 +3242,48 @@ fn register_deque_natives(shared: &Shared) {
     shared.register_native(class, "getLast", "()Ljava/lang/Object;", deque_peek_back);
     shared.register_native(class, "iterator", "()Ljava/util/Iterator;", list_iterator);
     shared.register_native(class, "toArray", "()[Ljava/lang/Object;", set_to_array);
+}
+
+/// Register the `java.util.concurrent.ConcurrentLinkedQueue` surface over the list shape.
+///
+/// The queue is a FIFO sequence; its operations never block, so the ordinary list
+/// functions are the whole implementation.
+fn register_concurrent_queue_natives(shared: &Shared) {
+    let class = CONCURRENT_LINKED_QUEUE_CLASS;
+    shared.register_native(class, "<init>", "()V", array_list_init);
+    shared.register_native(
+        class,
+        "<init>",
+        "(Ljava/util/Collection;)V",
+        deque_init_collection,
+    );
+    shared.register_native(class, "size", "()I", array_list_size);
+    shared.register_native(class, "isEmpty", "()Z", array_list_is_empty);
+    shared.register_native(class, "offer", "(Ljava/lang/Object;)Z", deque_push_back);
+    shared.register_native(class, "add", "(Ljava/lang/Object;)Z", deque_push_back);
+    shared.register_native(class, "poll", "()Ljava/lang/Object;", deque_poll_front);
+    shared.register_native(class, "remove", "()Ljava/lang/Object;", deque_poll_front);
+    shared.register_native(class, "peek", "()Ljava/lang/Object;", deque_peek_front);
+    shared.register_native(class, "element", "()Ljava/lang/Object;", deque_peek_front);
+    shared.register_native(
+        class,
+        "remove",
+        "(Ljava/lang/Object;)Z",
+        array_list_remove_object,
+    );
+    shared.register_native(
+        class,
+        "contains",
+        "(Ljava/lang/Object;)Z",
+        array_list_contains,
+    );
+    shared.register_native(class, "iterator", "()Ljava/util/Iterator;", list_iterator);
+    shared.register_native(
+        class,
+        "toArray",
+        "()[Ljava/lang/Object;",
+        abstract_collection_to_array,
+    );
 }
 
 fn deque_init_collection(
@@ -3206,4 +3408,543 @@ fn deque_peek_back(
     Ok(Some(
         list.last().copied().unwrap_or(Value::Ref(ObjRef::NULL)),
     ))
+}
+
+// ---------------------------------------------------------------------------
+// `java.util.concurrent.LinkedBlockingQueue`
+// ---------------------------------------------------------------------------
+
+/// Register the `LinkedBlockingQueue` surface over the list shape.
+///
+/// A blocking queue is a FIFO sequence, so the elements live in the same list shape as
+/// the other containers. SLF4J 2 constructs one unconditionally while `LoggerFactory`
+/// initializes its substitute provider, which is the startup path M4.5 has to run.
+///
+/// The VM is single-threaded until M5. `offer`, `poll`, `peek`, `clear` and the query
+/// methods never wait, and they are the whole surface the startup path touches. `put`
+/// and `take` perform their operation when it cannot block and report a typed error when
+/// it would have to wait; waking a producer or consumer is the M5 boundary, not a
+/// behaviour this slice can honestly provide.
+fn register_queue_natives(shared: &Shared) {
+    let class = LINKED_BLOCKING_QUEUE_CLASS;
+    shared.register_native(class, "<init>", "()V", queue_init);
+    shared.register_native(class, "<init>", "(I)V", queue_init_capacity);
+    shared.register_native(
+        class,
+        "<init>",
+        "(Ljava/util/Collection;)V",
+        queue_init_collection,
+    );
+    shared.register_native(class, "size", "()I", array_list_size);
+    shared.register_native(class, "isEmpty", "()Z", array_list_is_empty);
+    shared.register_native(class, "remainingCapacity", "()I", queue_remaining_capacity);
+    shared.register_native(class, "offer", "(Ljava/lang/Object;)Z", queue_offer);
+    shared.register_native(class, "add", "(Ljava/lang/Object;)Z", queue_add);
+    shared.register_native(class, "put", "(Ljava/lang/Object;)V", queue_put);
+    shared.register_native(class, "poll", "()Ljava/lang/Object;", deque_poll_front);
+    shared.register_native(class, "take", "()Ljava/lang/Object;", queue_take);
+    shared.register_native(class, "peek", "()Ljava/lang/Object;", deque_peek_front);
+    shared.register_native(class, "clear", "()V", array_list_clear);
+    shared.register_native(
+        class,
+        "contains",
+        "(Ljava/lang/Object;)Z",
+        array_list_contains,
+    );
+    shared.register_native(
+        class,
+        "remove",
+        "(Ljava/lang/Object;)Z",
+        array_list_remove_object,
+    );
+    shared.register_native(
+        class,
+        "drainTo",
+        "(Ljava/util/Collection;)I",
+        queue_drain_to,
+    );
+    shared.register_native(
+        class,
+        "drainTo",
+        "(Ljava/util/Collection;I)I",
+        queue_drain_to_max,
+    );
+    shared.register_native(
+        class,
+        "toArray",
+        "()[Ljava/lang/Object;",
+        abstract_collection_to_array,
+    );
+    shared.register_native(
+        class,
+        "toArray",
+        "([Ljava/lang/Object;)[Ljava/lang/Object;",
+        collection_to_array_into,
+    );
+    shared.register_native(class, "iterator", "()Ljava/util/Iterator;", list_iterator);
+}
+
+fn queue_init(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    _args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let mut heap = shared.heap();
+    heap.list_mut(receiver).map_err(heap_error)?.clear();
+    heap.set_list_capacity(receiver, usize::MAX)
+        .map_err(heap_error)?;
+    Ok(None)
+}
+
+fn queue_init_capacity(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let capacity = int_argument(args, 0, "LinkedBlockingQueue.<init>")?;
+    let capacity = usize::try_from(capacity).ok().filter(|value| *value > 0);
+    let Some(capacity) = capacity else {
+        return Err(VmError::Native(
+            "LinkedBlockingQueue.<init>: capacity must be positive".to_owned(),
+        ));
+    };
+    let mut heap = shared.heap();
+    heap.list_mut(receiver).map_err(heap_error)?.clear();
+    heap.set_list_capacity(receiver, capacity)
+        .map_err(heap_error)?;
+    Ok(None)
+}
+
+fn queue_init_collection(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let source = reference_argument(args, 0, "LinkedBlockingQueue.<init>")?;
+    let values = collection_elements(shared, source, "LinkedBlockingQueue.<init>")?;
+    if values
+        .iter()
+        .any(|value| matches!(value, Value::Ref(reference) if reference.is_null()))
+    {
+        return Err(VmError::Native(
+            "LinkedBlockingQueue.<init>: null elements are not permitted".to_owned(),
+        ));
+    }
+    let mut heap = shared.heap();
+    let list = heap.list_mut(receiver).map_err(heap_error)?;
+    list.clear();
+    list.extend(values);
+    heap.set_list_capacity(receiver, usize::MAX)
+        .map_err(heap_error)?;
+    Ok(None)
+}
+
+fn queue_remaining_capacity(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    _args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let heap = shared.heap();
+    let capacity = heap.list_capacity(receiver).map_err(heap_error)?;
+    let length = heap.list(receiver).map_err(heap_error)?.len();
+    let remaining = capacity.saturating_sub(length).min(i32::MAX as usize);
+    Ok(Some(Value::Int(remaining as i32)))
+}
+
+fn queue_offer(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let value = reference_argument(args, 0, "LinkedBlockingQueue.offer")?;
+    if value.is_null() {
+        return Err(VmError::Native(
+            "LinkedBlockingQueue.offer: null elements are not permitted".to_owned(),
+        ));
+    }
+    let mut heap = shared.heap();
+    let capacity = heap.list_capacity(receiver).map_err(heap_error)?;
+    let list = heap.list_mut(receiver).map_err(heap_error)?;
+    if list.len() >= capacity {
+        return Ok(Some(Value::Int(0)));
+    }
+    list.push(Value::Ref(value));
+    Ok(Some(Value::Int(1)))
+}
+
+fn queue_add(
+    shared: &Shared,
+    thread: &ThreadState,
+    loader: LoaderId,
+    receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let offered = queue_offer(shared, thread, loader, receiver, args)?;
+    if offered == Some(Value::Int(0)) {
+        return Err(VmError::Native(
+            "LinkedBlockingQueue.add: the queue is full".to_owned(),
+        ));
+    }
+    Ok(Some(Value::Int(1)))
+}
+
+fn queue_put(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let value = reference_argument(args, 0, "LinkedBlockingQueue.put")?;
+    if value.is_null() {
+        return Err(VmError::Native(
+            "LinkedBlockingQueue.put: null elements are not permitted".to_owned(),
+        ));
+    }
+    let mut heap = shared.heap();
+    let capacity = heap.list_capacity(receiver).map_err(heap_error)?;
+    let list = heap.list_mut(receiver).map_err(heap_error)?;
+    if list.len() >= capacity {
+        return Err(VmError::Native(
+            "LinkedBlockingQueue.put would block on a full queue; the VM is single-threaded until M5"
+                .to_owned(),
+        ));
+    }
+    list.push(Value::Ref(value));
+    Ok(None)
+}
+
+fn queue_take(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    _args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let mut heap = shared.heap();
+    let list = heap.list_mut(receiver).map_err(heap_error)?;
+    if list.is_empty() {
+        return Err(VmError::Native(
+            "LinkedBlockingQueue.take would block on an empty queue; the VM is single-threaded until M5"
+                .to_owned(),
+        ));
+    }
+    Ok(Some(list.remove(0)))
+}
+
+fn queue_drain_to(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let target = reference_argument(args, 0, "LinkedBlockingQueue.drainTo")?;
+    let drained = drain_queue(shared, receiver, target, usize::MAX)?;
+    Ok(Some(Value::Int(drained)))
+}
+
+fn queue_drain_to_max(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let target = reference_argument(args, 0, "LinkedBlockingQueue.drainTo")?;
+    let max = int_argument(args, 1, "LinkedBlockingQueue.drainTo")?;
+    let limit = usize::try_from(max).unwrap_or(0);
+    if limit == 0 {
+        return Ok(Some(Value::Int(0)));
+    }
+    let drained = drain_queue(shared, receiver, target, limit)?;
+    Ok(Some(Value::Int(drained)))
+}
+
+/// Move up to `limit` front elements from `receiver` to the collection `target`.
+fn drain_queue(
+    shared: &Shared,
+    receiver: ObjRef,
+    target: ObjRef,
+    limit: usize,
+) -> Result<i32, VmError> {
+    let mut heap = shared.heap();
+    let (values, count): (Vec<Value>, usize) = {
+        let list = heap.list_mut(receiver).map_err(heap_error)?;
+        let count = limit.min(list.len());
+        (list.drain(..count).collect(), count)
+    };
+    let is_list = matches!(heap.get(target).map_err(heap_error)?, HeapObject::List(_));
+    if is_list {
+        heap.list_mut(target).map_err(heap_error)?.extend(values);
+    } else if matches!(heap.get(target).map_err(heap_error)?, HeapObject::Set(_)) {
+        for value in values {
+            let present = {
+                let set = heap.set(target).map_err(heap_error)?;
+                contains_value(&heap, set, value)?
+            };
+            if !present {
+                heap.set_mut(target).map_err(heap_error)?.push(value);
+            }
+        }
+    } else {
+        return Err(VmError::Native(
+            "LinkedBlockingQueue.drainTo expects a java.util.Collection argument".to_owned(),
+        ));
+    }
+    i32::try_from(count).map_err(|_| {
+        VmError::Native("LinkedBlockingQueue.drainTo drained too many elements".to_owned())
+    })
+}
+
+/// `List.copyOf(Collection)`: a list holding the source elements.
+fn list_copy_of(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let source = reference_argument(args, 0, "List.copyOf")?;
+    let values = collection_elements(shared, source, "List.copyOf")?;
+    let class = shared.load_library_class(ARRAY_LIST_CLASS)?;
+    let list = shared.heap().allocate_list(class);
+    shared
+        .heap()
+        .list_mut(list)
+        .map_err(heap_error)?
+        .extend(values);
+    Ok(Some(Value::Ref(list)))
+}
+
+/// `Set.copyOf(Collection)`: a set holding the distinct source elements.
+fn set_copy_of(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let source = reference_argument(args, 0, "Set.copyOf")?;
+    let values = collection_elements(shared, source, "Set.copyOf")?;
+    let class = shared.load_library_class(HASH_SET_CLASS)?;
+    let set = shared.heap().allocate_set(class);
+    for value in values {
+        let present = {
+            let heap = shared.heap();
+            contains_value(&heap, heap.set(set).map_err(heap_error)?, value)?
+        };
+        if !present {
+            shared.heap().set_mut(set).map_err(heap_error)?.push(value);
+        }
+    }
+    Ok(Some(Value::Ref(set)))
+}
+
+/// `Map.copyOf(Map)`: a map holding the source entries.
+fn map_copy_of(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let source = reference_argument(args, 0, "Map.copyOf")?;
+    let entries = {
+        let heap = shared.heap();
+        match heap.get(source).map_err(heap_error)? {
+            HeapObject::Map(map) => map.entries.clone(),
+            _ => {
+                return Err(VmError::Native(
+                    "Map.copyOf expects a java.util.Map argument".to_owned(),
+                ));
+            }
+        }
+    };
+    let class = shared.load_library_class(crate::maps::HASH_MAP_CLASS)?;
+    let map = shared.heap().allocate_map(class);
+    shared
+        .heap()
+        .map_mut(map)
+        .map_err(heap_error)?
+        .extend(entries);
+    Ok(Some(Value::Ref(map)))
+}
+
+/// `Collections.reverse(List)`: reverse the list in place.
+fn collections_reverse(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let list = reference_argument(args, 0, "Collections.reverse")?;
+    if list.is_null() {
+        return Err(VmError::Native(
+            "Collections.reverse received a null list".to_owned(),
+        ));
+    }
+    shared.heap().list_mut(list).map_err(heap_error)?.reverse();
+    Ok(None)
+}
+
+/// Register the `java.util.Stack` surface over the list shape.
+///
+/// `Stack` is the legacy `Vector` subclass logback's `NodeToStringTransformer` uses for its
+/// recursion guard. The C1 tree projects `Stack` but not its `Vector` superclass, so the VM
+/// models it as the list shape (the same decision as `ArrayDeque`) and implements the stack
+/// operations directly.
+fn register_stack_natives(shared: &Shared) {
+    let class = STACK_CLASS;
+    shared.register_native(class, "<init>", "()V", array_list_init);
+    shared.register_native(class, "size", "()I", array_list_size);
+    shared.register_native(class, "isEmpty", "()Z", array_list_is_empty);
+    shared.register_native(
+        class,
+        "push",
+        "(Ljava/lang/Object;)Ljava/lang/Object;",
+        stack_push,
+    );
+    shared.register_native(class, "add", "(Ljava/lang/Object;)Z", deque_push_back);
+    shared.register_native(
+        class,
+        "addElement",
+        "(Ljava/lang/Object;)V",
+        deque_push_back_void,
+    );
+    shared.register_native(class, "pop", "()Ljava/lang/Object;", stack_pop);
+    shared.register_native(class, "peek", "()Ljava/lang/Object;", deque_peek_front);
+    shared.register_native(class, "empty", "()Z", array_list_is_empty);
+    shared.register_native(
+        class,
+        "lastElement",
+        "()Ljava/lang/Object;",
+        deque_peek_back,
+    );
+    shared.register_native(
+        class,
+        "firstElement",
+        "()Ljava/lang/Object;",
+        deque_peek_front,
+    );
+    shared.register_native(class, "get", "(I)Ljava/lang/Object;", array_list_get);
+    shared.register_native(class, "elementAt", "(I)Ljava/lang/Object;", array_list_get);
+    shared.register_native(
+        class,
+        "set",
+        "(ILjava/lang/Object;)Ljava/lang/Object;",
+        array_list_set,
+    );
+    shared.register_native(
+        class,
+        "remove",
+        "(I)Ljava/lang/Object;",
+        array_list_remove_at,
+    );
+    shared.register_native(class, "iterator", "()Ljava/util/Iterator;", list_iterator);
+    shared.register_native(class, "search", "(Ljava/lang/Object;)I", stack_search);
+    shared.register_native(
+        class,
+        "toArray",
+        "()[Ljava/lang/Object;",
+        abstract_collection_to_array,
+    );
+}
+
+fn stack_push(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let value = reference_argument(args, 0, "Stack.push")?;
+    shared
+        .heap()
+        .list_mut(receiver)
+        .map_err(heap_error)?
+        .push(Value::Ref(value));
+    Ok(Some(Value::Ref(value)))
+}
+
+fn stack_pop(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    _args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let mut heap = shared.heap();
+    let list = heap.list_mut(receiver).map_err(heap_error)?;
+    match list.pop() {
+        Some(value) => Ok(Some(value)),
+        None => Err(VmError::Native(
+            "Stack.pop on an empty stack (EmptyStackException is not synthesized)".to_owned(),
+        )),
+    }
+}
+
+fn stack_search(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let value = reference_argument(args, 0, "Stack.search")?;
+    let position = {
+        let heap = shared.heap();
+        heap.list(receiver)
+            .map_err(heap_error)?
+            .iter()
+            .rev()
+            .position(|element| *element == Value::Ref(value))
+    };
+    Ok(Some(Value::Int(match position {
+        Some(position) => (position + 1) as i32,
+        None => -1,
+    })))
+}
+
+/// `TreeSet(Comparator)`: an empty set; the comparator is accepted and not stored.
+fn set_init_comparator(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    _args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    shared.heap().set_mut(receiver).map_err(heap_error)?.clear();
+    Ok(None)
+}
+
+/// `EnumSet.copyOf(EnumSet)`: a copy that, unlike the `Collection` overload, may be empty.
+fn enum_set_clone(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let source = reference_argument(args, 0, "EnumSet.copyOf")?;
+    let values = collection_elements(shared, source, "EnumSet.copyOf")?;
+    let class = shared.load_library_class("java/util/EnumSet")?;
+    let set = shared.heap().allocate_set(class);
+    shared
+        .heap()
+        .set_mut(set)
+        .map_err(heap_error)?
+        .extend(values);
+    Ok(Some(Value::Ref(set)))
 }

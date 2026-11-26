@@ -1788,6 +1788,7 @@ fn register_character_natives(shared: &Shared) {
         ("isSurrogate", character_is_surrogate),
     ] {
         shared.register_native(class, name, "(C)Z", function);
+        shared.register_native(class, name, "(I)Z", function);
     }
     shared.register_native(class, "toLowerCase", "(C)C", character_to_lower);
     shared.register_native(class, "toUpperCase", "(C)C", character_to_upper);
@@ -1821,10 +1822,14 @@ fn character_predicate(
     method: &'static str,
     predicate: impl FnOnce(char) -> bool,
 ) -> Result<Option<Value>, VmError> {
-    let unit = character_unit(args, 0, method)?;
-    let result = char::from_u32(u32::from(unit))
-        .map(predicate)
-        .unwrap_or(false);
+    // The `(I)Z` overloads take a code point; the `(C)Z` callers pass a UTF-16 unit, which
+    // is also a valid code point. A value outside Unicode is false rather than an error,
+    // exactly as `Character.isDigit(int)` documents for a non-character int.
+    let code_point = match args.first().copied() {
+        Some(Value::Int(value)) if (0..=0x10ffff).contains(&value) => value as u32,
+        _ => return Err(VmError::Native(format!("{method} expects an int argument"))),
+    };
+    let result = char::from_u32(code_point).map(predicate).unwrap_or(false);
     Ok(Some(Value::Int(i32::from(result))))
 }
 

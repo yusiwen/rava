@@ -33,6 +33,8 @@ pub struct ResourceState {
     streams: HashMap<ObjRef, StreamData>,
     byte_output_streams: HashMap<ObjRef, Vec<u8>>,
     connections: HashMap<ObjRef, ConnectionData>,
+    readers: HashMap<ObjRef, ReaderData>,
+    buffered_readers: HashMap<ObjRef, ObjRef>,
 }
 
 impl ResourceState {
@@ -44,6 +46,8 @@ impl ResourceState {
             .chain(self.streams.keys())
             .chain(self.byte_output_streams.keys())
             .chain(self.connections.keys())
+            .chain(self.readers.keys())
+            .chain(self.buffered_readers.keys())
             .copied()
             .collect()
     }
@@ -154,6 +158,13 @@ impl UrlData {
             None => self.path.clone(),
         }
     }
+}
+
+/// One `java.io.InputStreamReader` over the UTF-16 units of a decoded snapshot.
+#[derive(Debug, Clone)]
+struct ReaderData {
+    units: Vec<u16>,
+    position: usize,
 }
 
 /// One `java.io.InputStream` over a byte snapshot.
@@ -294,8 +305,81 @@ pub fn register_natives(shared: &Shared) {
     ] {
         shared.register_native("java/io/ByteArrayOutputStream", name, descriptor, function);
     }
+    // `InputStreamReader` is how Spring's `StreamUtils.copyToString` reads a resource as
+    // text; the reader decodes the remaining stream bytes once and serves UTF-16 units.
+    for (name, descriptor) in [
+        ("<init>", "(Ljava/io/InputStream;)V"),
+        (
+            "<init>",
+            "(Ljava/io/InputStream;Ljava/nio/charset/Charset;)V",
+        ),
+    ] {
+        shared.register_native("java/io/InputStreamReader", name, descriptor, reader_init);
+    }
+    for class in ["java/io/InputStreamReader", "java/io/Reader"] {
+        for (name, descriptor, function) in [
+            ("read", "()I", reader_read as crate::NativeFn),
+            ("read", "([C)I", reader_read_array),
+            ("read", "([CII)I", reader_read_range),
+            ("close", "()V", reader_close),
+            ("ready", "()Z", reader_ready),
+            ("skip", "(J)J", reader_skip),
+            ("getEncoding", "()Ljava/lang/String;", reader_encoding),
+        ] {
+            shared.register_native(class, name, descriptor, function);
+        }
+    }
+    // `BufferedReader` wraps a Reader; Spring's resource-text code reads it line by line.
+    for descriptor in ["(Ljava/io/Reader;)V", "(Ljava/io/Reader;I)V"] {
+        shared.register_native(
+            "java/io/BufferedReader",
+            "<init>",
+            descriptor,
+            buffered_reader_init,
+        );
+    }
+    shared.register_native(
+        "java/io/BufferedReader",
+        "read",
+        "()I",
+        buffered_reader_read,
+    );
+    shared.register_native(
+        "java/io/BufferedReader",
+        "readLine",
+        "()Ljava/lang/String;",
+        buffered_reader_read_line,
+    );
+    shared.register_native(
+        "java/io/BufferedReader",
+        "close",
+        "()V",
+        buffered_reader_close,
+    );
+    shared.register_native(
+        "java/io/BufferedReader",
+        "ready",
+        "()Z",
+        buffered_reader_ready,
+    );
     // `ByteArrayOutputStream` inherits `flush` from `OutputStream`.
     shared.register_native("java/io/OutputStream", "flush", "()V", output_stream_flush);
+    // `OutputStream.close()` is a no-op in the JDK; a stream this VM hands out owns no OS
+    // handle, so closing it has nothing to release.
+    shared.register_native("java/io/OutputStream", "close", "()V", output_stream_flush);
+    // Every `OutputStream` subclass's constructor chains to this one, which the C1 stub
+    // declares without `Code`.
+    shared.register_native("java/io/OutputStream", "<init>", "()V", output_stream_init);
+}
+
+fn output_stream_init(
+    _shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    _args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    Ok(None)
 }
 
 fn heap_error(error: crate::HeapError) -> VmError {
@@ -404,7 +488,19 @@ fn url_init_string(
     args: &[Value],
 ) -> Result<Option<Value>, VmError> {
     let form = string_argument(shared, args, 0, "URL.<init>")?;
-    let data = UrlData::parse(&form).map_err(VmError::Native)?;
+    let data = match UrlData::parse(&form) {
+        Ok(data) => data,
+        // `new URL(location)` reports a bad location as `MalformedURLException`, and
+        // Spring's resource lookup catches exactly that to fall back to a file path.
+        Err(message) => {
+            let throwable = crate::exceptions::new_throwable(
+                shared,
+                "java/net/MalformedURLException",
+                message,
+            )?;
+            return Err(VmError::Thrown(throwable));
+        }
+    };
     shared.resource_state().urls.insert(receiver, data);
     Ok(None)
 }
@@ -834,7 +930,7 @@ fn stream_remaining(shared: &Shared, reference: ObjRef) -> Result<usize, VmError
     Ok(stream.bytes.len() - stream.position)
 }
 
-fn allocate_bytes(shared: &Shared, bytes: &[u8]) -> Result<ObjRef, VmError> {
+pub(crate) fn allocate_bytes(shared: &Shared, bytes: &[u8]) -> Result<ObjRef, VmError> {
     let array = shared
         .heap()
         .allocate_array(ClassRef::Primitive(PrimitiveKind::Byte), bytes.len());
@@ -1452,6 +1548,341 @@ fn hex_value(byte: u8) -> Option<u8> {
         b'A'..=b'F' => Some(byte - b'A' + 10),
         _ => None,
     }
+}
+
+/// `InputStreamReader.<init>(InputStream[, Charset])`: decode the remaining bytes now.
+fn reader_init(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let Some(Value::Ref(stream)) = args.first().copied() else {
+        return Err(VmError::Native(
+            "InputStreamReader.<init> expects an InputStream".to_owned(),
+        ));
+    };
+    if stream.is_null() {
+        return Err(VmError::Native(
+            "InputStreamReader.<init>: null InputStream".to_owned(),
+        ));
+    }
+    if let Some(Value::Ref(charset)) = args.get(1).copied() {
+        if !charset.is_null() {
+            let name = shared
+                .charset_state()
+                .name(charset)
+                .ok_or_else(|| VmError::Native("InputStreamReader: unknown Charset".to_owned()))?;
+            if name != "UTF-8" {
+                return Err(VmError::Native(format!(
+                    "InputStreamReader: charset {name} is not supported"
+                )));
+            }
+        }
+    }
+    let bytes = read_stream_to_end(shared, stream)?;
+    let text = String::from_utf8_lossy(&bytes).into_owned();
+    let units: Vec<u16> = text.encode_utf16().collect();
+    shared
+        .resource_state()
+        .readers
+        .insert(receiver, ReaderData { units, position: 0 });
+    Ok(None)
+}
+
+fn reader_read(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    _args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let mut state = shared.resource_state();
+    let reader = state
+        .readers
+        .get_mut(&receiver)
+        .ok_or_else(|| VmError::Native("Reader has no state".to_owned()))?;
+    match reader.units.get(reader.position) {
+        Some(unit) => {
+            reader.position += 1;
+            Ok(Some(Value::Int(i32::from(*unit))))
+        }
+        None => Ok(Some(Value::Int(-1))),
+    }
+}
+
+fn reader_read_array(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let Some(Value::Ref(buffer)) = args.first().copied() else {
+        return Err(VmError::Native("Reader.read expects a char[]".to_owned()));
+    };
+    let length = {
+        let heap = shared.heap();
+        heap.array(buffer)
+            .map_err(|error| VmError::Native(error.to_string()))?
+            .elements
+            .len()
+    };
+    reader_read_range_inner(shared, receiver, buffer, 0, length)
+}
+
+fn reader_read_range(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let Some(Value::Ref(buffer)) = args.first().copied() else {
+        return Err(VmError::Native("Reader.read expects a char[]".to_owned()));
+    };
+    let offset = match args.get(1).copied() {
+        Some(Value::Int(value)) => value,
+        _ => {
+            return Err(VmError::Native(
+                "Reader.read expects an int offset".to_owned(),
+            ));
+        }
+    };
+    let length = match args.get(2).copied() {
+        Some(Value::Int(value)) => value,
+        _ => {
+            return Err(VmError::Native(
+                "Reader.read expects an int length".to_owned(),
+            ));
+        }
+    };
+    let offset = usize::try_from(offset)
+        .map_err(|_| VmError::Native("Reader.read: negative offset".to_owned()))?;
+    let length = usize::try_from(length)
+        .map_err(|_| VmError::Native("Reader.read: negative length".to_owned()))?;
+    reader_read_range_inner(shared, receiver, buffer, offset, length)
+}
+
+fn reader_read_range_inner(
+    shared: &Shared,
+    receiver: ObjRef,
+    buffer: ObjRef,
+    offset: usize,
+    length: usize,
+) -> Result<Option<Value>, VmError> {
+    if length == 0 {
+        return Ok(Some(Value::Int(0)));
+    }
+    let mut state = shared.resource_state();
+    let reader = state
+        .readers
+        .get_mut(&receiver)
+        .ok_or_else(|| VmError::Native("Reader has no state".to_owned()))?;
+    if reader.position >= reader.units.len() {
+        return Ok(Some(Value::Int(-1)));
+    }
+    let count = length.min(reader.units.len() - reader.position);
+    let units: Vec<u16> = reader.units[reader.position..reader.position + count].to_vec();
+    reader.position += count;
+    drop(state);
+    let mut heap = shared.heap();
+    let slots = heap
+        .array_mut(buffer)
+        .map_err(|error| VmError::Native(error.to_string()))?;
+    for (index, unit) in units.into_iter().enumerate() {
+        if let Some(slot) = slots.elements.get_mut(offset + index) {
+            *slot = Value::Int(i32::from(unit));
+        }
+    }
+    Ok(Some(Value::Int(count as i32)))
+}
+
+fn reader_close(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    _args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    shared.resource_state().readers.remove(&receiver);
+    Ok(None)
+}
+
+fn reader_ready(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    _args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let state = shared.resource_state();
+    let ready = state
+        .readers
+        .get(&receiver)
+        .map(|reader| reader.position < reader.units.len())
+        .unwrap_or(false);
+    Ok(Some(Value::Int(i32::from(ready))))
+}
+
+fn reader_skip(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let count = match args.first().copied() {
+        Some(Value::Long(value)) => value.max(0) as usize,
+        Some(Value::Int(value)) => value.max(0) as usize,
+        _ => return Err(VmError::Native("Reader.skip expects a long".to_owned())),
+    };
+    let mut state = shared.resource_state();
+    let reader = state
+        .readers
+        .get_mut(&receiver)
+        .ok_or_else(|| VmError::Native("Reader has no state".to_owned()))?;
+    let skipped = count.min(reader.units.len() - reader.position);
+    reader.position += skipped;
+    Ok(Some(Value::Long(skipped as i64)))
+}
+
+fn reader_encoding(
+    _shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    _args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    Ok(Some(Value::Ref(
+        _shared.heap().allocate_string("UTF8".to_owned()),
+    )))
+}
+
+fn buffered_reader_inner(shared: &Shared, receiver: ObjRef) -> Result<ObjRef, VmError> {
+    shared
+        .resource_state()
+        .buffered_readers
+        .get(&receiver)
+        .copied()
+        .ok_or_else(|| VmError::Native("BufferedReader has no state".to_owned()))
+}
+
+fn buffered_reader_init(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let Some(Value::Ref(inner)) = args.first().copied() else {
+        return Err(VmError::Native(
+            "BufferedReader.<init> expects a Reader".to_owned(),
+        ));
+    };
+    if inner.is_null() {
+        return Err(VmError::Native(
+            "BufferedReader.<init>: null Reader".to_owned(),
+        ));
+    }
+    shared
+        .resource_state()
+        .buffered_readers
+        .insert(receiver, inner);
+    Ok(None)
+}
+
+fn buffered_reader_read(
+    shared: &Shared,
+    thread: &ThreadState,
+    loader: LoaderId,
+    receiver: ObjRef,
+    _args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let inner = buffered_reader_inner(shared, receiver)?;
+    reader_read(shared, thread, loader, inner, &[])
+}
+
+fn buffered_reader_read_line(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    _args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let inner = buffered_reader_inner(shared, receiver)?;
+    let text = {
+        let mut state = shared.resource_state();
+        let reader = state
+            .readers
+            .get_mut(&inner)
+            .ok_or_else(|| VmError::Native("BufferedReader's Reader has no state".to_owned()))?;
+        if reader.position >= reader.units.len() {
+            return Ok(Some(Value::Ref(ObjRef::NULL)));
+        }
+        let start = reader.position;
+        let mut end = start;
+        while end < reader.units.len() && reader.units[end] != 0x0A {
+            end += 1;
+        }
+        let line: Vec<u16> = reader.units[start..end].to_vec();
+        reader.position = if end < reader.units.len() {
+            end + 1
+        } else {
+            end
+        };
+        String::from_utf16_lossy(&line)
+    };
+    let text = text.strip_suffix('\r').unwrap_or(&text);
+    Ok(Some(Value::Ref(
+        shared.heap().allocate_string(text.to_owned()),
+    )))
+}
+
+fn buffered_reader_close(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    _args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let inner = shared.resource_state().buffered_readers.remove(&receiver);
+    if let Some(inner) = inner {
+        shared.resource_state().readers.remove(&inner);
+    }
+    Ok(None)
+}
+
+fn buffered_reader_ready(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    _args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let inner = buffered_reader_inner(shared, receiver)?;
+    reader_ready(shared, _thread, _loader, inner, &[])
+}
+
+/// Consume a `Reader` (plain or buffered) and return its remaining text.
+pub(crate) fn read_reader_to_end(shared: &Shared, reader: ObjRef) -> Result<String, VmError> {
+    let inner = {
+        let state = shared.resource_state();
+        state
+            .buffered_readers
+            .get(&reader)
+            .copied()
+            .unwrap_or(reader)
+    };
+    let mut state = shared.resource_state();
+    let data = state
+        .readers
+        .get_mut(&inner)
+        .ok_or_else(|| VmError::Native("Reader has no state".to_owned()))?;
+    let units: Vec<u16> = data.units[data.position..].to_vec();
+    data.position = data.units.len();
+    Ok(String::from_utf16_lossy(&units))
 }
 
 #[cfg(test)]

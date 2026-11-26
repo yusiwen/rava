@@ -54,6 +54,12 @@ pub const CONCURRENT_HASH_MAP_CLASS: &str = "java/util/concurrent/ConcurrentHash
 /// The internal name of the legacy hash table.
 pub const HASHTABLE_CLASS: &str = "java/util/Hashtable";
 
+/// The internal name of the enum-keyed map.
+///
+/// The VM stores it like every other map: the keys are enum-constant objects and the
+/// representation does not need the key `Class` the constructor receives.
+pub const ENUM_MAP_CLASS: &str = "java/util/EnumMap";
+
 /// The internal name of the properties table.
 pub const PROPERTIES_CLASS: &str = "java/util/Properties";
 
@@ -75,9 +81,37 @@ pub fn register_natives(shared: &Shared) {
         CONCURRENT_HASH_MAP_CLASS,
         HASHTABLE_CLASS,
         PROPERTIES_CLASS,
+        ENUM_MAP_CLASS,
     ] {
         register_map_surface(shared, class);
     }
+    // The `java.util.Map` interface declares the default methods, so an interface call
+    // site resolves to the interface's declaration, not the concrete class's entry.
+    shared.register_native(
+        "java/util/Map",
+        "putIfAbsent",
+        "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;",
+        hash_map_put_if_absent,
+    );
+    shared.register_native(
+        "java/util/Map",
+        "getOrDefault",
+        "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;",
+        hash_map_get_or_default,
+    );
+    shared.register_native(
+        "java/util/Map",
+        "forEach",
+        "(Ljava/util/function/BiConsumer;)V",
+        map_for_each,
+    );
+    shared.register_native(ENUM_MAP_CLASS, "<init>", "(Ljava/lang/Class;)V", map_init);
+    shared.register_native(
+        ENUM_MAP_CLASS,
+        "<init>",
+        "(Ljava/util/EnumMap;)V",
+        map_init_from,
+    );
     // `Properties` extends `Hashtable`, so the `Hashtable` entries serve a `Properties`
     // receiver through the superclass walk; only its own constructors and property access
     // are distinct.
@@ -109,6 +143,12 @@ pub fn register_natives(shared: &Shared) {
         "load",
         "(Ljava/io/InputStream;)V",
         properties_load,
+    );
+    shared.register_native(
+        PROPERTIES_CLASS,
+        "load",
+        "(Ljava/io/Reader;)V",
+        properties_load_reader,
     );
     // `LinkedHashMap` inherits the `HashMap` surface, so the `HashMap` entries serve it
     // through the ordinary superclass walk; only its constructors are distinct.
@@ -981,8 +1021,29 @@ fn properties_load(
 ) -> Result<Option<Value>, VmError> {
     let stream = reference_argument(args, 0, "Properties.load")?;
     let bytes = crate::resources::read_stream_to_end(shared, stream)?;
-    let text = String::from_utf8_lossy(&bytes);
-    let parsed = parse_properties(&text);
+    let text = String::from_utf8_lossy(&bytes).into_owned();
+    properties_merge(shared, receiver, &text)
+}
+
+/// `Properties.load(Reader)`: merge the reader's remaining text.
+fn properties_load_reader(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let reader = reference_argument(args, 0, "Properties.load")?;
+    let text = crate::resources::read_reader_to_end(shared, reader)?;
+    properties_merge(shared, receiver, &text)
+}
+
+fn properties_merge(
+    shared: &Shared,
+    receiver: ObjRef,
+    text: &str,
+) -> Result<Option<Value>, VmError> {
+    let parsed = parse_properties(text);
     let incoming: Vec<(ObjRef, ObjRef)> = parsed
         .iter()
         .map(|(key, value)| (shared.intern_string(key), shared.intern_string(value)))
@@ -1197,6 +1258,23 @@ fn properties_set(
             Ok(Some(Value::Ref(ObjRef::NULL)))
         }
     }
+}
+
+/// `Map.forEach(BiConsumer)`: the interface default method.
+///
+/// It re-enters the interpreter for each entry, so this function belongs to the
+/// `rava-interp` side in a later slice; until then its absence is reported by name rather
+/// than silently skipping the callback.
+fn map_for_each(
+    _shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    _args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    Err(VmError::Native(
+        "Map.forEach needs a Java callback and is not implemented".to_owned(),
+    ))
 }
 
 #[cfg(test)]

@@ -6,6 +6,8 @@
 use std::collections::BTreeSet;
 use std::fmt;
 
+use crate::loader::LoaderId;
+
 use rava_classfile::metadata::AnnotationValue;
 
 use crate::futures::FutureTaskObject;
@@ -870,6 +872,14 @@ impl TypeDeclaration {
 pub struct AnnotationObject {
     /// The annotation type, resolved through the defining loader of the annotated class.
     pub class: ClassId,
+    /// The defining loader of the class that carries the annotation.
+    ///
+    /// An annotation's class-literal element (`@Repeatable(ComponentScans.class)`) is
+    /// resolved through the loader of the annotated class, not the annotation type's
+    /// loader. For `@Repeatable` the type is a bootstrap JDK class while the annotated
+    /// class is an application class, so keeping this loader is what makes the literal
+    /// resolve.
+    pub loader: LoaderId,
     /// The encoded `element_name`/`element_value` pairs, in class-file order.
     pub values: Vec<AnnotationValue>,
 }
@@ -1009,8 +1019,9 @@ pub struct MethodHandleObject {
 /// order.
 ///
 /// The class is stored rather than derived from the shape, so `ArrayList`,
-/// `LinkedList` and `CopyOnWriteArrayList` keep their own identity while sharing one
-/// representation. [`crate::Shared::allocate_instance`] is the only creation entry.
+/// `LinkedList`, `ArrayDeque` and `CopyOnWriteArrayList` keep their own identity while
+/// sharing one representation. [`crate::Shared::allocate_instance`] is the only creation
+/// entry.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ListObject {
     pub class: ClassId,
@@ -1018,6 +1029,12 @@ pub struct ListObject {
     /// The subclass's instance fields, in layout order. An exact `ArrayList` has none; a
     /// Spring subclass that adds `this$0` or a cache field keeps them here.
     pub fields: Vec<Value>,
+    /// The maximum element count for a bounded queue, or [`usize::MAX`] otherwise.
+    ///
+    /// `LinkedBlockingQueue(int)` sets it; every other list-family container is
+    /// unbounded, and a queue operation that only reads it (`remainingCapacity`,
+    /// `offer`) is the sole consumer.
+    pub capacity: usize,
 }
 
 /// A `java.util.Set`-family VM object: its runtime class and its elements in insertion
@@ -1093,6 +1110,13 @@ pub struct EnumerationObject {
 pub struct StreamObject {
     pub elements: Vec<Value>,
     pub parallel: bool,
+    /// The stream interface this object implements.
+    ///
+    /// `None` is the reference `java.util.stream.Stream`; a `Some(class)` is a primitive
+    /// stream interface (`java.util.stream.IntStream` for `String.chars`). The object
+    /// reports that class so an `invokeinterface` of the primitive stream's SAM resolves
+    /// to its own natives.
+    pub class: Option<ClassId>,
 }
 
 /// A `java.util.Spliterator` over a snapshot of values and a cursor.
@@ -1635,8 +1659,17 @@ impl Heap {
 
     /// Allocate an annotation instance. Callers go through
     /// [`crate::Shared::annotation_object`].
-    pub fn allocate_annotation(&mut self, class: ClassId, values: Vec<AnnotationValue>) -> ObjRef {
-        self.allocate(HeapObject::Annotation(AnnotationObject { class, values }))
+    pub fn allocate_annotation(
+        &mut self,
+        class: ClassId,
+        loader: LoaderId,
+        values: Vec<AnnotationValue>,
+    ) -> ObjRef {
+        self.allocate(HeapObject::Annotation(AnnotationObject {
+            class,
+            loader,
+            values,
+        }))
     }
 
     /// Allocate an enum constant. Callers go through
@@ -1679,6 +1712,7 @@ impl Heap {
             class,
             elements: Vec::new(),
             fields,
+            capacity: usize::MAX,
         }))
     }
 
@@ -1840,8 +1874,17 @@ impl Heap {
     }
 
     /// Allocate one eagerly materialized stream pipeline.
-    pub fn allocate_stream(&mut self, elements: Vec<Value>, parallel: bool) -> ObjRef {
-        self.allocate(HeapObject::Stream(StreamObject { elements, parallel }))
+    pub fn allocate_stream(
+        &mut self,
+        elements: Vec<Value>,
+        parallel: bool,
+        class: Option<ClassId>,
+    ) -> ObjRef {
+        self.allocate(HeapObject::Stream(StreamObject {
+            elements,
+            parallel,
+            class,
+        }))
     }
 
     /// The state behind a stream reference.
@@ -2233,6 +2276,38 @@ impl Heap {
     pub fn list_mut(&mut self, reference: ObjRef) -> Result<&mut Vec<Value>, HeapError> {
         match self.get_mut(reference)? {
             HeapObject::List(list) => Ok(&mut list.elements),
+            _ => Err(HeapError::WrongObjectKind {
+                reference,
+                expected: "a list",
+            }),
+        }
+    }
+
+    /// The element capacity of a list-family container.
+    ///
+    /// An ordinary list is unbounded and reports [`usize::MAX`]; a bounded
+    /// `LinkedBlockingQueue` reports the capacity its constructor was given.
+    pub fn list_capacity(&self, reference: ObjRef) -> Result<usize, HeapError> {
+        match self.get(reference)? {
+            HeapObject::List(list) => Ok(list.capacity),
+            _ => Err(HeapError::WrongObjectKind {
+                reference,
+                expected: "a list",
+            }),
+        }
+    }
+
+    /// Set a list-family container's element capacity.
+    pub fn set_list_capacity(
+        &mut self,
+        reference: ObjRef,
+        capacity: usize,
+    ) -> Result<(), HeapError> {
+        match self.get_mut(reference)? {
+            HeapObject::List(list) => {
+                list.capacity = capacity;
+                Ok(())
+            }
             _ => Err(HeapError::WrongObjectKind {
                 reference,
                 expected: "a list",

@@ -199,6 +199,25 @@ pub(crate) fn invoke_sam(
                 )));
             }
             let remaining = values.split_off(1);
+            // A method reference can target an interface method whose receiver is itself a
+            // lambda: Boot's `overrides.forEach(CacheOverride::close)` does exactly that.
+            // An interface-typed lambda receiver has no class implementation to resolve,
+            // so its own SAM is the implementation.
+            let nested = {
+                let heap = shared.heap();
+                match heap.get(receiver) {
+                    Ok(rava_vm::HeapObject::Lambda(object))
+                        if object.sam_name == lambda.target.name
+                            && object.sam_descriptor == lambda.target.descriptor =>
+                    {
+                        Some(object.clone())
+                    }
+                    _ => None,
+                }
+            };
+            if let Some(object) = nested {
+                return invoke_sam(shared, thread, &object, remaining);
+            }
             // `REF_invokeVirtual`/`REF_invokeInterface` method references dispatch on the
             // receiver, not on the compile-time owner. Spring passes
             // `MergedAnnotation::isDirectlyPresent`, whose implementation lives on the
@@ -321,13 +340,12 @@ fn parse_alt_metafactory(
     bootstrap: &BootstrapMethodEntry,
 ) -> Result<(String, String, BootstrapMethodHandle), InterpError> {
     let arguments = &bootstrap.arguments;
-    let Some(BootstrapArgument::Integer(flags)) = arguments.first() else {
-        return Err(VmError::Native(
-            "LambdaMetafactory.altMetafactory requires an int flags argument".to_owned(),
-        )
-        .into());
-    };
-    let flags = *flags;
+    // `altMetafactory`'s static arguments are the three method-type/handle arguments and
+    // then the flag word, unlike `metafactory`; the flags are argument 3, not 0.
+    let sam = method_type_argument(argument(arguments, 0, "samMethodType")?, 0)?;
+    let target = method_handle_argument(argument(arguments, 1, "implMethod")?, 1)?;
+    let instantiated = method_type_argument(argument(arguments, 2, "instantiatedMethodType")?, 2)?;
+    let flags = int_argument(argument(arguments, 3, "flags")?, 3)? as i32;
     let unknown = flags & !(FLAG_SERIALIZABLE | FLAG_MARKERS | FLAG_BRIDGES);
     if unknown != 0 {
         return Err(VmError::Native(format!(
@@ -335,14 +353,11 @@ fn parse_alt_metafactory(
         ))
         .into());
     }
-    if flags & FLAG_SERIALIZABLE != 0 {
-        return Err(VmError::Native("serializable lambdas are not supported".to_owned()).into());
-    }
 
-    let sam = method_type_argument(argument(arguments, 1, "samMethodType")?, 1)?;
-    let target = method_handle_argument(argument(arguments, 2, "implMethod")?, 2)?;
-    let instantiated = method_type_argument(argument(arguments, 3, "instantiatedMethodType")?, 3)?;
-
+    // `FLAG_SERIALIZABLE` is accepted and not represented: the lambda object is not a
+    // generated class with `writeReplace`, so serializing it fails in `ObjectOutputStream`
+    // until a serializable-lambda slice exists. Accepting the flag is what lets
+    // `TypeDescriptor`'s static initializer run; it never serializes the lambda.
     let mut cursor = 4;
     if flags & FLAG_MARKERS != 0 {
         let count = int_argument(argument(arguments, cursor, "marker count")?, cursor)?;

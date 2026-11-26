@@ -61,7 +61,144 @@ pub fn register_natives(shared: &Shared) -> Result<(), VmError> {
         FIND_ALL_DESCRIPTOR,
         system_finder_find_all,
     );
+
+    // The VM has no named modules, so the boot layer is empty. Spring asks for the boot
+    // layer's modules and for one module by name; an empty set and an empty Optional are
+    // the truthful answers.
+    shared.register_native(
+        MODULE_LAYER_CLASS,
+        "boot",
+        "()Ljava/lang/ModuleLayer;",
+        module_layer_boot,
+    );
+    shared.register_native(
+        MODULE_LAYER_CLASS,
+        "modules",
+        "()Ljava/util/Set;",
+        module_layer_modules,
+    );
+    shared.register_native(
+        MODULE_LAYER_CLASS,
+        "findModule",
+        "(Ljava/lang/String;)Ljava/util/Optional;",
+        module_layer_find_module,
+    );
+    shared.register_native(
+        MODULE_LAYER_CLASS,
+        "toString",
+        "()Ljava/lang/String;",
+        module_layer_to_string,
+    );
+    shared.register_native(
+        MODULE_LAYER_CLASS,
+        "configuration",
+        "()Ljava/lang/module/Configuration;",
+        module_layer_configuration,
+    );
+    shared.register_native(
+        CONFIGURATION_CLASS,
+        "modules",
+        "()Ljava/util/Set;",
+        configuration_modules,
+    );
+    shared.register_native(
+        CONFIGURATION_CLASS,
+        "findModule",
+        "(Ljava/lang/String;)Ljava/util/Optional;",
+        configuration_find_module,
+    );
+    shared.register_native(MODULE_CLASS, "isNamed", "()Z", module_is_named);
+    shared.register_native(
+        MODULE_CLASS,
+        "getName",
+        "()Ljava/lang/String;",
+        module_get_name,
+    );
+    shared.register_native(
+        MODULE_CLASS,
+        "getLayer",
+        "()Ljava/lang/ModuleLayer;",
+        module_get_layer,
+    );
     Ok(())
+}
+
+const MODULE_LAYER_CLASS: &str = "java/lang/ModuleLayer";
+const MODULE_CLASS: &str = "java/lang/Module";
+const CONFIGURATION_CLASS: &str = "java/lang/module/Configuration";
+
+fn module_layer_boot(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    _args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let class = shared.load_library_class(MODULE_LAYER_CLASS)?;
+    Ok(Some(Value::Ref(shared.allocate_instance(class)?)))
+}
+
+fn module_layer_modules(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    _args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let class = shared.load_library_class("java/util/HashSet")?;
+    Ok(Some(Value::Ref(shared.heap().allocate_set(class))))
+}
+
+fn module_layer_find_module(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    _args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    Ok(Some(Value::Ref(shared.heap().allocate_optional(None))))
+}
+
+fn module_layer_to_string(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    _args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    Ok(Some(Value::Ref(
+        shared.heap().allocate_string("ModuleLayer[]".to_owned()),
+    )))
+}
+
+fn module_is_named(
+    _shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    _args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    Ok(Some(Value::Int(0)))
+}
+
+fn module_get_name(
+    _shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    _args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    Ok(Some(Value::Ref(ObjRef::NULL)))
+}
+
+fn module_get_layer(
+    _shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    _args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    Ok(Some(Value::Ref(ObjRef::NULL)))
 }
 
 /// Define the finder class once, in the bootstrap loader.
@@ -132,4 +269,36 @@ fn system_finder_find_all(
     let class = shared.load_library_class(crate::collections::HASH_SET_CLASS)?;
     let modules = shared.heap().allocate_set(class);
     Ok(Some(Value::Ref(modules)))
+}
+
+fn module_layer_configuration(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    _args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let class = shared.load_library_class(CONFIGURATION_CLASS)?;
+    Ok(Some(Value::Ref(shared.allocate_instance(class)?)))
+}
+
+fn configuration_modules(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    _args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let class = shared.load_library_class("java/util/HashSet")?;
+    Ok(Some(Value::Ref(shared.heap().allocate_set(class))))
+}
+
+fn configuration_find_module(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    _args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    Ok(Some(Value::Ref(shared.heap().allocate_optional(None))))
 }

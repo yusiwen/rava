@@ -128,6 +128,51 @@ pub fn register_natives(shared: &Shared) {
         string_buffer_to_string,
     );
     shared.register_native(STRING_BUFFER_CLASS, "length", "()I", string_buffer_length);
+    shared.register_native(
+        STRING_BUFFER_CLASS,
+        "setLength",
+        "(I)V",
+        string_buffer_set_length,
+    );
+    shared.register_native(STRING_BUFFER_CLASS, "charAt", "(I)C", string_buffer_char_at);
+    for (descriptor, function) in [
+        (
+            "(C)Ljava/lang/StringBuffer;",
+            string_buffer_append_char as crate::NativeFn,
+        ),
+        ("(I)Ljava/lang/StringBuffer;", string_buffer_append_int),
+        ("(J)Ljava/lang/StringBuffer;", string_buffer_append_long),
+        ("(F)Ljava/lang/StringBuffer;", string_buffer_append_float),
+        ("(D)Ljava/lang/StringBuffer;", string_buffer_append_double),
+        ("(Z)Ljava/lang/StringBuffer;", string_buffer_append_boolean),
+        (
+            "(Ljava/lang/CharSequence;)Ljava/lang/StringBuffer;",
+            string_buffer_append_object,
+        ),
+        (
+            "(Ljava/lang/Object;)Ljava/lang/StringBuffer;",
+            string_buffer_append_object,
+        ),
+    ] {
+        shared.register_native(STRING_BUFFER_CLASS, "append", descriptor, function);
+    }
+
+    // `java.lang.String.format`: a formatter subset, not `java.util.Formatter`. The
+    // supported conversions are the ones the pinned libraries use at startup (`%s` and
+    // `%d`), plus the ordinary `%b`, `%c`, `%o`, `%x`, `%f`, `%e`, `%h`, `%%` and `%n`
+    // forms and a width/precision. An unsupported conversion or flag is a typed error.
+    shared.register_native(
+        "java/lang/String",
+        "format",
+        "(Ljava/lang/String;[Ljava/lang/Object;)Ljava/lang/String;",
+        string_format,
+    );
+    shared.register_native(
+        "java/lang/String",
+        "format",
+        "(Ljava/util/Locale;Ljava/lang/String;[Ljava/lang/Object;)Ljava/lang/String;",
+        string_format_locale,
+    );
 }
 
 fn heap_error(error: crate::HeapError) -> VmError {
@@ -601,4 +646,516 @@ fn set_buffer_text(shared: &Shared, receiver: ObjRef, text: String) -> Result<()
         .string_buffer_mut(receiver)
         .map_err(heap_error)? = text;
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// `java.lang.String.format`
+// ---------------------------------------------------------------------------
+
+/// `String.format(String, Object...)`.
+fn string_format(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let pattern = string_argument(shared, args, 0, "String.format")?;
+    let arguments = argument_array(shared, args.get(1).copied(), "String.format")?;
+    let text = format_java(shared, &pattern, &arguments, "String.format")?;
+    Ok(Some(Value::Ref(shared.heap().allocate_string(text))))
+}
+
+/// `String.format(Locale, String, Object...)`.
+///
+/// The locale is ignored: the supported conversions are locale-independent, and a
+/// locale-sensitive conversion is a typed error rather than a silently wrong locale.
+fn string_format_locale(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let pattern = string_argument(shared, args, 1, "String.format")?;
+    let arguments = argument_array(shared, args.get(2).copied(), "String.format")?;
+    let text = format_java(shared, &pattern, &arguments, "String.format")?;
+    Ok(Some(Value::Ref(shared.heap().allocate_string(text))))
+}
+
+/// The formatting flags this subset honours.
+#[derive(Debug, Clone, Copy, Default)]
+struct FormatFlags {
+    left_align: bool,
+    zero_pad: bool,
+    plus: bool,
+    space: bool,
+}
+
+/// Format `pattern` over `arguments` with the `java.util.Formatter` conversion subset.
+fn format_java(
+    shared: &Shared,
+    pattern: &str,
+    arguments: &[Value],
+    method: &'static str,
+) -> Result<String, VmError> {
+    let mut out = String::new();
+    let mut next_argument = 0usize;
+    let mut characters = pattern.chars().peekable();
+    while let Some(character) = characters.next() {
+        if character != '%' {
+            out.push(character);
+            continue;
+        }
+        let Some(&conversion) = characters.peek() else {
+            return Err(VmError::Native(format!(
+                "{method}: a '%' at the end of the format string"
+            )));
+        };
+        match conversion {
+            '%' => {
+                characters.next();
+                out.push('%');
+                continue;
+            }
+            'n' => {
+                characters.next();
+                out.push('\n');
+                continue;
+            }
+            _ => {}
+        }
+        let mut flags = FormatFlags::default();
+        while let Some(flag) = characters.peek().copied() {
+            let handled = match flag {
+                '-' => Some(FormatFlags {
+                    left_align: true,
+                    ..flags
+                }),
+                '0' => Some(FormatFlags {
+                    zero_pad: true,
+                    ..flags
+                }),
+                '+' => Some(FormatFlags {
+                    plus: true,
+                    ..flags
+                }),
+                ' ' => Some(FormatFlags {
+                    space: true,
+                    ..flags
+                }),
+                // `,` (grouping) and `(` (negative parentheses) have no implementation
+                // here; refusing them keeps the output honest instead of dropping them.
+                ',' | '(' | '#' => {
+                    return Err(VmError::Native(format!(
+                        "{method}: format flag '{flag}' is not implemented"
+                    )));
+                }
+                _ => None,
+            };
+            match handled {
+                Some(next) => {
+                    flags = next;
+                    characters.next();
+                }
+                None => break,
+            }
+        }
+        let mut width = 0usize;
+        while let Some(digit) = characters.peek().and_then(|c| c.to_digit(10)) {
+            width = width * 10 + digit as usize;
+            characters.next();
+        }
+        let mut precision = None;
+        if characters.peek() == Some(&'.') {
+            characters.next();
+            let mut value = 0usize;
+            while let Some(digit) = characters.peek().and_then(|c| c.to_digit(10)) {
+                value = value * 10 + digit as usize;
+                characters.next();
+            }
+            precision = Some(value);
+        }
+        let Some(conversion) = characters.next() else {
+            return Err(VmError::Native(format!(
+                "{method}: format string ended inside a conversion"
+            )));
+        };
+        let argument = arguments.get(next_argument).copied();
+        next_argument += 1;
+        let mut text = format_conversion(
+            shared,
+            conversion,
+            argument,
+            precision,
+            flags,
+            next_argument - 1,
+            method,
+        )?;
+        if flags.plus
+            && !text.starts_with('-')
+            && text.chars().next().is_some_and(|c| c.is_ascii_digit())
+        {
+            text.insert(0, '+');
+        } else if flags.space && !text.starts_with('-') {
+            text.insert(0, ' ');
+        }
+        if let Some(precision) = precision {
+            if matches!(conversion, 's' | 'S' | 'b' | 'B' | 'h' | 'H' | 'c' | 'C') {
+                text = text.chars().take(precision).collect();
+            }
+        }
+        if text.chars().count() < width {
+            let padding = width - text.chars().count();
+            if flags.left_align {
+                text.extend(std::iter::repeat_n(' ', padding));
+            } else if flags.zero_pad
+                && text
+                    .chars()
+                    .next()
+                    .is_some_and(|c| c.is_ascii_digit() || c == '-')
+            {
+                let sign = text.starts_with('-');
+                let digits = text.trim_start_matches('-');
+                let mut padded = String::new();
+                if sign {
+                    padded.push('-');
+                }
+                padded.extend(std::iter::repeat_n('0', padding));
+                padded.push_str(digits);
+                text = padded;
+            } else {
+                text = format!("{}{text}", " ".repeat(padding));
+            }
+        }
+        out.push_str(&text);
+    }
+    Ok(out)
+}
+
+fn format_conversion(
+    shared: &Shared,
+    conversion: char,
+    argument: Option<Value>,
+    precision: Option<usize>,
+    _flags: FormatFlags,
+    index: usize,
+    method: &'static str,
+) -> Result<String, VmError> {
+    let value = argument.ok_or_else(|| {
+        VmError::Native(format!(
+            "{method}: format specifier {} needs argument {}",
+            conversion, index
+        ))
+    })?;
+    match conversion {
+        's' | 'S' => {
+            let text = argument_text(shared, value, method)?;
+            Ok(if conversion == 'S' {
+                text.to_uppercase()
+            } else {
+                text
+            })
+        }
+        'b' | 'B' => {
+            let text = match value {
+                Value::Ref(reference) if !reference.is_null() => {
+                    let heap = shared.heap();
+                    match heap.get(reference).map_err(heap_error)? {
+                        crate::heap::HeapObject::Boxed(crate::heap::BoxedPrimitive::Boolean(
+                            value,
+                        )) => value.to_string(),
+                        _ => "true".to_owned(),
+                    }
+                }
+                _ => "false".to_owned(),
+            };
+            Ok(if conversion == 'B' {
+                text.to_uppercase()
+            } else {
+                text
+            })
+        }
+        'c' | 'C' => {
+            let code = integral_value(shared, value, method)?;
+            let character = u32::try_from(code)
+                .ok()
+                .and_then(char::from_u32)
+                .ok_or_else(|| {
+                    VmError::Native(format!(
+                        "{method}: %c argument {code} is not a Unicode code point"
+                    ))
+                })?;
+            let text = character.to_string();
+            Ok(if conversion == 'C' {
+                text.to_uppercase()
+            } else {
+                text
+            })
+        }
+        'd' => Ok(integral_value(shared, value, method)?.to_string()),
+        'o' => Ok(format!("{:o}", integral_value(shared, value, method)?)),
+        'x' => Ok(format!("{:x}", integral_value(shared, value, method)?)),
+        'X' => Ok(format!("{:X}", integral_value(shared, value, method)?)),
+        'f' => {
+            let number = floating_value(shared, value, method)?;
+            Ok(match precision {
+                Some(precision) => format!("{number:.precision$}"),
+                None => format!("{number:.6}"),
+            })
+        }
+        'e' | 'E' => {
+            let number = floating_value(shared, value, method)?;
+            let precision = precision.unwrap_or(6);
+            let text = format!("{number:.precision$e}");
+            Ok(if conversion == 'E' {
+                text.to_uppercase()
+            } else {
+                text
+            })
+        }
+        'h' | 'H' => {
+            let text = match value {
+                Value::Ref(reference) if !reference.is_null() => {
+                    format!("{:x}", reference.identity_hash() as u32)
+                }
+                _ => "null".to_owned(),
+            };
+            Ok(if conversion == 'H' {
+                text.to_uppercase()
+            } else {
+                text
+            })
+        }
+        other => Err(VmError::Native(format!(
+            "{method}: conversion %{other} is not implemented"
+        ))),
+    }
+}
+
+/// An integer argument for `%d`/`%o`/`%x`/`%c`.
+fn integral_value(shared: &Shared, value: Value, method: &'static str) -> Result<i64, VmError> {
+    let Value::Ref(reference) = value else {
+        return Err(VmError::Native(format!(
+            "{method}: expected a boxed integral argument"
+        )));
+    };
+    let heap = shared.heap();
+    let text = match heap.get(reference).map_err(heap_error)? {
+        crate::heap::HeapObject::Boxed(boxed) => match boxed {
+            crate::heap::BoxedPrimitive::Byte(value) => *value as i64,
+            crate::heap::BoxedPrimitive::Short(value) => *value as i64,
+            crate::heap::BoxedPrimitive::Integer(value) => *value as i64,
+            crate::heap::BoxedPrimitive::Long(value) => *value,
+            _ => {
+                return Err(VmError::Native(format!(
+                    "{method}: expected a boxed integral argument"
+                )));
+            }
+        },
+        _ => {
+            return Err(VmError::Native(format!(
+                "{method}: expected a boxed integral argument"
+            )));
+        }
+    };
+    Ok(text)
+}
+
+/// A floating-point argument for `%f`/`%e`.
+fn floating_value(shared: &Shared, value: Value, method: &'static str) -> Result<f64, VmError> {
+    let Value::Ref(reference) = value else {
+        return Err(VmError::Native(format!(
+            "{method}: expected a boxed floating-point argument"
+        )));
+    };
+    let heap = shared.heap();
+    match heap.get(reference).map_err(heap_error)? {
+        crate::heap::HeapObject::Boxed(crate::heap::BoxedPrimitive::Float(value)) => {
+            Ok(f64::from(*value))
+        }
+        crate::heap::HeapObject::Boxed(crate::heap::BoxedPrimitive::Double(value)) => Ok(*value),
+        _ => Err(VmError::Native(format!(
+            "{method}: expected a boxed floating-point argument"
+        ))),
+    }
+}
+
+/// Append text to a `StringBuffer` and return the receiver, as the JDK does.
+fn append_buffer(shared: &Shared, receiver: ObjRef, text: &str) -> Result<Option<Value>, VmError> {
+    if receiver.is_null() {
+        return Err(VmError::Native(
+            "StringBuffer.append called with a null receiver".to_owned(),
+        ));
+    }
+    shared
+        .heap()
+        .string_buffer_mut(receiver)
+        .map_err(heap_error)?
+        .push_str(text);
+    Ok(Some(Value::Ref(receiver)))
+}
+
+fn string_buffer_append_char(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let Some(Value::Int(value)) = args.first().copied() else {
+        return Err(VmError::Native(
+            "StringBuffer.append expects a char".to_owned(),
+        ));
+    };
+    let character = char::from_u32(value as u32).unwrap_or('?');
+    append_buffer(shared, receiver, &character.to_string())
+}
+
+fn string_buffer_append_int(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let Some(Value::Int(value)) = args.first().copied() else {
+        return Err(VmError::Native(
+            "StringBuffer.append expects an int".to_owned(),
+        ));
+    };
+    append_buffer(shared, receiver, &value.to_string())
+}
+
+fn string_buffer_append_long(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let value = match args.first().copied() {
+        Some(Value::Long(value)) => value,
+        Some(Value::Int(value)) => i64::from(value),
+        _ => {
+            return Err(VmError::Native(
+                "StringBuffer.append expects a long".to_owned(),
+            ));
+        }
+    };
+    append_buffer(shared, receiver, &value.to_string())
+}
+
+fn string_buffer_append_float(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let Some(Value::Float(value)) = args.first().copied() else {
+        return Err(VmError::Native(
+            "StringBuffer.append expects a float".to_owned(),
+        ));
+    };
+    append_buffer(shared, receiver, &crate::string::float_text(value))
+}
+
+fn string_buffer_append_double(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let Some(Value::Double(value)) = args.first().copied() else {
+        return Err(VmError::Native(
+            "StringBuffer.append expects a double".to_owned(),
+        ));
+    };
+    append_buffer(shared, receiver, &crate::string::double_text(value))
+}
+
+fn string_buffer_append_boolean(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let Some(Value::Int(value)) = args.first().copied() else {
+        return Err(VmError::Native(
+            "StringBuffer.append expects a boolean".to_owned(),
+        ));
+    };
+    append_buffer(shared, receiver, if value != 0 { "true" } else { "false" })
+}
+
+fn string_buffer_append_object(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let Some(Value::Ref(reference)) = args.first().copied() else {
+        return Err(VmError::Native(
+            "StringBuffer.append expects a reference".to_owned(),
+        ));
+    };
+    let text = object_text(shared, reference, "StringBuffer.append")?;
+    append_buffer(shared, receiver, &text)
+}
+
+/// `StringBuffer.setLength(int)`: truncate, or pad with NUL characters.
+fn string_buffer_set_length(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let Some(Value::Int(length)) = args.first().copied() else {
+        return Err(VmError::Native(
+            "StringBuffer.setLength expects an int".to_owned(),
+        ));
+    };
+    let length = usize::try_from(length)
+        .map_err(|_| VmError::Native("StringBuffer.setLength: negative length".to_owned()))?;
+    let mut heap = shared.heap();
+    let text = heap.string_buffer_mut(receiver).map_err(heap_error)?;
+    let current = utf16_units(text).len();
+    if length < current {
+        let units: Vec<u16> = utf16_units(text).into_iter().take(length).collect();
+        *text = crate::string::string_from_utf16(&units, "StringBuffer.setLength")?;
+    } else if length > current {
+        let padding = "\u{0}".repeat(length - current);
+        text.push_str(&padding);
+    }
+    Ok(None)
+}
+
+/// `StringBuffer.charAt(int)`: one UTF-16 code unit.
+fn string_buffer_char_at(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let Some(Value::Int(index)) = args.first().copied() else {
+        return Err(VmError::Native(
+            "StringBuffer.charAt expects an int".to_owned(),
+        ));
+    };
+    let text = buffer_text(shared, receiver)?;
+    let units = utf16_units(&text);
+    let unit = usize::try_from(index)
+        .ok()
+        .and_then(|index| units.get(index))
+        .copied()
+        .ok_or_else(|| {
+            VmError::Native(format!("StringBuffer.charAt: index {index} out of range"))
+        })?;
+    Ok(Some(Value::Int(i32::from(unit))))
 }
