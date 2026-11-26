@@ -195,6 +195,33 @@ provider name per line, no module layer or `loadInstalled`, no
 `Provider`/`stream`/`findFirst` surface, and no `ServiceConfigurationError` object (the
 failures stay typed VM errors).
 
+## 5c. Executable jars (M4.3)
+
+`rava -jar <file>` is a launcher over the same classpath source, not a second loader.
+`crates/cli/src/jar.rs` reads `META-INF/MANIFEST.MF` through the existing `JarSource`:
+the first blank line ends the main attributes, names are case-insensitive, a value
+continued on a line starting with one space is joined, and a malformed header is a typed
+`ManifestError::Malformed { line, reason }` naming the 1-based line. `Main-Class` must be
+present and non-empty.
+
+The launcher builds the classpath as the executable jar first and then every `Class-Path`
+entry in manifest order, resolved relative to the executable jar's parent directory;
+plain relative/absolute paths and `file:` URLs are accepted. An entry that does not
+exist or cannot be opened is skipped (the JDK's application launcher does the same),
+because a helper jar changes reachability, not whether the program starts; the
+executable jar itself must open. `run::execute_with` then shares the application loader,
+native registration, `String[]` allocation and `main([Ljava/lang/String;)V` call with
+`rava run`, so the two commands have one execution path.
+
+The committed `crates/cli/tests/fixtures/jar_launch/` fixture has `app.jar` with
+`Main-Class: demo.JarMain`, `Class-Path: lib/helper.jar` and `data.txt`, and
+`lib/helper.jar` with `demo.Helper`. `cargo test -p rava-cli --test jar_launch` asserts
+the exact stdout, ordered program arguments, `--` literal arguments, an explicit and the
+default `--stdlib`, exit 1 for a bad executable jar or `Main-Class`, exit 2 for usage
+errors, and exit 0 when an unusable `Class-Path` entry is skipped. Limits: flat
+executable jars only; no nested `BOOT-INF` jars, Boot launcher or `URLClassLoader`
+(M4.4/later), and only `Main-Class`/`Class-Path` are read.
+
 ## 6. Native dispatch: registry before `Code`
 
 C1 methods generally have **no `Code` and no `ACC_NATIVE`**. The registry is keyed by
@@ -245,8 +272,8 @@ native fallback instead. This is a deliberate C1/M2 boundary, not a JDK-equivale
 - Resources are `file:` and `jar:file:...!/entry` only. There is no network transport,
   no URLConnection headers/content type/dates, no nested jars (M4.4), no custom
   `URLStreamHandler`, and no charset table (`URLDecoder` decodes UTF-8).
-- No module layer, multi-release selection, nested jars, manifest `Class-Path`, `-jar`,
-  wildcard/remote classpath or class unloading.
+- No module layer, multi-release selection, nested jars, wildcard/remote classpath or
+  class unloading.
 - `ServiceLoader` reads `META-INF/services` only: one provider name per line, no
   `loadInstalled`/module layer, no `Provider`/`stream`/`findFirst`, and a configuration
   failure is a typed VM error rather than a `ServiceConfigurationError` object.
