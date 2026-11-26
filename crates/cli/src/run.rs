@@ -89,38 +89,12 @@ pub(crate) fn execute_with(
         .map_err(|error| format!("cannot create the application loader: {error}"))?;
     library::register_all(&shared)
         .map_err(|error| format!("cannot register the class library: {error}"))?;
-    // `Method.invoke`/`Constructor.newInstance` and
-    // `InvocationHandler.invokeDefault` live in the interpreter because they re-enter it;
-    // a runner that wants reflection must install them explicitly. The same is true of
-    // `MethodHandle.invoke*` (M3.4) and the M4.2 `ServiceLoader` natives, which construct
-    // each provider through `run_instance_method` on first use.
-    rava_interp::reflect_invoke::register_natives(&shared);
-    rava_interp::method_handles::register_natives(&shared);
-    rava_interp::unsafe_natives::register_natives(&shared)
-        .map_err(|error| format!("cannot register the Unsafe natives: {error}"))?;
-    rava_interp::proxy::register_natives(&shared);
-    rava_interp::callbacks::register_natives(&shared);
-    rava_interp::streams::register_natives(&shared);
-    rava_interp::futures::register_natives(&shared);
-    rava_interp::object_methods::register_natives(&shared);
-    // M4.2: `ServiceLoader.load`/`iterator` and the lazy `Iterator.hasNext`/`next`
-    // overrides. This must follow `library::register_all`, because the overrides replace
-    // the snapshot iterator entries and delegate to them for ordinary iterators.
-    rava_interp::service_loader::register_natives(&shared);
-    // M4.5: the JDK's collection membership calls Java `equals`; the `rava-vm` natives use
-    // reference identity, so these re-entrant overrides replace them after registration.
-    rava_interp::collection_equality::register_natives(&shared);
-    // M4.5: the functional-interface default methods (`BiPredicate.or`, ...) compose
-    // lambdas and re-enter the interpreter through their SAMs.
-    rava_interp::functional::register_natives(&shared);
-    rava_interp::interface_defaults::register_natives(&shared);
-    rava_interp::iterables::register_natives(&shared);
-    rava_interp::executors::register_natives(&shared);
-    rava_interp::bean_support::register_natives(&shared);
-    rava_interp::objects::register_natives(&shared);
-    // M4.5: `StackWalker.walk` calls a Java `Function`, so it lives with the other natives
-    // that re-enter the interpreter.
-    rava_interp::stack_walker::register_natives(&shared);
+    // Every native that re-enters the interpreter (`Method.invoke`, `MethodHandle.invoke*`,
+    // `ServiceLoader`, collection equality, functional defaults and the rest) lives in
+    // `rava-interp` and is installed after the VM library, whose entries some of them
+    // replace. The list lives there so the runner and the registry guard cannot drift.
+    rava_interp::register_all(&shared)
+        .map_err(|error| format!("cannot register the interpreter natives: {error}"))?;
 
     // A launcher argument (and a manifest `Main-Class`/`Start-Class`) uses the binary
     // dotted form; the class table's identity is the internal `a/b/C` form every other

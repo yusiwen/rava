@@ -2238,6 +2238,22 @@ impl Shared {
             .copied()
     }
 
+    /// Every registered native as `(owner, name, descriptor)`, sorted.
+    ///
+    /// Read-only introspection for the registry-vs-C1-stub guard test. The runtime never
+    /// calls it; the copy is small (a few thousand entries) and only a test pays for it.
+    pub fn registered_natives(&self) -> Vec<(String, String, String)> {
+        let mut keys: Vec<(String, String, String)> = self
+            .natives
+            .read()
+            .expect("native table lock poisoned")
+            .keys()
+            .map(|key| (key.owner.clone(), key.name.clone(), key.descriptor.clone()))
+            .collect();
+        keys.sort();
+        keys
+    }
+
     pub fn write_stdout(&self, bytes: &[u8]) {
         self.stdout
             .lock()
