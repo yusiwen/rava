@@ -26,7 +26,7 @@ documents are added when there is something to record.
 | [`adr/README.md`](adr/README.md) | index | the ADR table and the format rules |
 | [`explanation/README.md`](explanation/README.md) | explanation index | the implementation-document contract, current documents and the planned backlog |
 | [`explanation/compatibility-gates.md`](explanation/compatibility-gates.md) | explanation | C0–C4 commands/artifacts, `compat check`, the Spring smoke, and where `cargo xtask ci` belongs |
-| [`explanation/class-loading-and-libraries.md`](explanation/class-loading-and-libraries.md) | explanation | sources, loader identity/delegation, the two `stdlib` trees, classpath resources, executable-jar launch and native dispatch |
+| [`explanation/class-loading-and-libraries.md`](explanation/class-loading-and-libraries.md) | explanation | sources, loader identity/delegation, the two `stdlib` trees, classpath resources, executable-jar launch, nested-jar and non-web Boot startup, and native dispatch |
 | [`explanation/interpreter-execution.md`](explanation/interpreter-execution.md) | explanation | decoded IR/frames, static/instance dispatch, native ABI, exceptions, `invokedynamic`, lambdas and streams |
 | [`explanation/reflection-and-metadata.md`](explanation/reflection-and-metadata.md) | explanation | C1 metadata → class/member/annotation/generic `Type`, lookup, invocation and boundaries |
 | [`explanation/c1-metadata.md`](explanation/c1-metadata.md) | explanation | C1 levels, the 1,011/36 `ct.sym` split, normalization, and what “differences 0” does and does not prove |
