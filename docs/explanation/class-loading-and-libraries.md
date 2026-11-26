@@ -340,9 +340,13 @@ metadata-shaped.
 `crates/vm/src/library.rs::register_all` installs the class-library natives in one place
 (object/instance/string/collections/maps/boxed/reflection/generic/annotation/JUL/system/
 atomics/math/arrays/locks/references/exceptions/regex/format/thread natives) and
-installs the minimal `System.out`/`System.err`. The runner additionally registers the
-interpreter-owned natives (`Method.invoke`/`Constructor.newInstance`, callbacks and
-streams), because those re-enter the interpreter.
+installs the minimal `System.out`/`System.err`. The error stream is registered as such, so
+`System.err` writes do not land on the program's stdout, and the runner streams both
+streams through to the host as bytes are written: a hung or killed process keeps its log
+instead of losing a buffer that flushed only when `main` returned.
+
+The runner additionally registers the interpreter-owned natives (`Method.invoke`/
+`Constructor.newInstance`, callbacks and streams), because those re-enter the interpreter.
 
 The minimal `PrintStream` and the wrapper `TYPE` fields are examples of state that the
 C1 stubs cannot initialize with `<clinit>` code (there is none):

@@ -1,0 +1,24 @@
+# diagnostics — stream routing, streaming output and throwable traces
+
+`demo.OutErr`, `demo.Hang`, `demo.Trace` and `demo.Suppressed` are ordinary Java compiled
+with `javac --release 17`. `crates/cli/tests/diagnostics.rs` runs them through the built CLI
+and asserts (#79):
+
+- `System.err` reaches the process's stderr and `System.out` its stdout;
+- output written before a hang survives the kill (the runner streams instead of buffering);
+- `printStackTrace()` prints the `Caused by:` chain and `Suppressed:` entries, with no
+  frames (the VM records no Java frames);
+- `addSuppressed`/`getSuppressed` round-trip.
+
+Committed files:
+
+- `src/demo/*.java` — the sources.
+- `classes/demo/*.class` — the compiled classes, so CI needs no JDK.
+
+Rebuild after editing a source (needs a JDK 17 `javac`):
+
+```sh
+JAVAC=/path/to/jdk-17/bin/javac
+"$JAVAC" --release 17 -d crates/cli/tests/fixtures/diagnostics/classes \
+  crates/cli/tests/fixtures/diagnostics/src/demo/*.java
+```

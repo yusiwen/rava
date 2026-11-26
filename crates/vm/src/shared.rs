@@ -9,6 +9,7 @@ use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, MutexGuard, RwLock};
 
 use crate::VmError;
@@ -169,6 +170,12 @@ pub struct Shared {
     natives: RwLock<HashMap<NativeKey, NativeFn>>,
     stdout: Mutex<Vec<u8>>,
     stderr: Mutex<Vec<u8>>,
+    /// `PrintStream` objects installed as `System.err`, so their bytes go to the error
+    /// capture instead of `System.out`.
+    error_streams: Mutex<HashSet<ObjRef>>,
+    /// When set, output is written through to the host's stdout/stderr as it happens
+    /// instead of buffering for the runner's final flush.
+    stream_output: AtomicBool,
     /// One entry per `sun.misc.Unsafe` / `jdk.internal.misc.Unsafe` call the VM served.
     ///
     /// ADR-0005's acceptance requires a runtime log that contains only the open tier's
@@ -239,6 +246,8 @@ pub struct Shared {
     accessible: Mutex<HashSet<ObjRef>>,
     /// The detail message of each throwable a constructor created.
     throwable_messages: Mutex<HashMap<ObjRef, String>>,
+    /// `Throwable.addSuppressed` targets, in declaration order.
+    throwable_suppressed: Mutex<HashMap<ObjRef, Vec<ObjRef>>>,
     /// The cause of each throwable a constructor or `initCause` recorded.
     throwable_causes: Mutex<HashMap<ObjRef, ObjRef>>,
     /// The Rust text and bytes attached to the `java.net.URL`, `java.net.URLConnection`
@@ -309,6 +318,8 @@ impl Shared {
             natives: RwLock::new(HashMap::new()),
             stdout: Mutex::new(Vec::new()),
             stderr: Mutex::new(Vec::new()),
+            error_streams: Mutex::new(HashSet::new()),
+            stream_output: AtomicBool::new(false),
             unsafe_calls: Mutex::new(Vec::new()),
             jul: Mutex::new(crate::jul::JulState::default()),
             properties: Mutex::new(default_properties()),
@@ -330,6 +341,7 @@ impl Shared {
             accessible: Mutex::new(HashSet::new()),
             throwable_messages: Mutex::new(HashMap::new()),
             throwable_causes: Mutex::new(HashMap::new()),
+            throwable_suppressed: Mutex::new(HashMap::new()),
             resources: Mutex::new(crate::resources::ResourceState::default()),
             time: Mutex::new(crate::java_time::TimeState::default()),
             services: Mutex::new(crate::services::ServiceState::default()),
@@ -2295,7 +2307,50 @@ impl Shared {
         keys
     }
 
+    /// Mark a `PrintStream` object as `System.err`; its writes go to the error capture.
+    pub fn register_error_stream(&self, reference: ObjRef) {
+        self.error_streams
+            .lock()
+            .expect("error stream lock poisoned")
+            .insert(reference);
+    }
+
+    /// Whether `reference` is one of the installed error streams.
+    pub fn is_error_stream(&self, reference: ObjRef) -> bool {
+        self.error_streams
+            .lock()
+            .expect("error stream lock poisoned")
+            .contains(&reference)
+    }
+
+    /// Write through the `PrintStream` the call was made on.
+    pub fn write_output(&self, stream: ObjRef, bytes: &[u8]) {
+        if self.is_error_stream(stream) {
+            self.write_stderr(bytes);
+        } else {
+            self.write_stdout(bytes);
+        }
+    }
+
+    /// Write output through to the host process instead of buffering it.
+    ///
+    /// The runner turns this on so a program that hangs or is killed still has its output:
+    /// the buffered path only reaches the host when `main` returns.
+    pub fn set_output_streaming(&self, enabled: bool) {
+        self.stream_output.store(enabled, Ordering::Relaxed);
+    }
+
+    pub fn output_streaming(&self) -> bool {
+        self.stream_output.load(Ordering::Relaxed)
+    }
+
     pub fn write_stdout(&self, bytes: &[u8]) {
+        if self.output_streaming() {
+            use std::io::Write as _;
+            let mut stdout = std::io::stdout();
+            let _ = stdout.write_all(bytes).and_then(|()| stdout.flush());
+            return;
+        }
         self.stdout
             .lock()
             .expect("stdout lock poisoned")
@@ -2378,6 +2433,26 @@ impl Shared {
             .expect("throwable cause lock poisoned")
             .get(&reference)
             .copied()
+    }
+
+    /// Record one suppressed exception on a throwable.
+    pub fn add_throwable_suppressed(&self, reference: ObjRef, suppressed: ObjRef) {
+        self.throwable_suppressed
+            .lock()
+            .expect("throwable suppressed lock poisoned")
+            .entry(reference)
+            .or_default()
+            .push(suppressed);
+    }
+
+    /// The throwable's suppressed exceptions, in declaration order.
+    pub fn throwable_suppressed(&self, reference: ObjRef) -> Vec<ObjRef> {
+        self.throwable_suppressed
+            .lock()
+            .expect("throwable suppressed lock poisoned")
+            .get(&reference)
+            .cloned()
+            .unwrap_or_default()
     }
 
     pub fn throwable_message(&self, reference: ObjRef) -> Option<String> {
@@ -2720,6 +2795,12 @@ impl Shared {
     /// `java.util.logging` writes here, so Spring's diagnostics never pollute `System.out`.
     /// The runner flushes the buffer to the process's stderr.
     pub fn write_stderr(&self, bytes: &[u8]) {
+        if self.output_streaming() {
+            use std::io::Write as _;
+            let mut stderr = std::io::stderr();
+            let _ = stderr.write_all(bytes).and_then(|()| stderr.flush());
+            return;
+        }
         self.stderr
             .lock()
             .expect("stderr lock poisoned")
