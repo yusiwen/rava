@@ -76,7 +76,9 @@ target and enforced by C0–C4 gates.
 
 The Spring, Boot and Tomcat versions are pinned in `compat/targets.toml`, together
 with the reference application's source hash; `compat/jars.lock` pins the sha256 of
-every jar in the flat `compat/jars/` set. The jars are fetched, not committed.
+every downloaded jar in the flat `compat/jars/` set, and the reference application's
+own jar is built from that pinned source (its lock line is provenance, not a checksum
+checked after a rebuild). The jars are fetched, not committed.
 Reactive web (Spring WebFlux) is a later target, not part of the first acceptance.
 
 ## Documents

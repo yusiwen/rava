@@ -1,7 +1,9 @@
 //! The target lock: platform pins, the pinned jar set and the `compat target` check.
 //!
 //! `compat/targets.toml` is the single source of truth for the pinned platform
-//! (ADR-0002). `compat/jars.lock` pins the sha256 of every jar in `compat/jars/`.
+//! (ADR-0002). `compat/jars.lock` pins the sha256 of every downloaded jar in
+//! `compat/jars/`; the reference application's jar is built from the pinned source, so its
+//! line records provenance and is not checksum-compared.
 //! This module reads both and fails when either is missing or they disagree. It does
 //! not fetch jars and does not re-hash them; `compat/fetch-jars.sh --check` owns that.
 
@@ -168,7 +170,8 @@ impl TargetLock {
     }
 }
 
-/// The parsed contents of `compat/jars.lock`: one sha256 per jar plus the count.
+/// The parsed contents of `compat/jars.lock`: one sha256 per downloaded jar plus the
+/// count. The reference-app jar's line is provenance; `fetch-jars.sh` does not compare it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JarLock {
     pub count: usize,
