@@ -294,7 +294,11 @@ Boot's startup timing), `String.format`/`getBytes`/`chars`, `java.util.logging` 
 dispatch, record `equals`/`toString` bootstraps, `java.io` readers/files and
 `java.net.URI`, `java.lang.management.RuntimeMXBean`, `BigInteger`, `SecureRandom` and
 `BitSet`. Those are ordinary JDK classes with observed behavior; they are not stubs and
-they are not selected by class name for Boot.
+they are not selected by class name for Boot. The surfaces that remain subsets have a named
+boundary: `SecureRandom` shares the `Random` stream (no entropy source), `BigInteger` is
+`i128`-bounded with no prime/modular API, the charset table is small, and a non-ISO
+`DateTimeFormatter` locale pattern is a typed error. Named `ZoneId`s read the host's TZif
+database and sample the offset at the printed instant; an unknown id is a typed error.
 
 What the gate exercises is measured, not assumed: a debug build exposes an opt-in
 `RAVA_NATIVE_CENSUS` hook in the native table, and `scripts/native-census.sh` runs this
