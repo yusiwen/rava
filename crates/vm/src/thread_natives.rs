@@ -20,6 +20,7 @@ use crate::value::Value;
 const THREAD_CLASS: &str = "java/lang/Thread";
 const THREAD_STATE_CLASS: &str = "java/lang/Thread$State";
 const THREAD_LOCAL_CLASS: &str = "java/lang/ThreadLocal";
+const INHERITABLE_THREAD_LOCAL_CLASS: &str = "java/lang/InheritableThreadLocal";
 
 const THREAD_STATES: [&str; 6] = [
     "NEW",
@@ -31,6 +32,48 @@ const THREAD_STATES: [&str; 6] = [
 ];
 
 pub fn register_natives(shared: &Shared) {
+    // A `Thread` object exists before M5; its constructors only record nothing, and
+    // `start` stays a no-op. Boot's logging stack allocates a thread for its background
+    // initializer, which is the production path that must not fail.
+    for descriptor in [
+        "()V",
+        "(Ljava/lang/Runnable;)V",
+        "(Ljava/lang/Runnable;Ljava/lang/String;)V",
+        "(Ljava/lang/String;)V",
+        "(Ljava/lang/ThreadGroup;Ljava/lang/Runnable;)V",
+    ] {
+        shared.register_native(THREAD_CLASS, "<init>", descriptor, thread_noop);
+    }
+    shared.register_native(
+        THREAD_CLASS,
+        "getThreadGroup",
+        "()Ljava/lang/ThreadGroup;",
+        thread_get_group,
+    );
+    shared.register_native(
+        "java/lang/ThreadGroup",
+        "<init>",
+        "(Ljava/lang/String;)V",
+        thread_group_init,
+    );
+    shared.register_native(
+        "java/lang/ThreadGroup",
+        "getName",
+        "()Ljava/lang/String;",
+        thread_group_name,
+    );
+    shared.register_native(
+        "java/lang/ThreadGroup",
+        "toString",
+        "()Ljava/lang/String;",
+        thread_group_name,
+    );
+    shared.register_native(
+        "java/lang/ThreadGroup",
+        "getParent",
+        "()Ljava/lang/ThreadGroup;",
+        thread_group_parent,
+    );
     shared.register_native(
         THREAD_CLASS,
         "currentThread",
@@ -101,6 +144,18 @@ pub fn register_natives(shared: &Shared) {
         "initialValue",
         "()Ljava/lang/Object;",
         thread_null,
+    );
+
+    // `InheritableThreadLocal` declares its own constructor and `childValue` in the C1
+    // stub, so those two declarations need their own entries. Its inherited `get`/`set`/
+    // `remove` still resolve to the `ThreadLocal` declarations above. Until M5 creates a
+    // child thread, an inheritable thread-local stores its value exactly like a plain one.
+    shared.register_native(INHERITABLE_THREAD_LOCAL_CLASS, "<init>", "()V", thread_noop);
+    shared.register_native(
+        INHERITABLE_THREAD_LOCAL_CLASS,
+        "childValue",
+        "(Ljava/lang/Object;)Ljava/lang/Object;",
+        thread_identity,
     );
 }
 
@@ -267,6 +322,22 @@ fn thread_noop_reference(
     Ok(None)
 }
 
+/// Return the only argument unchanged (`InheritableThreadLocal.childValue`).
+fn thread_identity(
+    _shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    match args.first().copied() {
+        Some(value) => Ok(Some(value)),
+        None => Err(VmError::Native(
+            "InheritableThreadLocal.childValue is missing its argument".to_owned(),
+        )),
+    }
+}
+
 fn thread_false(
     _shared: &Shared,
     _thread: &ThreadState,
@@ -288,6 +359,49 @@ fn thread_true(
 }
 
 fn thread_null(
+    _shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    _args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    Ok(Some(Value::Ref(ObjRef::NULL)))
+}
+
+fn thread_get_group(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    _args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let class = shared.load_library_class("java/lang/ThreadGroup")?;
+    Ok(Some(Value::Ref(shared.allocate_instance(class)?)))
+}
+
+fn thread_group_init(
+    _shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    _args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    Ok(None)
+}
+
+fn thread_group_name(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    _args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    Ok(Some(Value::Ref(
+        shared.heap().allocate_string("main".to_owned()),
+    )))
+}
+
+fn thread_group_parent(
     _shared: &Shared,
     _thread: &ThreadState,
     _loader: LoaderId,

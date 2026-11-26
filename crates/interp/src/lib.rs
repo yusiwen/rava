@@ -31,17 +31,25 @@
 
 #![forbid(unsafe_code)]
 
+pub mod bean_support;
 pub mod callbacks;
+pub mod collection_equality;
 mod error;
+pub mod executors;
 mod frame;
+pub mod functional;
 pub mod futures;
 mod instr;
+pub mod interface_defaults;
+pub mod iterables;
 mod lambda;
 pub mod method_handles;
 pub mod object_methods;
+pub mod objects;
 pub mod proxy;
 pub mod reflect_invoke;
 pub mod service_loader;
+pub mod stack_walker;
 pub mod streams;
 pub mod unsafe_natives;
 
@@ -55,7 +63,7 @@ use std::sync::Arc;
 use rava_classfile::model::ACC_STATIC;
 use rava_vm::{
     ArrayKind, BoxedPrimitive, ClassEntry, ClassId, ClassRef, ClassState, FrameRootsGuard,
-    HeapObject, MemberKind, ObjRef, PrimitiveKind, Shared, ThreadState, Value, VmError,
+    HeapObject, LoaderId, MemberKind, ObjRef, PrimitiveKind, Shared, ThreadState, Value, VmError,
 };
 
 /// Run a static method with `args` and return its result (`None` for `void`).
@@ -184,7 +192,23 @@ fn run_method(
     // subclass). Natives keep their own receiver rules, so this runs only on the `Code`
     // path.
     if let Some(reference) = receiver {
-        let actual = shared.heap().object_class(reference)?;
+        // `Heap::object_class` covers instances and containers; a default interface method
+        // can also run on a lambda object or a VM value such as a string, so fall back to
+        // the general class-object path for those shapes.
+        // The heap guard is scoped to the probe: `get_class` locks the heap again for a
+        // shape (`Lambda`, `Str`, ...) that `object_class` does not answer, and holding the
+        // guard across that call would self-deadlock on the non-reentrant heap mutex.
+        let probed = {
+            let heap = shared.heap();
+            heap.object_class(reference)
+        };
+        let actual = match probed {
+            Ok(class) => class,
+            Err(_) => {
+                let class_object = shared.get_class(reference)?;
+                shared.heap().class(class_object)?
+            }
+        };
         if !is_assignable(shared, actual, class)? {
             let actual_name = shared
                 .entry(actual)
@@ -1038,20 +1062,81 @@ fn invoke_interface(
         Ok((entry, _)) => entry.id,
         Err(InterpError::MethodNotFound { .. }) => {
             // A class that inherits a default method has no declaration on its superclass
-            // chain; the interface hierarchy supplies it.
-            find_interface_method(shared, interface, name, descriptor)?.ok_or_else(|| {
-                InterpError::MethodNotFound {
-                    class: class_name(shared, start),
-                    name: name.to_owned(),
-                    descriptor: descriptor.to_owned(),
-                }
-            })?
+            // chain; the receiver's interface hierarchy supplies it. The call-site
+            // interface is only the fallback: `Ordered.getOrder` can be the declared
+            // member while the concrete default lives on a *subinterface*
+            // (`DatabaseInitializerDetector`).
+            match find_concrete_interface_method(shared, start, name, descriptor)? {
+                Some(declaring) => declaring,
+                None => find_interface_method(shared, interface, name, descriptor)?.ok_or_else(
+                    || InterpError::MethodNotFound {
+                        class: class_name(shared, start),
+                        name: name.to_owned(),
+                        descriptor: descriptor.to_owned(),
+                    },
+                )?,
+            }
         }
         Err(error) => return Err(error),
     };
     invoke_instance(
         shared, thread, frame, guard, declaring, receiver, args, name, descriptor,
     )
+}
+
+/// The interface reachable from `class` that declares a concrete `name:descriptor`.
+///
+/// `resolve_virtual` walks the superclass chain only. A class can inherit a default method
+/// from any interface it (or a superclass) implements, so the interface hierarchy has to be
+/// searched too, and an abstract declaration on an outer interface must not shadow a
+/// concrete default on a subinterface.
+fn find_concrete_interface_method(
+    shared: &Shared,
+    class: ClassId,
+    name: &str,
+    descriptor: &str,
+) -> Result<Option<ClassId>, InterpError> {
+    let mut stack = Vec::new();
+    let mut current = Some(class);
+    while let Some(current_class) = current {
+        let entry = shared.entry(current_class).ok_or_else(|| {
+            InterpError::Decode("class vanished during interface search".to_owned())
+        })?;
+        for interface_name in entry.file.interface_names()? {
+            match shared.load_class(entry.loader, interface_name) {
+                Ok(interface) => stack.push(interface),
+                Err(VmError::ClassNotFound { .. }) => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        current = match shared.resolution_superclass(current_class) {
+            Ok(next) => next,
+            Err(VmError::ClassNotFound { .. }) => None,
+            Err(error) => return Err(error.into()),
+        };
+    }
+    let mut seen = HashSet::new();
+    while let Some(interface) = stack.pop() {
+        if !seen.insert(interface) {
+            continue;
+        }
+        let entry = shared
+            .entry(interface)
+            .ok_or_else(|| InterpError::Decode("interface vanished".to_owned()))?;
+        if let Some(method) = entry.file.find_method(name, descriptor)? {
+            if !method.is_abstract() {
+                return Ok(Some(interface));
+            }
+        }
+        for interface_name in entry.file.interface_names()? {
+            match shared.load_class(entry.loader, interface_name) {
+                Ok(super_interface) => stack.push(super_interface),
+                Err(VmError::ClassNotFound { .. }) => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+    }
+    Ok(None)
 }
 
 /// The interface (at or below `interface`) that declares `name:descriptor`, if any.
@@ -1106,6 +1191,37 @@ fn invoke_instance(
     name: &str,
     descriptor: &str,
 ) -> Result<Option<Value>, InterpError> {
+    // An annotation-decoded enum value is a named constant object, not necessarily the
+    // class's canonical static. Initialize the enum type and dispatch on the canonical
+    // instance when one is available: a constant with a class body (`Threading.PLATFORM`)
+    // overrides methods there, and only the real constant has that runtime class.
+    let original_receiver = receiver;
+    let receiver = {
+        let named = {
+            let heap = shared.heap();
+            match heap.get(receiver) {
+                Ok(HeapObject::Enum(constant)) => Some((constant.class, constant.name.clone())),
+                _ => None,
+            }
+        };
+        if let Some((class, name)) = named {
+            ensure_initialized(shared, thread, class)?;
+            let descriptor = format!("L{};", class_name(shared, class));
+            match shared.static_field_value(class, &name, &descriptor)? {
+                Some(Value::Ref(real)) if !real.is_null() => real,
+                _ => receiver,
+            }
+        } else {
+            receiver
+        }
+    };
+    // The canonical constant may be a subclass with a class body (Threading$1), which is
+    // where the overridden method lives; dispatch from its runtime class, not from the
+    // abstract enum type the pseudo constant reported.
+    let mut start = start;
+    if receiver != original_receiver {
+        start = dispatch_class(shared, start, receiver)?;
+    }
     // An annotation receiver dispatches to its annotation type. The members this slice
     // answers (`annotationType`, the element methods, `equals`, `hashCode`, `toString`)
     // are not all declared on that type's superclass chain, so they are served before
@@ -1120,10 +1236,29 @@ fn invoke_instance(
     let (entry, is_native) = match resolve_virtual(shared, start, name, descriptor) {
         Ok(found) => found,
         Err(InterpError::MethodNotFound { .. }) => {
+            // The C1 tree can omit a superclass (`Stack` is projected, `Vector` is not), so
+            // a method the subclass inherits has no declaration to resolve to. A native
+            // registered on the receiver's class is the implementation for that inherited
+            // method; running it is the closure of the truncated tree, not a guess.
+            if let Some(native) = shared.native(&class_name(shared, start), name, descriptor) {
+                let loader = shared
+                    .entry(start)
+                    .map(|entry| entry.loader)
+                    .unwrap_or(LoaderId::BOOTSTRAP);
+                let mut call_roots = args.clone();
+                call_roots.push(Value::Ref(receiver));
+                publish_roots(guard, frame, &call_roots);
+                return native(shared, thread, loader, receiver, &args).map_err(InterpError::from);
+            }
             // A default method declared on a superinterface is part of method resolution
-            // for a class and is the whole resolution for an interface receiver (the
-            // `invokespecial AnnotationMetadata.getAnnotationAttributes` form Spring uses).
-            let Some(interface) = find_interface_method(shared, start, name, descriptor)? else {
+            // for a class, and the implementing interface may be inherited through a
+            // superclass. Prefer a concrete default from the class's whole interface
+            // hierarchy, then fall back to the interface named by the call site.
+            let interface = match find_concrete_interface_method(shared, start, name, descriptor)? {
+                Some(interface) => Some(interface),
+                None => find_interface_method(shared, start, name, descriptor)?,
+            };
+            let Some(interface) = interface else {
                 return Err(InterpError::MethodNotFound {
                     class: class_name(shared, start),
                     name: name.to_owned(),
@@ -1381,6 +1516,17 @@ fn is_assignable(shared: &Shared, from: ClassId, to: ClassId) -> Result<bool, In
         )));
     }
     Ok(false)
+}
+
+/// The runtime class of any heap value, including a string, a lambda or a box.
+///
+/// `Heap::object_class` answers only for instances and containers; a Java `equals` call or a
+/// `CharSequence.length` dispatch can target a `String`, so the interp helpers resolve the
+/// class object first and read its class identity. This is the same path
+/// [`lambda::virtual_target_class`] uses.
+pub(crate) fn runtime_class(shared: &Shared, receiver: ObjRef) -> Result<ClassId, InterpError> {
+    let class_object = shared.get_class(receiver)?;
+    Ok(shared.heap().class(class_object)?)
 }
 
 fn class_name(shared: &Shared, class: ClassId) -> String {
@@ -1939,7 +2085,18 @@ fn resolve_class_operand(
 /// identity, so a child loader's class stays distinct from a bootstrap class of the same
 /// name. The class is loaded but not initialized, exactly as JVMS §5.4.3 requires.
 fn class_literal(shared: &Shared, current: ClassId, name: &str) -> Result<ObjRef, InterpError> {
-    let class_ref = resolve_class_operand(shared, current, name)?;
+    let class_ref = match resolve_class_operand(shared, current, name) {
+        Ok(class_ref) => class_ref,
+        // `ldc` of a class the loader cannot provide is the JVM's `NoClassDefFoundError`,
+        // not a VM-typed abort: a framework that guards an optional dependency with a
+        // class literal catches `LinkageError` and continues without that feature.
+        Err(InterpError::Vm(VmError::ClassNotFound { name, .. })) => {
+            let throwable =
+                rava_vm::exceptions::new_throwable(shared, "java/lang/NoClassDefFoundError", name)?;
+            return Err(InterpError::Thrown(throwable));
+        }
+        Err(error) => return Err(error),
+    };
     Ok(shared.class_object_for_ref(&class_ref)?)
 }
 
@@ -2140,10 +2297,10 @@ fn publish_roots(guard: &FrameRootsGuard<'_>, frame: &Frame, values: &[Value]) {
 }
 
 fn resolve_from(shared: &Shared, current: ClassId, name: &str) -> Result<ClassId, InterpError> {
-    let loader = shared
+    let entry = shared
         .entry(current)
-        .ok_or_else(|| InterpError::Decode("current class vanished".to_owned()))?
-        .loader;
+        .ok_or_else(|| InterpError::Decode("current class vanished".to_owned()))?;
+    let loader = entry.loader;
     Ok(shared.load_class(loader, name)?)
 }
 
@@ -2230,9 +2387,10 @@ pub(crate) fn dispatch_class(
             HeapObject::Enumeration(_) => {
                 ReceiverKind::Named(shared.load_library_class("java/util/Enumeration")?)
             }
-            HeapObject::Stream(_) => {
-                ReceiverKind::Named(shared.load_library_class("java/util/stream/Stream")?)
-            }
+            HeapObject::Stream(stream) => match stream.class {
+                Some(class) => ReceiverKind::Named(class),
+                None => ReceiverKind::Named(shared.load_library_class("java/util/stream/Stream")?),
+            },
             HeapObject::Spliterator(_) => {
                 ReceiverKind::Named(shared.load_library_class("java/util/Spliterator")?)
             }
@@ -2292,7 +2450,8 @@ pub(crate) fn resolve_virtual(
         let entry = shared
             .entry(current)
             .ok_or_else(|| InterpError::Decode("receiver class vanished".to_owned()))?;
-        if let Some(method) = entry.file.find_method(name, descriptor)? {
+        let found = entry.file.find_method(name, descriptor)?;
+        if let Some(method) = found {
             return Ok((Arc::clone(&entry), method.is_native()));
         }
         // The C1 tree is not closed under superclasses: `LinkedList` extends

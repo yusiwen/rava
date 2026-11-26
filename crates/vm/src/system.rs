@@ -102,6 +102,193 @@ pub fn register_natives(shared: &Shared) {
         "()Ljava/lang/SecurityManager;",
         system_null,
     );
+    // The VM is not attached to an interactive console, so `System.console()` is null and
+    // Boot's color/terminal probes take the no-console path.
+    shared.register_native(SYSTEM_CLASS, "console", "()Ljava/io/Console;", system_null);
+
+    // `ManagementFactory.getRuntimeMXBean()`: Boot reads the process name (and Spring's
+    // diagnostics read the VM/spec names). There is no management agent, so the MXBean is a
+    // read-only view over the VM's fixed identity and the system-property table.
+    shared.register_native(
+        "java/lang/management/ManagementFactory",
+        "getRuntimeMXBean",
+        "()Ljava/lang/management/RuntimeMXBean;",
+        management_runtime_mx_bean,
+    );
+    for (name, descriptor, function) in [
+        (
+            "getName",
+            "()Ljava/lang/String;",
+            runtime_bean_name as crate::NativeFn,
+        ),
+        ("getStartTime", "()J", runtime_bean_zero_long),
+        ("getUptime", "()J", runtime_bean_zero_long),
+        ("getVmName", "()Ljava/lang/String;", runtime_bean_vm_name),
+        ("getVmVendor", "()Ljava/lang/String;", runtime_bean_vendor),
+        ("getVmVersion", "()Ljava/lang/String;", runtime_bean_version),
+        (
+            "getSpecName",
+            "()Ljava/lang/String;",
+            runtime_bean_spec_name,
+        ),
+        (
+            "getSpecVersion",
+            "()Ljava/lang/String;",
+            runtime_bean_spec_version,
+        ),
+        ("getSpecVendor", "()Ljava/lang/String;", runtime_bean_vendor),
+        (
+            "getManagementSpecVersion",
+            "()Ljava/lang/String;",
+            runtime_bean_spec_version,
+        ),
+        (
+            "getClassPath",
+            "()Ljava/lang/String;",
+            runtime_bean_class_path,
+        ),
+        (
+            "getBootClassPath",
+            "()Ljava/lang/String;",
+            runtime_bean_empty,
+        ),
+        (
+            "getInputArguments",
+            "()Ljava/util/List;",
+            runtime_bean_input_arguments,
+        ),
+        (
+            "getSystemProperties",
+            "()Ljava/util/Map;",
+            runtime_bean_system_properties,
+        ),
+    ] {
+        shared.register_native(
+            "java/lang/management/RuntimeMXBean",
+            name,
+            descriptor,
+            function,
+        );
+    }
+
+    // `Runtime.getRuntime()`: Boot's `BackgroundPreinitializer` asks for the processor
+    // count while it decides whether to preinitialize in the background, and the
+    // application shutdown hook registers through `Runtime`.
+    shared.register_native(
+        RUNTIME_CLASS,
+        "getRuntime",
+        "()Ljava/lang/Runtime;",
+        runtime_get_runtime,
+    );
+    shared.register_native(
+        RUNTIME_CLASS,
+        "availableProcessors",
+        "()I",
+        runtime_available_processors,
+    );
+    shared.register_native(
+        RUNTIME_CLASS,
+        "addShutdownHook",
+        "(Ljava/lang/Thread;)V",
+        runtime_noop_thread,
+    );
+    shared.register_native(
+        RUNTIME_CLASS,
+        "removeShutdownHook",
+        "(Ljava/lang/Thread;)Z",
+        runtime_true,
+    );
+
+    // Boot's `ApplicationPid` asks the current process for its pid; the host pid is the
+    // honest answer, and it is the only process surface this slice exposes.
+    shared.register_native(
+        PROCESS_HANDLE_CLASS,
+        "current",
+        "()Ljava/lang/ProcessHandle;",
+        process_handle_current,
+    );
+    shared.register_native(PROCESS_HANDLE_CLASS, "pid", "()J", process_handle_pid);
+    shared.register_native(PROCESS_HANDLE_CLASS, "isAlive", "()Z", runtime_true);
+}
+
+fn process_handle_current(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    _args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let class = shared.load_library_class(PROCESS_HANDLE_CLASS)?;
+    Ok(Some(Value::Ref(shared.allocate_instance(class)?)))
+}
+
+fn process_handle_pid(
+    _shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    _args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    Ok(Some(Value::Long(i64::from(std::process::id()))))
+}
+
+/// The `java.lang.Runtime` class.
+const RUNTIME_CLASS: &str = "java/lang/Runtime";
+
+/// The `java.lang.ProcessHandle` interface.
+const PROCESS_HANDLE_CLASS: &str = "java/lang/ProcessHandle";
+
+/// `Runtime.getRuntime()`: a fresh `Runtime` instance.
+///
+/// The JDK returns one singleton; nothing in the pinned startup path compares its
+/// identity, and a fresh object keeps the VM free of a permanent root.
+fn runtime_get_runtime(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    _args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let class = shared.load_library_class(RUNTIME_CLASS)?;
+    Ok(Some(Value::Ref(shared.allocate_instance(class)?)))
+}
+
+/// `Runtime.availableProcessors()`: the single interpreter thread.
+fn runtime_available_processors(
+    _shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    _args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    Ok(Some(Value::Int(1)))
+}
+
+fn runtime_noop_thread(
+    _shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    // A hook would run on a VM shutdown path this slice does not have; accepting the
+    // registration keeps the application's startup flow intact.
+    if matches!(args.first(), Some(Value::Ref(reference)) if reference.is_null()) {
+        return Err(VmError::Native(
+            "Runtime.addShutdownHook: null hook".to_owned(),
+        ));
+    }
+    Ok(None)
+}
+
+fn runtime_true(
+    _shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    _args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    Ok(Some(Value::Int(1)))
 }
 
 fn heap_error(error: crate::HeapError) -> VmError {
@@ -438,4 +625,161 @@ fn system_null(
     _args: &[Value],
 ) -> Result<Option<Value>, VmError> {
     Ok(Some(Value::Ref(ObjRef::NULL)))
+}
+
+// ---------------------------------------------------------------------------
+// java.lang.management.RuntimeMXBean
+// ---------------------------------------------------------------------------
+
+fn management_runtime_mx_bean(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    _args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let class = shared.load_library_class("java/lang/management/RuntimeMXBean")?;
+    Ok(Some(Value::Ref(shared.allocate_instance(class)?)))
+}
+
+fn runtime_bean_name(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    _args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let name = format!("{}@localhost", std::process::id());
+    Ok(Some(Value::Ref(shared.heap().allocate_string(name))))
+}
+
+fn runtime_bean_zero_long(
+    _shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    _args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    Ok(Some(Value::Long(0)))
+}
+
+fn runtime_bean_vm_name(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    _args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    Ok(Some(Value::Ref(
+        shared.heap().allocate_string("rava".to_owned()),
+    )))
+}
+
+fn runtime_bean_vendor(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    _args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    Ok(Some(Value::Ref(
+        shared.heap().allocate_string("rava".to_owned()),
+    )))
+}
+
+fn runtime_bean_version(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    _args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    Ok(Some(Value::Ref(
+        shared.heap().allocate_string("17".to_owned()),
+    )))
+}
+
+fn runtime_bean_spec_name(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    _args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    Ok(Some(Value::Ref(shared.heap().allocate_string(
+        "Java Virtual Machine Specification".to_owned(),
+    ))))
+}
+
+fn runtime_bean_spec_version(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    _args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    Ok(Some(Value::Ref(
+        shared.heap().allocate_string("17".to_owned()),
+    )))
+}
+
+fn runtime_bean_class_path(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    _args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let class_path = shared.property("java.class.path").unwrap_or_default();
+    Ok(Some(Value::Ref(shared.heap().allocate_string(class_path))))
+}
+
+fn runtime_bean_empty(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    _args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    Ok(Some(Value::Ref(
+        shared.heap().allocate_string(String::new()),
+    )))
+}
+
+fn runtime_bean_input_arguments(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    _args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let class = shared.load_library_class("java/util/ArrayList")?;
+    Ok(Some(Value::Ref(shared.heap().allocate_list(class))))
+}
+
+fn runtime_bean_system_properties(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    _args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let properties = shared.system_properties_snapshot();
+    let class = shared.load_library_class("java/util/Properties")?;
+    let map = shared.heap().allocate_map(class);
+    let entries: Vec<(Value, Value)> = properties
+        .into_iter()
+        .map(|(key, value)| {
+            (
+                Value::Ref(shared.intern_string(&key)),
+                Value::Ref(shared.intern_string(&value)),
+            )
+        })
+        .collect();
+    shared
+        .heap()
+        .map_mut(map)
+        .map_err(|error| VmError::Native(error.to_string()))?
+        .extend(entries);
+    Ok(Some(Value::Ref(map)))
 }

@@ -159,6 +159,32 @@ pub struct Shared {
     /// `ConcurrentReferenceHashMap$Segment`, which extends `ReentrantLock` and adds its own
     /// fields. A plain `ReentrantLock` keeps its state in [`crate::HeapObject::Lock`].
     locks: Mutex<HashMap<ObjRef, crate::heap::LockState>>,
+    /// The remaining count of each `java.util.concurrent.CountDownLatch`. The value is a
+    /// Rust number, so the table owns no Java reference; [`Shared::roots`] reports the
+    /// keys for a future collector. A wait cannot block until M5 has a real thread model.
+    latches: Mutex<HashMap<ObjRef, usize>>,
+    /// The `i128` value of each `java.math.BigInteger`. The value is a Rust number, so the
+    /// table owns no Java reference; [`Shared::roots`] reports the keys.
+    big_numbers: Mutex<crate::big_numbers::BigNumberState>,
+    /// The PRNG state of each `java.util.Random`/`java.security.SecureRandom`. The state is
+    /// a Rust number, so the table owns no Java reference; [`Shared::roots`] reports the
+    /// keys.
+    random: Mutex<crate::random::RandomState>,
+    /// The parsed components of every `java.net.URI`. The values are Rust text, so the
+    /// table owns no Java reference; [`Shared::roots`] reports the keys.
+    uris: Mutex<crate::uri::UriState>,
+    /// The path of every `java.io.File`. The values are Rust paths, so the table owns no
+    /// Java reference; [`Shared::roots`] reports the keys.
+    files: Mutex<crate::io_file::FileState>,
+    /// The canonical name of every `java.nio.charset.Charset`. The values are Rust text, so
+    /// the table owns no Java reference; [`Shared::roots`] reports the keys.
+    charsets: Mutex<crate::charset::CharsetState>,
+    /// The accessor methods behind each `java.beans.PropertyDescriptor`. The values hold
+    /// Java references (the reflected `Method` objects), so [`Shared::roots`] reports both
+    /// the descriptors and the accessors.
+    beans: Mutex<crate::beans::BeanState>,
+    /// The `(executable, index)` behind each `java.lang.reflect.Parameter`.
+    parameters: Mutex<HashMap<ObjRef, (ObjRef, usize)>>,
     /// The referent of every `java.lang.ref.Reference` instance. There is no collector yet
     /// (M5), so a reference never clears on its own; `get`/`clear`/`enqueue` still work.
     references: Mutex<HashMap<ObjRef, ObjRef>>,
@@ -184,12 +210,19 @@ pub struct Shared {
     accessible: Mutex<HashSet<ObjRef>>,
     /// The detail message of each throwable a constructor created.
     throwable_messages: Mutex<HashMap<ObjRef, String>>,
+    /// The cause of each throwable a constructor or `initCause` recorded.
+    throwable_causes: Mutex<HashMap<ObjRef, ObjRef>>,
     /// The Rust text and bytes attached to the `java.net.URL`, `java.net.URLConnection`
     /// and `java.io.InputStream` objects this VM allocates. The data is not a Java
     /// reference, so it is a side table keyed by [`ObjRef`] rather than a new
     /// [`HeapObject`] variant. [`Shared::roots`] reports the keys, so the attachment is
     /// a strong owner until a collector defines its lifetime.
     resources: Mutex<crate::resources::ResourceState>,
+    /// The Rust state attached to `java.time` objects (M4.5): an instant's epoch
+    /// milliseconds, a zone's id and captured offset, a formatter's pattern and zone,
+    /// and a locale's tag. Like the resource table it is keyed by [`ObjRef`], so the
+    /// objects stay ordinary class instances and [`Shared::roots`] reports the keys.
+    time: Mutex<crate::java_time::TimeState>,
     /// The service type, defining loader, provider classes and iteration cursor behind
     /// each `java.util.ServiceLoader` and service iterator. Like the resource table it is
     /// keyed by [`ObjRef`] rather than a new [`HeapObject`] variant, so both objects stay
@@ -252,6 +285,14 @@ impl Shared {
             properties: Mutex::new(default_properties()),
             enums: Mutex::new(HashMap::new()),
             locks: Mutex::new(HashMap::new()),
+            latches: Mutex::new(HashMap::new()),
+            big_numbers: Mutex::new(crate::big_numbers::BigNumberState::default()),
+            random: Mutex::new(crate::random::RandomState::default()),
+            uris: Mutex::new(crate::uri::UriState::default()),
+            files: Mutex::new(crate::io_file::FileState::default()),
+            charsets: Mutex::new(crate::charset::CharsetState::default()),
+            beans: Mutex::new(crate::beans::BeanState::default()),
+            parameters: Mutex::new(HashMap::new()),
             references: Mutex::new(HashMap::new()),
             main_thread: Mutex::new(None),
             thread_locals: Mutex::new(HashMap::new()),
@@ -259,7 +300,9 @@ impl Shared {
             object_loaders: Mutex::new(HashMap::new()),
             accessible: Mutex::new(HashSet::new()),
             throwable_messages: Mutex::new(HashMap::new()),
+            throwable_causes: Mutex::new(HashMap::new()),
             resources: Mutex::new(crate::resources::ResourceState::default()),
+            time: Mutex::new(crate::java_time::TimeState::default()),
             services: Mutex::new(crate::services::ServiceState::default()),
             hooks: Hooks::default(),
         }
@@ -906,6 +949,7 @@ impl Shared {
     pub fn annotation_object(
         &self,
         class: ClassId,
+        loader: LoaderId,
         values: Vec<rava_classfile::AnnotationValue>,
     ) -> Result<ObjRef, VmError> {
         if self.entry(class).is_none() {
@@ -914,7 +958,7 @@ impl Shared {
                 class.0
             )));
         }
-        Ok(self.heap().allocate_annotation(class, values))
+        Ok(self.heap().allocate_annotation(class, loader, values))
     }
 
     /// The annotation instance behind a reference, if it is one.
@@ -1141,7 +1185,10 @@ impl Shared {
                 HeapObject::Pattern(_) => Kind::Pattern,
                 HeapObject::Matcher(_) => Kind::Matcher,
                 HeapObject::Enumeration(_) => Kind::Enumeration,
-                HeapObject::Stream(_) => Kind::Stream,
+                HeapObject::Stream(stream) => match stream.class {
+                    Some(class) => Kind::Named(class),
+                    None => Kind::Stream,
+                },
                 HeapObject::Spliterator(_) => Kind::Spliterator,
                 HeapObject::Collector(_) => Kind::Collector,
                 HeapObject::Optional(_) => Kind::Optional,
@@ -1411,7 +1458,13 @@ impl Shared {
                 crate::collections::ARRAY_LIST_CLASS
                 | crate::collections::LINKED_LIST_CLASS
                 | crate::collections::COPY_ON_WRITE_ARRAY_LIST_CLASS
-                | crate::collections::ARRAY_DEQUE_CLASS => return Ok(Some(VmContainerKind::List)),
+                | crate::collections::ARRAY_DEQUE_CLASS
+                | crate::collections::LINKED_BLOCKING_QUEUE_CLASS
+                | crate::collections::CONCURRENT_LINKED_DEQUE_CLASS
+                | crate::collections::CONCURRENT_LINKED_QUEUE_CLASS
+                | crate::collections::STACK_CLASS => {
+                    return Ok(Some(VmContainerKind::List));
+                }
                 crate::collections::LINKED_HASH_SET_CLASS
                 | crate::collections::HASH_SET_CLASS
                 | crate::collections::TREE_SET_CLASS
@@ -1425,7 +1478,8 @@ impl Shared {
                 | crate::maps::TREE_MAP_CLASS
                 | crate::maps::WEAK_HASH_MAP_CLASS
                 | crate::maps::IDENTITY_HASH_MAP_CLASS
-                | crate::maps::CONCURRENT_HASH_MAP_CLASS => return Ok(Some(VmContainerKind::Map)),
+                | crate::maps::CONCURRENT_HASH_MAP_CLASS
+                | crate::maps::ENUM_MAP_CLASS => return Ok(Some(VmContainerKind::Map)),
                 _ => {}
             }
             current = self.resolution_superclass(id)?;
@@ -1444,6 +1498,10 @@ impl Shared {
                 | crate::collections::LINKED_LIST_CLASS
                 | crate::collections::COPY_ON_WRITE_ARRAY_LIST_CLASS
                 | crate::collections::ARRAY_DEQUE_CLASS
+                | crate::collections::LINKED_BLOCKING_QUEUE_CLASS
+                | crate::collections::CONCURRENT_LINKED_DEQUE_CLASS
+                | crate::collections::CONCURRENT_LINKED_QUEUE_CLASS
+                | crate::collections::STACK_CLASS
                 | crate::collections::LINKED_HASH_SET_CLASS
                 | crate::collections::HASH_SET_CLASS
                 | crate::collections::TREE_SET_CLASS
@@ -1456,6 +1514,7 @@ impl Shared {
                 | crate::maps::WEAK_HASH_MAP_CLASS
                 | crate::maps::IDENTITY_HASH_MAP_CLASS
                 | crate::maps::CONCURRENT_HASH_MAP_CLASS
+                | crate::maps::ENUM_MAP_CLASS
         )
     }
 
@@ -1519,6 +1578,60 @@ impl Shared {
         self.resources
             .lock()
             .expect("resource side-table lock poisoned")
+    }
+
+    /// Lock the `java.time` side table for a short, scoped operation.
+    ///
+    /// The values are Rust text and numbers only, so a caller may hold the guard while it
+    /// reads a value; it must drop the guard before allocating or running Java code.
+    pub(crate) fn time_state(&self) -> MutexGuard<'_, crate::java_time::TimeState> {
+        self.time
+            .lock()
+            .expect("java.time side-table lock poisoned")
+    }
+
+    /// Lock the `CountDownLatch` count table for a short, scoped operation.
+    pub(crate) fn latch_state(&self) -> MutexGuard<'_, HashMap<ObjRef, usize>> {
+        self.latches.lock().expect("latch-state lock poisoned")
+    }
+
+    /// Lock the `BigInteger` value table for a short, scoped operation.
+    pub(crate) fn big_number_state(&self) -> MutexGuard<'_, crate::big_numbers::BigNumberState> {
+        self.big_numbers
+            .lock()
+            .expect("big-number state lock poisoned")
+    }
+
+    /// Lock the random-generator state table for a short, scoped operation.
+    pub(crate) fn random_state(&self) -> MutexGuard<'_, crate::random::RandomState> {
+        self.random.lock().expect("random state lock poisoned")
+    }
+
+    /// Lock the URI state table for a short, scoped operation.
+    pub(crate) fn uri_state(&self) -> MutexGuard<'_, crate::uri::UriState> {
+        self.uris.lock().expect("URI state lock poisoned")
+    }
+
+    /// Lock the `File` path table for a short, scoped operation.
+    pub(crate) fn file_state(&self) -> MutexGuard<'_, crate::io_file::FileState> {
+        self.files.lock().expect("file state lock poisoned")
+    }
+
+    /// Lock the charset state table for a short, scoped operation.
+    pub(crate) fn charset_state(&self) -> MutexGuard<'_, crate::charset::CharsetState> {
+        self.charsets.lock().expect("charset state lock poisoned")
+    }
+
+    /// Lock the `java.beans` state table for a short, scoped operation.
+    pub fn bean_state(&self) -> MutexGuard<'_, crate::beans::BeanState> {
+        self.beans.lock().expect("bean state lock poisoned")
+    }
+
+    /// Lock the reflected-parameter state table for a short, scoped operation.
+    pub(crate) fn parameter_state(&self) -> MutexGuard<'_, HashMap<ObjRef, (ObjRef, usize)>> {
+        self.parameters
+            .lock()
+            .expect("parameter state lock poisoned")
     }
 
     /// Lock the `ServiceLoader` side table for a short, scoped operation.
@@ -1709,6 +1822,115 @@ impl Shared {
         }
 
         {
+            // A reflected parameter keeps its executable as a root.
+            let parameters = self
+                .parameters
+                .lock()
+                .expect("parameter state lock poisoned");
+            for (parameter, (executable, _)) in parameters.iter() {
+                for reference in [*parameter, *executable] {
+                    if seen.insert(reference) {
+                        roots.push(reference);
+                    }
+                }
+            }
+        }
+
+        {
+            // A descriptor keeps its reflected accessor methods as roots.
+            let beans = self.beans.lock().expect("bean state lock poisoned");
+            for reference in beans.references() {
+                if seen.insert(reference) {
+                    roots.push(reference);
+                }
+            }
+        }
+
+        {
+            // A charset's name is Rust text, not a Java reference; the keys are the objects
+            // the name belongs to.
+            let charsets = self.charsets.lock().expect("charset state lock poisoned");
+            for reference in charsets.references() {
+                if seen.insert(reference) {
+                    roots.push(reference);
+                }
+            }
+        }
+
+        {
+            // A file's path is Rust text, not a Java reference; the keys are the objects the
+            // path belongs to.
+            let files = self.files.lock().expect("file state lock poisoned");
+            for reference in files.references() {
+                if seen.insert(reference) {
+                    roots.push(reference);
+                }
+            }
+        }
+
+        {
+            // A URI's components are Rust text, not Java references; the keys are the
+            // objects the components belong to.
+            let uris = self.uris.lock().expect("URI state lock poisoned");
+            for reference in uris.references() {
+                if seen.insert(reference) {
+                    roots.push(reference);
+                }
+            }
+        }
+
+        {
+            // A generator's state is a Rust number, not a Java reference; the keys are the
+            // objects the state belongs to.
+            let random = self.random.lock().expect("random state lock poisoned");
+            for reference in random.references() {
+                if seen.insert(reference) {
+                    roots.push(reference);
+                }
+            }
+        }
+
+        {
+            // A big integer's value is a Rust number, not a Java reference; the keys are
+            // the objects the value belongs to.
+            let big_numbers = self
+                .big_numbers
+                .lock()
+                .expect("big-number state lock poisoned");
+            for reference in big_numbers.references() {
+                if seen.insert(reference) {
+                    roots.push(reference);
+                }
+            }
+        }
+
+        {
+            // A latch count is a Rust number, not a Java reference; the keys are the
+            // objects the count belongs to, so a future collector treats them as strong.
+            let latches = self.latches.lock().expect("latch-state lock poisoned");
+            for reference in latches.keys() {
+                if seen.insert(*reference) {
+                    roots.push(*reference);
+                }
+            }
+        }
+
+        {
+            // A `java.time` object's state is Rust text and numbers, not a Java reference;
+            // reporting the keys keeps the attachment a strong owner until M5 defines a
+            // collector's reachability story.
+            let time = self
+                .time
+                .lock()
+                .expect("java.time side-table lock poisoned");
+            for reference in time.references() {
+                if seen.insert(reference) {
+                    roots.push(reference);
+                }
+            }
+        }
+
+        {
             let loader_objects = self
                 .loader_objects
                 .lock()
@@ -1848,6 +2070,21 @@ impl Shared {
                         roots.push(sink.destination);
                     }
                     _ => {}
+                }
+            }
+        }
+
+        {
+            // A recorded cause keeps its throwable alive.
+            let causes = self
+                .throwable_causes
+                .lock()
+                .expect("throwable cause lock poisoned");
+            for (throwable, cause) in causes.iter() {
+                for reference in [*throwable, *cause] {
+                    if seen.insert(reference) {
+                        roots.push(reference);
+                    }
                 }
             }
         }
@@ -2069,6 +2306,23 @@ impl Shared {
     }
 
     /// A throwable's detail message, if a constructor recorded one.
+    /// Record a throwable's cause.
+    pub fn set_throwable_cause(&self, reference: ObjRef, cause: ObjRef) {
+        self.throwable_causes
+            .lock()
+            .expect("throwable cause lock poisoned")
+            .insert(reference, cause);
+    }
+
+    /// The throwable's cause, if one was recorded.
+    pub fn throwable_cause(&self, reference: ObjRef) -> Option<ObjRef> {
+        self.throwable_causes
+            .lock()
+            .expect("throwable cause lock poisoned")
+            .get(&reference)
+            .copied()
+    }
+
     pub fn throwable_message(&self, reference: ObjRef) -> Option<String> {
         self.throwable_messages
             .lock()
@@ -2319,11 +2573,49 @@ impl Shared {
 
     /// The ordinal of an ordinary enum instance, if its constructor ran.
     pub fn enum_ordinal(&self, reference: ObjRef) -> Option<i32> {
-        self.enums
+        if let Some(ordinal) = self
+            .enums
             .lock()
             .expect("enum lock poisoned")
             .get(&reference)
             .map(|(_, ordinal)| *ordinal)
+        {
+            return Some(ordinal);
+        }
+        // An annotation-decoded enum value is a `HeapObject::Enum` (class + name), not an
+        // instance whose constructor ran. Its ordinal is the declaration index of the
+        // matching static constant on the enum class, which is the same order the class
+        // file lists the constants.
+        let (class, name) = {
+            let heap = self.heap();
+            match heap.get(reference).ok()? {
+                crate::HeapObject::Enum(constant) => (constant.class, constant.name.clone()),
+                _ => return None,
+            }
+        };
+        let entry = self.entry(class)?;
+        let metadata = entry.metadata().ok()?;
+        let own_descriptor = format!("L{};", metadata.binary_name);
+        let mut ordinal = 0i32;
+        for field in &metadata.fields {
+            if field.descriptor == own_descriptor {
+                if field.name == name {
+                    return Some(ordinal);
+                }
+                ordinal += 1;
+            }
+        }
+        None
+    }
+
+    /// Every system property, as a snapshot.
+    pub fn system_properties_snapshot(&self) -> Vec<(String, String)> {
+        self.properties
+            .lock()
+            .expect("property lock poisoned")
+            .iter()
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect()
     }
 
     /// The value of one system property, if it is set.

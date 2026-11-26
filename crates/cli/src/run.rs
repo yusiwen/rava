@@ -107,6 +107,20 @@ pub(crate) fn execute_with(
     // overrides. This must follow `library::register_all`, because the overrides replace
     // the snapshot iterator entries and delegate to them for ordinary iterators.
     rava_interp::service_loader::register_natives(&shared);
+    // M4.5: the JDK's collection membership calls Java `equals`; the `rava-vm` natives use
+    // reference identity, so these re-entrant overrides replace them after registration.
+    rava_interp::collection_equality::register_natives(&shared);
+    // M4.5: the functional-interface default methods (`BiPredicate.or`, ...) compose
+    // lambdas and re-enter the interpreter through their SAMs.
+    rava_interp::functional::register_natives(&shared);
+    rava_interp::interface_defaults::register_natives(&shared);
+    rava_interp::iterables::register_natives(&shared);
+    rava_interp::executors::register_natives(&shared);
+    rava_interp::bean_support::register_natives(&shared);
+    rava_interp::objects::register_natives(&shared);
+    // M4.5: `StackWalker.walk` calls a Java `Function`, so it lives with the other natives
+    // that re-enter the interpreter.
+    rava_interp::stack_walker::register_natives(&shared);
 
     // A launcher argument (and a manifest `Main-Class`/`Start-Class`) uses the binary
     // dotted form; the class table's identity is the internal `a/b/C` form every other

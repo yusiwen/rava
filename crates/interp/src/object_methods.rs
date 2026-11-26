@@ -65,12 +65,6 @@ pub(crate) fn invoke_call_site(
     descriptor: &str,
     args: &[Value],
 ) -> Result<Value, InterpError> {
-    if name != "hashCode" {
-        return Err(InterpError::Decode(format!(
-            "ObjectMethods.bootstrap call site {name}{descriptor} is not implemented; only \
-             a record's hashCode is"
-        )));
-    }
     let receiver = match args.first().copied() {
         Some(Value::Ref(reference)) if !reference.is_null() => reference,
         _ => return Err(InterpError::WrongValue),
@@ -81,13 +75,166 @@ pub(crate) fn invoke_call_site(
             getters.push(handle);
         }
     }
-    let mut hash = 0i32;
-    for getter in getters {
-        let value = read_component(shared, caller, receiver, getter)?;
-        let component = component_hash(shared, thread, caller, getter, value)?;
-        hash = hash.wrapping_mul(31).wrapping_add(component);
+    match name {
+        "hashCode" => {
+            let mut hash = 0i32;
+            for getter in getters {
+                let value = read_component(shared, caller, receiver, getter)?;
+                let component = component_hash(shared, thread, caller, getter, value)?;
+                hash = hash.wrapping_mul(31).wrapping_add(component);
+            }
+            Ok(Value::Int(hash))
+        }
+        "equals" => {
+            let Some(Value::Ref(other)) = args.get(1).copied() else {
+                return Ok(Value::Int(0));
+            };
+            if other.is_null() {
+                return Ok(Value::Int(0));
+            }
+            let receiver_class = runtime_class(shared, caller, receiver)?;
+            let other_class = runtime_class(shared, caller, other)?;
+            if receiver_class != other_class {
+                return Ok(Value::Int(0));
+            }
+            for getter in getters {
+                let left = read_component(shared, caller, receiver, getter)?;
+                let right = read_component(shared, caller, other, getter)?;
+                if !component_equals(shared, thread, caller, left, right)? {
+                    return Ok(Value::Int(0));
+                }
+            }
+            Ok(Value::Int(1))
+        }
+        "toString" => {
+            let class_name = record_class_name(shared, caller, bootstrap)?;
+            let mut text = format!("{class_name}[");
+            let names = record_component_names(bootstrap);
+            for (index, getter) in getters.into_iter().enumerate() {
+                if index > 0 {
+                    text.push_str(", ");
+                }
+                if let Some(name) = names.get(index) {
+                    text.push_str(name);
+                    text.push('=');
+                }
+                let value = read_component(shared, caller, receiver, getter)?;
+                text.push_str(&component_text(shared, thread, caller, value)?);
+            }
+            text.push(']');
+            Ok(Value::Ref(shared.heap().allocate_string(text)))
+        }
+        other => Err(InterpError::Decode(format!(
+            "ObjectMethods.bootstrap call site {other}{descriptor} is not implemented"
+        ))),
     }
-    Ok(Value::Int(hash))
+}
+
+fn runtime_class(
+    shared: &Shared,
+    caller: ClassId,
+    reference: ObjRef,
+) -> Result<ClassId, InterpError> {
+    dispatch_class(shared, caller, reference)
+}
+
+fn component_equals(
+    shared: &Shared,
+    thread: &ThreadState,
+    caller: ClassId,
+    left: Value,
+    right: Value,
+) -> Result<bool, InterpError> {
+    if let (Value::Ref(left), Value::Ref(right)) = (left, right) {
+        if left.is_null() || right.is_null() {
+            return Ok(left.is_null() && right.is_null());
+        }
+        let start = runtime_class(shared, caller, left)?;
+        let (entry, _) = resolve_virtual(shared, start, "equals", "(Ljava/lang/Object;)Z")?;
+        return match run_instance_method(
+            shared,
+            thread,
+            entry.id,
+            "equals",
+            "(Ljava/lang/Object;)Z",
+            left,
+            vec![Value::Ref(right)],
+        )? {
+            Some(Value::Int(value)) => Ok(value != 0),
+            _ => Err(InterpError::Decode(
+                "record component equals did not return a boolean".to_owned(),
+            )),
+        };
+    }
+    Ok(left == right)
+}
+
+fn component_text(
+    shared: &Shared,
+    thread: &ThreadState,
+    caller: ClassId,
+    value: Value,
+) -> Result<String, InterpError> {
+    match value {
+        Value::Int(value) => Ok(value.to_string()),
+        Value::Long(value) => Ok(value.to_string()),
+        Value::Float(value) => Ok(rava_vm::string::float_text(value)),
+        Value::Double(value) => Ok(rava_vm::string::double_text(value)),
+        Value::Ref(reference) if reference.is_null() => Ok("null".to_owned()),
+        Value::Ref(reference) => {
+            let start = runtime_class(shared, caller, reference)?;
+            let (entry, _) = resolve_virtual(shared, start, "toString", "()Ljava/lang/String;")?;
+            match run_instance_method(
+                shared,
+                thread,
+                entry.id,
+                "toString",
+                "()Ljava/lang/String;",
+                reference,
+                Vec::new(),
+            )? {
+                Some(Value::Ref(text)) => {
+                    Ok(shared.heap().string(text).map_err(heap_error)?.to_owned())
+                }
+                _ => Ok("null".to_owned()),
+            }
+        }
+    }
+}
+
+fn record_class_name(
+    shared: &Shared,
+    caller: ClassId,
+    bootstrap: &BootstrapMethodEntry,
+) -> Result<String, InterpError> {
+    for argument in &bootstrap.arguments {
+        if let BootstrapArgument::Class(name) = argument {
+            if let Ok(class) = resolve_class(shared, caller, name) {
+                if let Some(entry) = shared.entry(class) {
+                    return Ok(entry
+                        .name
+                        .rsplit(['.', '/', '$'])
+                        .next()
+                        .unwrap_or(&entry.name)
+                        .to_owned());
+                }
+            }
+        }
+    }
+    Ok("Record".to_owned())
+}
+
+fn record_component_names(bootstrap: &BootstrapMethodEntry) -> Vec<String> {
+    for argument in &bootstrap.arguments {
+        if let BootstrapArgument::String(names) = argument {
+            return names
+                .split(';')
+                .filter(|name| !name.is_empty())
+                .map(str::to_owned)
+                .collect();
+        }
+    }
+    Vec::new()
 }
 
 /// The value of one record component, read through its `REF_getField` getter.

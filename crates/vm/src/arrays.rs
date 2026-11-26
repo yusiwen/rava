@@ -84,6 +84,12 @@ pub fn register_natives(shared: &Shared) {
         "([Ljava/lang/Object;)Ljava/util/stream/Stream;",
         arrays_stream,
     );
+    shared.register_native(
+        ARRAYS_CLASS,
+        "stream",
+        "([Ljava/lang/Object;II)Ljava/util/stream/Stream;",
+        arrays_stream_range,
+    );
 }
 
 /// `Arrays.stream(Object[])`: an eager stream over the array's current elements.
@@ -101,7 +107,38 @@ fn arrays_stream(
         array.elements.clone()
     };
     Ok(Some(Value::Ref(
-        shared.heap().allocate_stream(elements, false),
+        shared.heap().allocate_stream(elements, false, None),
+    )))
+}
+
+/// `Arrays.stream(Object[], int, int)`: the `[start, end)` slice as a stream.
+fn arrays_stream_range(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let array = array_argument(args, 0, "Arrays.stream")?;
+    let start = int_argument(args, 1, "Arrays.stream")?;
+    let end = int_argument(args, 2, "Arrays.stream")?;
+    let elements = {
+        let heap = shared.heap();
+        let array = heap.array(array).map_err(heap_error)?;
+        let start = usize::try_from(start)
+            .map_err(|_| VmError::Native(format!("Arrays.stream: negative start {start}")))?;
+        let end = usize::try_from(end)
+            .map_err(|_| VmError::Native(format!("Arrays.stream: negative end {end}")))?;
+        if start > end || end > array.elements.len() {
+            return Err(VmError::Native(format!(
+                "Arrays.stream: range {start}..{end} is outside an array of length {}",
+                array.elements.len()
+            )));
+        }
+        array.elements[start..end].to_vec()
+    };
+    Ok(Some(Value::Ref(
+        shared.heap().allocate_stream(elements, false, None),
     )))
 }
 

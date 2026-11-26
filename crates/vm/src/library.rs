@@ -23,9 +23,10 @@ use crate::shared::Shared;
 use crate::thread::ThreadState;
 use crate::value::Value;
 use crate::{
-    annotation, arrays, atomic, bitset, boxed, class_loader, collections, direct_buffer,
-    exceptions, format, generic, instance, jul, locks, maps, math, method_handles, modules, object,
-    proxy, references, reflection, regex, resources, string, system, thread_natives,
+    annotation, arrays, atomic, beans, big_numbers, bitset, boxed, charset, class_loader,
+    collections, direct_buffer, exceptions, format, generic, instance, io_file, java_time, jul,
+    locks, maps, math, method_handles, modules, object, proxy, random, references, reflection,
+    regex, resources, string, system, thread_natives, uri,
 };
 
 /// `java.lang.System`'s binary-stable internal name.
@@ -65,6 +66,17 @@ pub fn register_all(shared: &Shared) -> Result<(), VmError> {
     regex::register_natives(shared);
     format::register_natives(shared);
     thread_natives::register_natives(shared);
+    // `java.time`/`Locale` are M4.5: the logging stack's date formatter needs an instant,
+    // a zone and a pattern, and the state lives in the VM side table.
+    java_time::register_natives(shared);
+    big_numbers::register_natives(shared);
+    random::register_natives(shared);
+    uri::register_natives(shared);
+    io_file::register_natives(shared);
+    beans::register_natives(shared);
+    charset::register_natives(shared);
+    charset::install_constants(shared)?;
+    java_time::install_constants(shared)?;
     // `java.lang.ClassLoader` owns the loader hierarchy and `defineClass` (M3.3):
     // `getSystemClassLoader`, `loadClass` and the three `defineClass` overloads are
     // installed here. Its resource methods call the M4.1 lookup in `Shared`.
@@ -109,6 +121,127 @@ fn register_print_stream(shared: &Shared) {
         "(Ljava/lang/String;)V",
         print_stream_print_string,
     );
+    // A `PrintStream` over the standard output is a byte sink for logback's console
+    // target, which writes its encoded bytes through `write`.
+    shared.register_native(PRINT_STREAM_CLASS, "write", "(I)V", print_stream_write);
+    shared.register_native(
+        PRINT_STREAM_CLASS,
+        "write",
+        "([B)V",
+        print_stream_write_bytes,
+    );
+    shared.register_native(
+        PRINT_STREAM_CLASS,
+        "write",
+        "([BII)V",
+        print_stream_write_range,
+    );
+    shared.register_native(PRINT_STREAM_CLASS, "flush", "()V", print_stream_flush);
+    shared.register_native(PRINT_STREAM_CLASS, "close", "()V", print_stream_flush);
+}
+
+/// `PrintStream.write(int)`: the low eight bits of the argument.
+fn print_stream_write(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    require_receiver(receiver, "PrintStream.write")?;
+    let byte = match args.first().copied() {
+        Some(Value::Int(value)) => value as u8,
+        Some(_) => {
+            return Err(VmError::Native(
+                "PrintStream.write expects an int argument".to_owned(),
+            ));
+        }
+        None => {
+            return Err(VmError::Native(
+                "PrintStream.write is missing its argument".to_owned(),
+            ));
+        }
+    };
+    shared.write_stdout(&[byte]);
+    Ok(None)
+}
+
+/// `PrintStream.write(byte[])`: the whole array.
+fn print_stream_write_bytes(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    print_stream_write_range(shared, _thread, _loader, receiver, args)
+}
+
+/// `PrintStream.write(byte[], int, int)`: `len` bytes from `offset`.
+///
+/// The `byte[]` element values are `Int`s in `-128..=127`; the low eight bits are the
+/// output byte.
+fn print_stream_write_range(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    require_receiver(receiver, "PrintStream.write")?;
+    let reference = match args.first().copied() {
+        Some(Value::Ref(reference)) if !reference.is_null() => reference,
+        _ => {
+            return Err(VmError::Native(
+                "PrintStream.write expects a non-null byte[] argument".to_owned(),
+            ));
+        }
+    };
+    let (offset, length) = if args.len() >= 3 {
+        let int = |position: usize, what: &str| match args.get(position).copied() {
+            Some(Value::Int(value)) => Ok(value),
+            _ => Err(VmError::Native(format!(
+                "PrintStream.write expects an int {what}"
+            ))),
+        };
+        (int(1, "offset")?, int(2, "length")?)
+    } else {
+        (0, i32::MAX)
+    };
+    if offset < 0 || length < 0 {
+        return Err(VmError::Native(
+            "PrintStream.write: negative offset or length".to_owned(),
+        ));
+    }
+    let bytes = {
+        let heap = shared.heap();
+        let array = heap.array(reference).map_err(|error| {
+            VmError::Native(format!("PrintStream.write expects a byte[]: {error}"))
+        })?;
+        array.elements.clone()
+    };
+    let start = offset as usize;
+    let end = start.saturating_add(length as usize).min(bytes.len());
+    let start = start.min(bytes.len());
+    let bytes: Vec<u8> = bytes[start..end]
+        .iter()
+        .map(|value| match value {
+            Value::Int(byte) => *byte as u8,
+            _ => 0,
+        })
+        .collect();
+    shared.write_stdout(&bytes);
+    Ok(None)
+}
+
+fn print_stream_flush(
+    _shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    _args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    Ok(None)
 }
 
 /// Write the standard streams into `java.lang.System`'s statics.

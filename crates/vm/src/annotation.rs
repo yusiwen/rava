@@ -162,6 +162,12 @@ pub fn register_natives(shared: &Shared) {
     shared.register_native("java/lang/Enum", "ordinal", "()I", enum_ordinal);
     shared.register_native(
         "java/lang/Enum",
+        "valueOf",
+        "(Ljava/lang/Class;Ljava/lang/String;)Ljava/lang/Enum;",
+        enum_value_of,
+    );
+    shared.register_native(
+        "java/lang/Enum",
         "compareTo",
         "(Ljava/lang/Enum;)I",
         enum_compare_to,
@@ -409,7 +415,7 @@ fn visible_annotations(
 }
 
 /// Allocate one annotation object per encoded annotation.
-fn annotation_objects(
+pub(crate) fn annotation_objects(
     shared: &Shared,
     loader: LoaderId,
     annotations: &[Annotation],
@@ -424,7 +430,7 @@ fn annotation_objects(
             Err(VmError::ClassNotFound { .. }) => continue,
             Err(error) => return Err(error),
         };
-        let object = shared.annotation_object(class, annotation.values.clone())?;
+        let object = shared.annotation_object(class, loader, annotation.values.clone())?;
         objects.push(object);
     }
     Ok(objects)
@@ -500,7 +506,7 @@ fn get_annotation(
         if class != wanted {
             continue;
         }
-        let object = shared.annotation_object(class, annotation.values.clone())?;
+        let object = shared.annotation_object(class, loader, annotation.values.clone())?;
         return Ok(Some(Value::Ref(object)));
     }
     Ok(Some(Value::Ref(ObjRef::NULL)))
@@ -663,7 +669,7 @@ fn element_member(
             entry.name
         )));
     };
-    let value = element_to_value(shared, entry.loader, expected, &value)?;
+    let value = element_to_value(shared, annotation.loader, expected, &value)?;
     Ok(Some(value))
 }
 
@@ -723,7 +729,7 @@ fn element_to_value(
         }
         ElementValue::Annotation(nested) => {
             let class = load_descriptor_class(shared, loader, &nested.type_descriptor)?;
-            let object = shared.annotation_object(class, nested.values.clone())?;
+            let object = shared.annotation_object(class, loader, nested.values.clone())?;
             Ok(Value::Ref(object))
         }
         ElementValue::Array(items) => {
@@ -1147,6 +1153,55 @@ fn enum_compare_to(
         VmError::Native("Enum.compareTo before the enum constructor ran".to_owned())
     })?;
     Ok(Some(Value::Int(mine - other)))
+}
+
+/// `Enum.valueOf(Class, String)`: the enum class's static constant of that name.
+///
+/// The static field is the canonical constant once the enum class initialized, so this
+/// reads it through the ordinary static-field path. When the class has not initialized, the
+/// path falls back to the annotation model's named constant, exactly as `static_field_value`
+/// already does.
+fn enum_value_of(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let class_object = match args.first().copied() {
+        Some(Value::Ref(reference)) if !reference.is_null() => reference,
+        _ => {
+            return Err(VmError::Native(
+                "Enum.valueOf expects a non-null Class".to_owned(),
+            ));
+        }
+    };
+    let class = {
+        let heap = shared.heap();
+        heap.class(class_object).map_err(heap_error)?
+    };
+    let name = match args.get(1).copied() {
+        Some(Value::Ref(reference)) if !reference.is_null() => {
+            let heap = shared.heap();
+            heap.string(reference).map_err(heap_error)?.to_owned()
+        }
+        _ => {
+            return Err(VmError::Native(
+                "Enum.valueOf expects a non-null String name".to_owned(),
+            ));
+        }
+    };
+    let entry = shared
+        .entry(class)
+        .ok_or_else(|| VmError::Loader(format!("class id {} is not loaded", class.0)))?;
+    let descriptor = format!("L{};", entry.name);
+    match shared.static_field_value(class, &name, &descriptor)? {
+        Some(value) => Ok(Some(value)),
+        None => Err(VmError::Native(format!(
+            "Enum.valueOf: {} has no constant named {name}",
+            entry.name
+        ))),
+    }
 }
 
 #[cfg(test)]

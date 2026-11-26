@@ -20,6 +20,7 @@ use crate::value::Value;
 
 pub const REENTRANT_LOCK_CLASS: &str = "java/util/concurrent/locks/ReentrantLock";
 pub const CONDITION_CLASS: &str = "java/util/concurrent/locks/Condition";
+pub const COUNT_DOWN_LATCH_CLASS: &str = "java/util/concurrent/CountDownLatch";
 
 pub fn register_natives(shared: &Shared) {
     shared.register_native(REENTRANT_LOCK_CLASS, "<init>", "()V", lock_init);
@@ -70,6 +71,17 @@ pub fn register_natives(shared: &Shared) {
     shared.register_native(CONDITION_CLASS, "awaitNanos", "(J)J", condition_await_nanos);
     shared.register_native(CONDITION_CLASS, "signal", "()V", condition_signal);
     shared.register_native(CONDITION_CLASS, "signalAll", "()V", condition_signal);
+
+    shared.register_native(COUNT_DOWN_LATCH_CLASS, "<init>", "(I)V", latch_init);
+    shared.register_native(COUNT_DOWN_LATCH_CLASS, "countDown", "()V", latch_count_down);
+    shared.register_native(COUNT_DOWN_LATCH_CLASS, "getCount", "()I", latch_get_count);
+    shared.register_native(COUNT_DOWN_LATCH_CLASS, "await", "()V", latch_await);
+    shared.register_native(
+        COUNT_DOWN_LATCH_CLASS,
+        "await",
+        "(JLjava/util/concurrent/TimeUnit;)Z",
+        latch_await_timed,
+    );
 }
 
 fn lock_init(
@@ -226,4 +238,98 @@ fn condition_signal(
     _args: &[Value],
 ) -> Result<Option<Value>, VmError> {
     Ok(None)
+}
+
+// ---------------------------------------------------------------------------
+// CountDownLatch
+// ---------------------------------------------------------------------------
+
+fn latch_init(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let count = match args.first().copied() {
+        Some(Value::Int(value)) if value >= 0 => value as usize,
+        Some(Value::Int(value)) => {
+            return Err(VmError::Native(format!(
+                "CountDownLatch.<init>: negative count {value}"
+            )));
+        }
+        _ => {
+            return Err(VmError::Native(
+                "CountDownLatch.<init> expects an int count".to_owned(),
+            ));
+        }
+    };
+    shared.latch_state().insert(receiver, count);
+    Ok(None)
+}
+
+fn latch_count_down(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    _args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let mut latches = shared.latch_state();
+    let count = latches
+        .get_mut(&receiver)
+        .ok_or_else(|| VmError::Native("CountDownLatch has no count".to_owned()))?;
+    *count = count.saturating_sub(1);
+    Ok(None)
+}
+
+fn latch_get_count(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    _args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let count = *shared
+        .latch_state()
+        .get(&receiver)
+        .ok_or_else(|| VmError::Native("CountDownLatch has no count".to_owned()))?;
+    let count = i32::try_from(count)
+        .map_err(|_| VmError::Native("CountDownLatch count exceeds an int".to_owned()))?;
+    Ok(Some(Value::Int(count)))
+}
+
+/// `CountDownLatch.await()`: return only when the count is already zero.
+///
+/// A positive count means the caller would block for another thread, which the VM cannot
+/// provide until M5. Reporting that as a typed error is honest: silently returning would
+/// let a caller proceed as if the awaited work had happened.
+fn latch_await(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    _args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let count = *shared
+        .latch_state()
+        .get(&receiver)
+        .ok_or_else(|| VmError::Native("CountDownLatch has no count".to_owned()))?;
+    if count > 0 {
+        return Err(VmError::Native(format!(
+            "CountDownLatch.await would block with count {count}; the VM is single-threaded until M5"
+        )));
+    }
+    Ok(None)
+}
+
+fn latch_await_timed(
+    shared: &Shared,
+    thread: &ThreadState,
+    loader: LoaderId,
+    receiver: ObjRef,
+    _args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    latch_await(shared, thread, loader, receiver, &[])?;
+    Ok(Some(Value::Int(1)))
 }

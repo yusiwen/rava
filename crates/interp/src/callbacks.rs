@@ -65,6 +65,16 @@ const COMPARING_INT_TARGET: &str =
 /// `ToIntFunction.applyAsInt(Object)int`.
 const TO_INT_APPLY_AS_INT: &str = "(Ljava/lang/Object;)I";
 
+/// `Comparator.comparing(Function)Comparator`.
+const COMPARING: &str = "(Ljava/util/function/Function;)Ljava/util/Comparator;";
+
+/// The registry name of the native lambda target a `comparing` comparator calls.
+const COMPARING_TARGET_NAME: &str = "comparing$";
+
+/// The `comparing` target's descriptor: the captured extractor plus the two compared values.
+const COMPARING_TARGET: &str =
+    "(Ljava/util/function/Function;Ljava/lang/Object;Ljava/lang/Object;)I";
+
 /// `Comparator.reversed()Comparator`.
 const COMPARATOR_REVERSED: &str = "()Ljava/util/Comparator;";
 
@@ -90,6 +100,11 @@ pub fn register_natives(shared: &Shared) {
         "java/util/Map",
         "java/util/concurrent/ConcurrentMap",
         "java/util/concurrent/ConcurrentNavigableMap",
+        "java/util/TreeMap",
+        "java/util/LinkedHashMap",
+        "java/util/IdentityHashMap",
+        "java/util/Hashtable",
+        "java/util/Properties",
     ] {
         shared.register_native(
             class,
@@ -133,6 +148,18 @@ pub fn register_natives(shared: &Shared) {
         COMPARING_INT_TARGET_NAME,
         COMPARING_INT_TARGET,
         comparator_comparing_int_compare,
+    );
+    shared.register_native(
+        "java/util/Comparator",
+        "comparing",
+        COMPARING,
+        comparator_comparing,
+    );
+    shared.register_native(
+        "java/util/Comparator",
+        COMPARING_TARGET_NAME,
+        COMPARING_TARGET,
+        comparator_comparing_compare,
     );
     shared.register_native(
         "java/util/Comparator",
@@ -184,6 +211,12 @@ pub fn register_natives(shared: &Shared) {
             list_sort_comparator,
         );
     }
+    shared.register_native(
+        "java/util/Collections",
+        "sort",
+        "(Ljava/util/List;)V",
+        collections_sort_natural,
+    );
     for class in [
         "java/util/ArrayList",
         "java/util/LinkedList",
@@ -938,4 +971,198 @@ fn comparator_reverse_order_compare(
     Ok(Some(Value::Int(
         crate::streams::compare_values(shared, left, right)?.wrapping_neg(),
     )))
+}
+
+/// `Comparator.comparing(Function)`: a comparator over the keys the function extracts.
+fn comparator_comparing(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let function = reference_argument(args, 0, "Comparator.comparing")?;
+    if function.is_null() {
+        return Err(VmError::Native(
+            "Comparator.comparing received a null extractor".to_owned(),
+        ));
+    }
+    let comparator = shared.load_library_class("java/util/Comparator")?;
+    let lambda = shared.allocate_lambda(LambdaObject {
+        interface: comparator,
+        sam_name: "compare".to_owned(),
+        sam_descriptor: COMPARATOR_INT_COMPARE.to_owned(),
+        instantiated_descriptor: COMPARATOR_INT_COMPARE.to_owned(),
+        target: LambdaTarget {
+            class: comparator,
+            name: COMPARING_TARGET_NAME.to_owned(),
+            descriptor: COMPARING_TARGET.to_owned(),
+            kind: LambdaTargetKind::Native,
+        },
+        captured: vec![Value::Ref(function)],
+    });
+    Ok(Some(Value::Ref(lambda)))
+}
+
+/// The body of a `comparing` comparator: compare the two extracted keys by `compareTo`.
+fn comparator_comparing_compare(
+    shared: &Shared,
+    thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let function = reference_argument(args, 0, "Comparator.comparing")?;
+    let left = args.get(1).copied().unwrap_or(Value::Ref(ObjRef::NULL));
+    let right = args.get(2).copied().unwrap_or(Value::Ref(ObjRef::NULL));
+    let left_key = invoke_function(shared, thread, function, left)?;
+    let right_key = invoke_function(shared, thread, function, right)?;
+    let Value::Ref(left_reference) = left_key else {
+        return Err(VmError::Native(
+            "Comparator.comparing: the key extractor returned a primitive".to_owned(),
+        ));
+    };
+    if left_reference.is_null() {
+        return Err(VmError::Native(
+            "Comparator.comparing: the key extractor returned null".to_owned(),
+        ));
+    }
+    let class = {
+        let class_object = shared.get_class(left_reference)?;
+        shared.heap().class(class_object).map_err(heap_error)?
+    };
+    let declaring = resolve_instance_class(shared, class, "compareTo", "(Ljava/lang/Object;)I")?;
+    let value = run_instance_method(
+        shared,
+        thread,
+        declaring,
+        "compareTo",
+        "(Ljava/lang/Object;)I",
+        left_reference,
+        vec![right_key],
+    )
+    .map_err(interp_to_vm)?;
+    let Some(Value::Int(ordering)) = value else {
+        return Err(VmError::Native(
+            "Comparator.comparing: compareTo did not return an int".to_owned(),
+        ));
+    };
+    Ok(Some(Value::Int(ordering.signum())))
+}
+
+/// Call a `Function`, through a lambda object or the object's own `apply`.
+fn invoke_function(
+    shared: &Shared,
+    thread: &ThreadState,
+    function: ObjRef,
+    argument: Value,
+) -> Result<Value, VmError> {
+    let lambda = {
+        let heap = shared.heap();
+        match heap.get(function).map_err(heap_error)? {
+            HeapObject::Lambda(lambda) => Some(lambda.clone()),
+            _ => None,
+        }
+    };
+    let value = if let Some(lambda) = lambda {
+        lambda::invoke_sam(shared, thread, &lambda, vec![argument]).map_err(interp_to_vm)?
+    } else {
+        let class = {
+            let class_object = shared.get_class(function)?;
+            shared.heap().class(class_object).map_err(heap_error)?
+        };
+        let declaring = resolve_instance_class(shared, class, "apply", FUNCTION_APPLY)?;
+        run_instance_method(
+            shared,
+            thread,
+            declaring,
+            "apply",
+            FUNCTION_APPLY,
+            function,
+            vec![argument],
+        )
+        .map_err(interp_to_vm)?
+    };
+    Ok(value.unwrap_or(Value::Ref(ObjRef::NULL)))
+}
+
+/// `Collections.sort(List)`: natural order, through the same stable insertion sort.
+fn collections_sort_natural(
+    shared: &Shared,
+    thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let receiver = reference_argument(args, 0, "Collections.sort")?;
+    if receiver.is_null() {
+        return Err(VmError::Native(
+            "Collections.sort received a null list".to_owned(),
+        ));
+    }
+    let mut elements = {
+        let heap = shared.heap();
+        heap.list(receiver).map_err(heap_error)?.to_vec()
+    };
+    // `Collections.sort` uses the elements' natural ordering, which is `compareTo`.
+    natural_sort(shared, thread, &mut elements)?;
+    *shared.heap().list_mut(receiver).map_err(heap_error)? = elements;
+    Ok(None)
+}
+
+fn natural_sort(
+    shared: &Shared,
+    thread: &ThreadState,
+    elements: &mut [Value],
+) -> Result<(), VmError> {
+    for index in 1..elements.len() {
+        let mut position = index;
+        while position > 0 {
+            let ordering =
+                compare_natural(shared, thread, elements[position - 1], elements[position])?;
+            if ordering <= 0 {
+                break;
+            }
+            elements.swap(position - 1, position);
+            position -= 1;
+        }
+    }
+    Ok(())
+}
+
+fn compare_natural(
+    shared: &Shared,
+    thread: &ThreadState,
+    left: Value,
+    right: Value,
+) -> Result<i32, VmError> {
+    let Value::Ref(left) = left else {
+        return crate::streams::compare_values(shared, left, right);
+    };
+    if left.is_null() {
+        return Err(VmError::Native(
+            "Collections.sort has no natural ordering for null".to_owned(),
+        ));
+    }
+    let class = {
+        let class_object = shared.get_class(left)?;
+        shared.heap().class(class_object).map_err(heap_error)?
+    };
+    let declaring = resolve_instance_class(shared, class, "compareTo", "(Ljava/lang/Object;)I")?;
+    let value = run_instance_method(
+        shared,
+        thread,
+        declaring,
+        "compareTo",
+        "(Ljava/lang/Object;)I",
+        left,
+        vec![right],
+    )
+    .map_err(interp_to_vm)?;
+    match value {
+        Some(Value::Int(ordering)) => Ok(ordering.signum()),
+        _ => Err(VmError::Native(
+            "Collections.sort: compareTo did not return an int".to_owned(),
+        )),
+    }
 }

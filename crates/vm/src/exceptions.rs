@@ -108,6 +108,16 @@ pub fn register_natives(shared: &Shared) {
             "(Ljava/lang/Throwable;)V",
             throwable_add_suppressed,
         ),
+        (
+            "getSuppressed",
+            "()[Ljava/lang/Throwable;",
+            throwable_get_suppressed,
+        ),
+        (
+            "getStackTrace",
+            "()[Ljava/lang/StackTraceElement;",
+            throwable_get_stack_trace,
+        ),
     ] {
         shared.register_native("java/lang/Throwable", name, descriptor, function);
     }
@@ -138,6 +148,22 @@ fn throwable_init(
     if let Some(message) = message_argument(shared, args) {
         shared.set_throwable_message(receiver, message);
     }
+    // `(Throwable)`, `(String, Throwable)` and `(String, Throwable, boolean, boolean)` all
+    // carry a cause; it is the first reference argument after a possible message.
+    for argument in args {
+        if let Value::Ref(cause) = argument {
+            if cause.is_null() || *cause == receiver {
+                continue;
+            }
+            // A `String` argument is the detail message, not a cause.
+            let is_string = matches!(shared.heap().get(*cause), Ok(crate::HeapObject::Str(_)));
+            if is_string {
+                continue;
+            }
+            shared.set_throwable_cause(receiver, *cause);
+            break;
+        }
+    }
     Ok(None)
 }
 
@@ -158,22 +184,29 @@ fn throwable_get_message(
 }
 
 fn throwable_get_cause(
-    _shared: &Shared,
-    _thread: &ThreadState,
-    _loader: LoaderId,
-    _receiver: ObjRef,
-    _args: &[Value],
-) -> Result<Option<Value>, VmError> {
-    Ok(Some(Value::Ref(ObjRef::NULL)))
-}
-
-fn throwable_init_cause(
-    _shared: &Shared,
+    shared: &Shared,
     _thread: &ThreadState,
     _loader: LoaderId,
     receiver: ObjRef,
     _args: &[Value],
 ) -> Result<Option<Value>, VmError> {
+    Ok(Some(Value::Ref(
+        shared.throwable_cause(receiver).unwrap_or(ObjRef::NULL),
+    )))
+}
+
+fn throwable_init_cause(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    if let Some(Value::Ref(cause)) = args.first().copied() {
+        if !cause.is_null() {
+            shared.set_throwable_cause(receiver, cause);
+        }
+    }
     Ok(Some(Value::Ref(receiver)))
 }
 
@@ -238,4 +271,38 @@ fn throwable_add_suppressed(
     _args: &[Value],
 ) -> Result<Option<Value>, VmError> {
     Ok(None)
+}
+
+/// `Throwable.getSuppressed()`: an empty array until suppressed exceptions are stored.
+fn throwable_get_suppressed(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    _args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let class = shared.load_library_class("java/lang/Throwable")?;
+    let array = shared
+        .heap()
+        .allocate_array(crate::heap::ClassRef::Named(class), 0);
+    Ok(Some(Value::Ref(array)))
+}
+
+/// `Throwable.getStackTrace()`: an empty array until the VM records Java frames.
+///
+/// The interpreter keeps no Java-visible frame metadata yet, so a stack trace cannot be
+/// reported. An empty array is the honest value; there is no debug hook in the shipped
+/// API.
+fn throwable_get_stack_trace(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    _args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let class = shared.load_library_class("java/lang/StackTraceElement")?;
+    let array = shared
+        .heap()
+        .allocate_array(crate::heap::ClassRef::Named(class), 0);
+    Ok(Some(Value::Ref(array)))
 }

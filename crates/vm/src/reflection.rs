@@ -131,6 +131,67 @@ pub fn register_natives(shared: &Shared) {
     );
     shared.register_native(
         "java/lang/Class",
+        "toString",
+        "()Ljava/lang/String;",
+        class_to_string,
+    );
+    shared.register_native(
+        "java/lang/Class",
+        "arrayType",
+        "()Ljava/lang/Class;",
+        class_array_type,
+    );
+    for (name, descriptor, function) in [
+        (
+            "get",
+            "(Ljava/lang/Object;I)Ljava/lang/Object;",
+            reflect_array_get as crate::NativeFn,
+        ),
+        ("getLength", "(Ljava/lang/Object;)I", reflect_array_length),
+        (
+            "getBoolean",
+            "(Ljava/lang/Object;I)Z",
+            reflect_array_get_boolean,
+        ),
+        ("getByte", "(Ljava/lang/Object;I)B", reflect_array_get_byte),
+        ("getChar", "(Ljava/lang/Object;I)C", reflect_array_get_char),
+        (
+            "getShort",
+            "(Ljava/lang/Object;I)S",
+            reflect_array_get_short,
+        ),
+        ("getInt", "(Ljava/lang/Object;I)I", reflect_array_get_int),
+        ("getLong", "(Ljava/lang/Object;I)J", reflect_array_get_long),
+        (
+            "getFloat",
+            "(Ljava/lang/Object;I)F",
+            reflect_array_get_float,
+        ),
+        (
+            "getDouble",
+            "(Ljava/lang/Object;I)D",
+            reflect_array_get_double,
+        ),
+        (
+            "set",
+            "(Ljava/lang/Object;ILjava/lang/Object;)V",
+            reflect_array_set,
+        ),
+        (
+            "newInstance",
+            "(Ljava/lang/Class;I)Ljava/lang/Object;",
+            reflect_array_new_instance,
+        ),
+        (
+            "newInstance",
+            "(Ljava/lang/Class;[I)Ljava/lang/Object;",
+            reflect_array_new_instance_dimensions,
+        ),
+    ] {
+        shared.register_native("java/lang/reflect/Array", name, descriptor, function);
+    }
+    shared.register_native(
+        "java/lang/Class",
         "getModifiers",
         "()I",
         class_get_modifiers,
@@ -138,6 +199,25 @@ pub fn register_natives(shared: &Shared) {
     shared.register_native("java/lang/Class", "isInterface", "()Z", class_is_interface);
     shared.register_native("java/lang/Class", "isArray", "()Z", class_is_array);
     shared.register_native("java/lang/Class", "isPrimitive", "()Z", class_is_primitive);
+    shared.register_native(
+        "java/lang/Class",
+        "getEnclosingClass",
+        "()Ljava/lang/Class;",
+        class_get_enclosing_class,
+    );
+    shared.register_native(
+        "java/lang/Class",
+        "getDeclaringClass",
+        "()Ljava/lang/Class;",
+        class_get_declaring_class,
+    );
+    for (name, predicate) in [
+        ("isAnonymousClass", class_is_anonymous as ClassPredicate),
+        ("isLocalClass", class_is_local),
+        ("isMemberClass", class_is_member),
+    ] {
+        shared.register_native("java/lang/Class", name, "()Z", predicate);
+    }
     shared.register_native(
         "java/lang/Class",
         "getComponentType",
@@ -227,7 +307,7 @@ pub fn register_natives(shared: &Shared) {
     );
     shared.register_native("java/lang/Class", "isEnum", "()Z", class_is_enum);
     shared.register_native("java/lang/Class", "isSynthetic", "()Z", class_is_synthetic);
-    shared.register_native("java/lang/Class", "isRecord", "()Z", class_is_false);
+    shared.register_native("java/lang/Class", "isRecord", "()Z", class_is_record);
     shared.register_native("java/lang/Class", "isSealed", "()Z", class_is_false);
     shared.register_native(
         "java/lang/Class",
@@ -414,6 +494,57 @@ pub fn register_natives(shared: &Shared) {
         "()Ljava/lang/Class;",
         method_get_return_type,
     );
+    for owner in [
+        "java/lang/reflect/Method",
+        "java/lang/reflect/Constructor",
+        "java/lang/reflect/Executable",
+    ] {
+        shared.register_native(
+            owner,
+            "getParameterAnnotations",
+            "()[[Ljava/lang/annotation/Annotation;",
+            method_get_parameter_annotations,
+        );
+    }
+    for owner in [
+        "java/lang/reflect/Method",
+        "java/lang/reflect/Constructor",
+        "java/lang/reflect/Executable",
+    ] {
+        shared.register_native(
+            owner,
+            "getParameters",
+            "()[Ljava/lang/reflect/Parameter;",
+            executable_get_parameters,
+        );
+    }
+    let parameter = "java/lang/reflect/Parameter";
+    shared.register_native(
+        parameter,
+        "getName",
+        "()Ljava/lang/String;",
+        parameter_get_name,
+    );
+    shared.register_native(
+        parameter,
+        "getType",
+        "()Ljava/lang/Class;",
+        parameter_get_type,
+    );
+    shared.register_native(parameter, "getModifiers", "()I", parameter_get_modifiers);
+    shared.register_native(parameter, "isNamePresent", "()Z", parameter_is_name_present);
+    shared.register_native(
+        parameter,
+        "getAnnotations",
+        "()[Ljava/lang/annotation/Annotation;",
+        parameter_get_annotations,
+    );
+    shared.register_native(
+        parameter,
+        "getDeclaringExecutable",
+        "()Ljava/lang/reflect/Executable;",
+        parameter_get_declaring_executable,
+    );
     for owner in ["java/lang/reflect/Method", "java/lang/reflect/Constructor"] {
         shared.register_native(
             owner,
@@ -598,6 +729,42 @@ fn class_get_name(
     Ok(Some(Value::Ref(name)))
 }
 
+/// `Class.arrayType()`: the array class whose component is this class.
+fn class_array_type(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    _args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let class = class_object_of(shared, receiver)?;
+    Ok(Some(Value::Ref(shared.array_class(class.class_ref())?)))
+}
+
+/// `Class.toString()`: the JDK's `class`/`interface`/primitive form.
+fn class_to_string(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    _args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let class = class_object_of(shared, receiver)?;
+    let name = shared.class_ref_name(&class.class_ref())?;
+    let text = match class {
+        ClassObject::Primitive(_) => name,
+        ClassObject::Named(class) => {
+            if class_of(shared, class)?.access_flags & ACC_INTERFACE != 0 {
+                format!("interface {name}")
+            } else {
+                format!("class {name}")
+            }
+        }
+        ClassObject::Array(_) => format!("class {name}"),
+    };
+    Ok(Some(Value::Ref(shared.heap().allocate_string(text))))
+}
+
 /// `Class.getModifiers()`: the Java modifier mask of a loaded class, or the fixed
 /// `public abstract final` (`0x0411`) every primitive and array class reports on the JDK 17.
 fn class_get_modifiers(
@@ -629,6 +796,98 @@ fn class_is_interface(
         ClassObject::Primitive(_) | ClassObject::Array(_) => false,
     };
     Ok(Some(Value::Int(i32::from(flag))))
+}
+
+/// A `Class` predicate that reads the loaded class's metadata.
+type ClassPredicate =
+    fn(&Shared, &ThreadState, LoaderId, ObjRef, &[Value]) -> Result<Option<Value>, VmError>;
+
+/// The `(outer_class, inner_name, access_flags)` of an `InnerClasses` row.
+type InnerClassInfo = (Option<String>, Option<String>, u16);
+
+/// The `InnerClasses` row describing `class` itself, if the class file has one.
+fn self_inner_class(shared: &Shared, class: ClassId) -> Result<Option<InnerClassInfo>, VmError> {
+    let entry = shared
+        .entry(class)
+        .ok_or_else(|| VmError::Loader(format!("class id {} is not loaded", class.0)))?;
+    let metadata = entry.metadata()?;
+    Ok(metadata
+        .inner_classes
+        .iter()
+        .find(|row| row.inner_class == metadata.binary_name)
+        .map(|row| {
+            (
+                row.outer_class.clone(),
+                row.inner_name.clone(),
+                row.access_flags,
+            )
+        }))
+}
+
+fn class_is_anonymous(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    _args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let anonymous = match class_object_of(shared, receiver)? {
+        ClassObject::Named(class) => {
+            self_inner_class(shared, class)?.is_some_and(|(_, name, _)| name.is_none())
+        }
+        _ => false,
+    };
+    Ok(Some(Value::Int(i32::from(anonymous))))
+}
+
+fn class_is_local(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    _args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let local = match class_object_of(shared, receiver)? {
+        ClassObject::Named(class) => self_inner_class(shared, class)?
+            .is_some_and(|(outer, name, _)| outer.is_none() && name.is_some()),
+        _ => false,
+    };
+    Ok(Some(Value::Int(i32::from(local))))
+}
+
+fn class_is_member(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    _args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let member = match class_object_of(shared, receiver)? {
+        ClassObject::Named(class) => {
+            self_inner_class(shared, class)?.is_some_and(|(outer, _, _)| outer.is_some())
+        }
+        _ => false,
+    };
+    Ok(Some(Value::Int(i32::from(member))))
+}
+
+fn class_is_record(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    _args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let is_record = match class_object_of(shared, receiver)? {
+        ClassObject::Named(class) => {
+            let entry = shared
+                .entry(class)
+                .ok_or_else(|| VmError::Loader(format!("class id {} is not loaded", class.0)))?;
+            entry.metadata()?.is_record()
+        }
+        _ => false,
+    };
+    Ok(Some(Value::Int(i32::from(is_record))))
 }
 
 /// `Class.isArray()`: true exactly for an array class object.
@@ -705,7 +964,22 @@ fn class_get_superclass(
             else {
                 return Ok(Some(Value::Ref(ObjRef::NULL)));
             };
-            let super_class = shared.load_class(view.loader, &super_name)?;
+            let super_class = match shared.load_class(view.loader, &super_name) {
+                Ok(class) => class,
+                // A class whose superclass is absent from the shipped tree makes the
+                // reflective walk fail the way the JDK's `NoClassDefFoundError` does, so a
+                // caller that catches `Throwable` (Spring's failure analyzers do) can
+                // continue instead of aborting on a VM-typed error.
+                Err(VmError::ClassNotFound { .. }) => {
+                    let throwable = crate::exceptions::new_throwable(
+                        shared,
+                        "java/lang/NoClassDefFoundError",
+                        super_name.clone(),
+                    )?;
+                    return Err(VmError::Thrown(throwable));
+                }
+                Err(error) => return Err(error),
+            };
             let object = shared.class_object(super_class)?;
             Ok(Some(Value::Ref(object)))
         }
@@ -1287,6 +1561,91 @@ fn class_get_interfaces(
         }
     }
     Ok(Some(Value::Ref(array)))
+}
+
+/// The enclosing class name of a member, local or anonymous class.
+fn enclosing_class_name(shared: &Shared, class: ClassId) -> Result<Option<String>, VmError> {
+    let entry = shared
+        .entry(class)
+        .ok_or_else(|| VmError::Loader(format!("class id {} is not loaded", class.0)))?;
+    let metadata = entry.metadata()?;
+    if let Some(row) = metadata
+        .inner_classes
+        .iter()
+        .find(|row| row.inner_class == metadata.binary_name)
+    {
+        if let Some(outer) = &row.outer_class {
+            return Ok(Some(outer.clone()));
+        }
+    }
+    Ok(metadata
+        .enclosing_method
+        .as_ref()
+        .map(|method| method.class.clone()))
+}
+
+fn enclosing_class_object(shared: &Shared, class: ClassId) -> Result<Option<Value>, VmError> {
+    let Some(name) = enclosing_class_name(shared, class)? else {
+        return Ok(Some(Value::Ref(ObjRef::NULL)));
+    };
+    let entry = shared
+        .entry(class)
+        .ok_or_else(|| VmError::Loader(format!("class id {} is not loaded", class.0)))?;
+    match shared.load_class(entry.loader, &name) {
+        Ok(enclosing) => Ok(Some(Value::Ref(shared.class_object(enclosing)?))),
+        Err(VmError::ClassNotFound { .. }) => {
+            let throwable =
+                crate::exceptions::new_throwable(shared, "java/lang/NoClassDefFoundError", name)?;
+            Err(VmError::Thrown(throwable))
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn class_get_enclosing_class(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    _args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    match class_object_of(shared, receiver)? {
+        ClassObject::Named(class) => enclosing_class_object(shared, class),
+        ClassObject::Primitive(_) | ClassObject::Array(_) => Ok(Some(Value::Ref(ObjRef::NULL))),
+    }
+}
+
+fn class_get_declaring_class(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    _args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let ClassObject::Named(class) = class_object_of(shared, receiver)? else {
+        return Ok(Some(Value::Ref(ObjRef::NULL)));
+    };
+    let entry = shared
+        .entry(class)
+        .ok_or_else(|| VmError::Loader(format!("class id {} is not loaded", class.0)))?;
+    let metadata = entry.metadata()?;
+    let outer = metadata
+        .inner_classes
+        .iter()
+        .find(|row| row.inner_class == metadata.binary_name)
+        .and_then(|row| row.outer_class.clone());
+    let Some(outer) = outer else {
+        return Ok(Some(Value::Ref(ObjRef::NULL)));
+    };
+    match shared.load_class(entry.loader, &outer) {
+        Ok(declaring) => Ok(Some(Value::Ref(shared.class_object(declaring)?))),
+        Err(VmError::ClassNotFound { .. }) => {
+            let throwable =
+                crate::exceptions::new_throwable(shared, "java/lang/NoClassDefFoundError", outer)?;
+            Err(VmError::Thrown(throwable))
+        }
+        Err(error) => Err(error),
+    }
 }
 
 /// `Class.getSimpleName()`.
@@ -2725,6 +3084,31 @@ fn field_slot(shared: &Shared, actual: ClassId, member: &ReflectMember) -> Resul
         })
 }
 
+/// The `Class` object of a method's return type, or of a setter's first parameter.
+///
+/// `java.beans.PropertyDescriptor` needs the property's type without re-entering the
+/// interpreter, so this reads the reflected member's descriptor and resolves the type
+/// through the member's declaring loader, the same path `Method.getReturnType` uses.
+pub(crate) fn accessor_property_type(
+    shared: &Shared,
+    method: ObjRef,
+    setter: bool,
+) -> Result<ObjRef, VmError> {
+    let member = member_of(shared, method)?;
+    let loader = declaring_loader(shared, &member)?;
+    let descriptor = if setter {
+        parameter_descriptors(&member.descriptor)?
+            .into_iter()
+            .next()
+            .ok_or_else(|| {
+                VmError::Native("PropertyDescriptor: setter has no parameter".to_owned())
+            })?
+    } else {
+        return_descriptor(&member.descriptor)?
+    };
+    class_for_descriptor(shared, loader, descriptor)
+}
+
 fn class_name(shared: &Shared, class: ClassId) -> String {
     shared
         .entry(class)
@@ -2960,4 +3344,622 @@ fn class_get_protection_domain(
 ) -> Result<Option<Value>, VmError> {
     class_object_of(shared, receiver)?;
     Ok(Some(Value::Ref(ObjRef::NULL)))
+}
+
+// ---------------------------------------------------------------------------
+// java.lang.reflect.Array
+// ---------------------------------------------------------------------------
+
+fn array_argument(reference: ObjRef, method: &str) -> Result<(), VmError> {
+    if reference.is_null() {
+        return Err(VmError::Native(format!("{method}: null array")));
+    }
+    Ok(())
+}
+
+fn array_element(
+    shared: &Shared,
+    array: ObjRef,
+    index: i32,
+    method: &str,
+) -> Result<(Value, crate::heap::ArrayKind), VmError> {
+    array_argument(array, method)?;
+    let heap = shared.heap();
+    let array_object = heap
+        .array(array)
+        .map_err(|error| VmError::Native(error.to_string()))?;
+    let index = usize::try_from(index)
+        .ok()
+        .filter(|index| *index < array_object.elements.len())
+        .ok_or_else(|| VmError::Native(format!("{method}: index {index} outside the array")))?;
+    Ok((array_object.elements[index], array_object.kind))
+}
+
+fn reflect_array_length(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let Some(Value::Ref(array)) = args.first().copied() else {
+        return Err(VmError::Native(
+            "Array.getLength expects an array".to_owned(),
+        ));
+    };
+    array_argument(array, "Array.getLength")?;
+    let length = {
+        let heap = shared.heap();
+        heap.array(array)
+            .map_err(|error| VmError::Native(error.to_string()))?
+            .elements
+            .len()
+    };
+    Ok(Some(Value::Int(length as i32)))
+}
+
+fn reflect_array_get(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let Some(Value::Ref(array)) = args.first().copied() else {
+        return Err(VmError::Native("Array.get expects an array".to_owned()));
+    };
+    let Some(Value::Int(index)) = args.get(1).copied() else {
+        return Err(VmError::Native("Array.get expects an int index".to_owned()));
+    };
+    let (value, kind) = array_element(shared, array, index, "Array.get")?;
+    Ok(Some(box_value(shared, value, kind)))
+}
+
+/// The boxed form of a primitive array element, as `Array.get` must return.
+fn box_value(shared: &Shared, value: Value, kind: crate::heap::ArrayKind) -> Value {
+    use crate::heap::{ArrayKind, BoxedPrimitive};
+    let boxed = match kind {
+        ArrayKind::Reference => return value,
+        ArrayKind::Boolean => BoxedPrimitive::Boolean(matches!(value, Value::Int(v) if v != 0)),
+        ArrayKind::Byte => BoxedPrimitive::Byte(match value {
+            Value::Int(v) => v as i8,
+            _ => 0,
+        }),
+        ArrayKind::Char => BoxedPrimitive::Character(
+            char::from_u32(match value {
+                Value::Int(v) => v as u32,
+                _ => 0,
+            })
+            .unwrap_or('?'),
+        ),
+        ArrayKind::Short => BoxedPrimitive::Short(match value {
+            Value::Int(v) => v as i16,
+            _ => 0,
+        }),
+        ArrayKind::Int => BoxedPrimitive::Integer(match value {
+            Value::Int(v) => v,
+            _ => 0,
+        }),
+        ArrayKind::Long => BoxedPrimitive::Long(match value {
+            Value::Long(v) => v,
+            _ => 0,
+        }),
+        ArrayKind::Float => BoxedPrimitive::Float(match value {
+            Value::Float(v) => v,
+            _ => 0.0,
+        }),
+        ArrayKind::Double => BoxedPrimitive::Double(match value {
+            Value::Double(v) => v,
+            _ => 0.0,
+        }),
+    };
+    Value::Ref(shared.boxed_value(boxed))
+}
+
+fn reflect_array_get_int(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    get_as(shared, args, "Array.getInt", |value| match value {
+        Value::Int(value) => Some(Value::Int(value)),
+        _ => None,
+    })
+}
+
+fn reflect_array_get_long(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    get_as(shared, args, "Array.getLong", |value| match value {
+        Value::Long(value) => Some(Value::Long(value)),
+        Value::Int(value) => Some(Value::Long(i64::from(value))),
+        _ => None,
+    })
+}
+
+fn reflect_array_get_boolean(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    get_as(shared, args, "Array.getBoolean", |value| match value {
+        Value::Int(value) => Some(Value::Int(i32::from(value != 0))),
+        _ => None,
+    })
+}
+
+fn reflect_array_get_byte(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    get_as(shared, args, "Array.getByte", |value| match value {
+        Value::Int(value) => Some(Value::Int(value)),
+        _ => None,
+    })
+}
+
+fn reflect_array_get_char(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    get_as(shared, args, "Array.getChar", |value| match value {
+        Value::Int(value) => Some(Value::Int(value)),
+        _ => None,
+    })
+}
+
+fn reflect_array_get_short(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    get_as(shared, args, "Array.getShort", |value| match value {
+        Value::Int(value) => Some(Value::Int(value)),
+        _ => None,
+    })
+}
+
+fn reflect_array_get_float(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    get_as(shared, args, "Array.getFloat", |value| match value {
+        Value::Float(value) => Some(Value::Float(value)),
+        _ => None,
+    })
+}
+
+fn reflect_array_get_double(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    get_as(shared, args, "Array.getDouble", |value| match value {
+        Value::Double(value) => Some(Value::Double(value)),
+        Value::Float(value) => Some(Value::Double(f64::from(value))),
+        _ => None,
+    })
+}
+
+fn get_as(
+    shared: &Shared,
+    args: &[Value],
+    method: &'static str,
+    convert: impl FnOnce(Value) -> Option<Value>,
+) -> Result<Option<Value>, VmError> {
+    let Some(Value::Ref(array)) = args.first().copied() else {
+        return Err(VmError::Native(format!("{method} expects an array")));
+    };
+    let Some(Value::Int(index)) = args.get(1).copied() else {
+        return Err(VmError::Native(format!("{method} expects an int index")));
+    };
+    let (value, _) = array_element(shared, array, index, method)?;
+    convert(value).map(Some).ok_or_else(|| {
+        VmError::Native(format!(
+            "{method}: the element has the wrong primitive kind"
+        ))
+    })
+}
+
+fn reflect_array_set(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let Some(Value::Ref(array)) = args.first().copied() else {
+        return Err(VmError::Native("Array.set expects an array".to_owned()));
+    };
+    let Some(Value::Int(index)) = args.get(1).copied() else {
+        return Err(VmError::Native("Array.set expects an int index".to_owned()));
+    };
+    let value = args.get(2).copied().unwrap_or(Value::Ref(ObjRef::NULL));
+    array_argument(array, "Array.set")?;
+    let index = {
+        let heap = shared.heap();
+        let array_object = heap
+            .array(array)
+            .map_err(|error| VmError::Native(error.to_string()))?;
+        usize::try_from(index)
+            .ok()
+            .filter(|index| *index < array_object.elements.len())
+            .ok_or_else(|| VmError::Native(format!("Array.set: index {index} outside the array")))?
+    };
+    shared
+        .heap()
+        .array_mut(array)
+        .map_err(|error| VmError::Native(error.to_string()))?
+        .elements[index] = value;
+    Ok(None)
+}
+
+fn reflect_array_new_instance(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let Some(Value::Ref(component)) = args.first().copied() else {
+        return Err(VmError::Native(
+            "Array.newInstance expects a Class".to_owned(),
+        ));
+    };
+    let Some(Value::Int(length)) = args.get(1).copied() else {
+        return Err(VmError::Native(
+            "Array.newInstance expects an int length".to_owned(),
+        ));
+    };
+    let length = usize::try_from(length)
+        .map_err(|_| VmError::Native("Array.newInstance: negative length".to_owned()))?;
+    let component = class_object_of(shared, component)?.class_ref();
+    Ok(Some(Value::Ref(
+        shared.heap().allocate_array(component, length),
+    )))
+}
+
+fn reflect_array_new_instance_dimensions(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    _receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let Some(Value::Ref(component)) = args.first().copied() else {
+        return Err(VmError::Native(
+            "Array.newInstance expects a Class".to_owned(),
+        ));
+    };
+    let Some(Value::Ref(dimensions)) = args.get(1).copied() else {
+        return Err(VmError::Native(
+            "Array.newInstance expects an int[] dimensions".to_owned(),
+        ));
+    };
+    let lengths: Vec<usize> = {
+        let heap = shared.heap();
+        heap.array(dimensions)
+            .map_err(|error| VmError::Native(error.to_string()))?
+            .elements
+            .iter()
+            .map(|value| match value {
+                Value::Int(value) => usize::try_from(*value).map_err(|_| {
+                    VmError::Native("Array.newInstance: negative dimension".to_owned())
+                }),
+                _ => Err(VmError::Native(
+                    "Array.newInstance: non-int dimension".to_owned(),
+                )),
+            })
+            .collect::<Result<_, _>>()?
+    };
+    let component = class_object_of(shared, component)?.class_ref();
+    Ok(Some(Value::Ref(build_array(shared, component, &lengths))))
+}
+
+/// Build a (possibly multi-dimensional) array of `dimensions`, innermost last.
+fn build_array(shared: &Shared, component: crate::heap::ClassRef, dimensions: &[usize]) -> ObjRef {
+    if dimensions.is_empty() {
+        // `newInstance(Class, new int[0])` is the component's own zero-length array in the
+        // JDK's degenerate case; a one-element class ref keeps the shape valid.
+        return shared.heap().allocate_array(component, 0);
+    }
+    let array = shared
+        .heap()
+        .allocate_array(component.clone(), dimensions[0]);
+    if dimensions.len() > 1 {
+        let child_component = crate::heap::ClassRef::array(component);
+        for index in 0..dimensions[0] {
+            let child = build_array(shared, child_component.clone(), &dimensions[1..]);
+            let mut heap = shared.heap();
+            let slots = heap
+                .array_mut(array)
+                .expect("a freshly allocated array is an array");
+            slots.elements[index] = Value::Ref(child);
+        }
+    }
+    array
+}
+
+/// `Method.getParameterAnnotations()`: each parameter's annotations, in parameter order.
+fn method_get_parameter_annotations(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    _args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let member = member_of(shared, receiver)?;
+    let (loader, visible, invisible) = {
+        let entry = shared
+            .entry(member.class)
+            .ok_or_else(|| VmError::Loader(format!("class id {} is not loaded", member.class.0)))?;
+        let metadata = entry.metadata()?;
+        let method = metadata
+            .methods
+            .iter()
+            .find(|method| method.name == member.name && method.descriptor == member.descriptor)
+            .ok_or_else(|| {
+                VmError::Native(format!(
+                    "Method.getParameterAnnotations: {}::{}:{} is not declared",
+                    entry.name, member.name, member.descriptor
+                ))
+            })?;
+        (
+            entry.loader,
+            method.parameter_annotations.clone().unwrap_or_default(),
+            method
+                .invisible_parameter_annotations
+                .clone()
+                .unwrap_or_default(),
+        )
+    };
+    let count = parameter_descriptors(&member.descriptor)?.len();
+    let annotation_class = shared.load_library_class("java/lang/annotation/Annotation")?;
+    let inner_component = ClassRef::Named(annotation_class);
+    let mut parameters = Vec::with_capacity(count);
+    for index in 0..count {
+        let mut annotations = visible.get(index).cloned().unwrap_or_default();
+        annotations.extend(invisible.get(index).cloned().unwrap_or_default());
+        let objects = crate::annotation::annotation_objects(shared, loader, &annotations)?;
+        parameters.push(Value::Ref(allocate_reference_array(
+            shared,
+            inner_component.clone(),
+            &objects,
+        )?));
+    }
+    let outer_component = ClassRef::array(inner_component);
+    let outer = shared
+        .heap()
+        .allocate_array(outer_component, parameters.len());
+    {
+        let mut heap = shared.heap();
+        let slots = heap
+            .array_mut(outer)
+            .map_err(|error| VmError::Native(error.to_string()))?;
+        for (slot, value) in slots.elements.iter_mut().zip(parameters) {
+            *slot = value;
+        }
+    }
+    Ok(Some(Value::Ref(outer)))
+}
+
+/// The metadata of one executable's parameters, in declaration order.
+struct ParameterInfo {
+    name: Option<String>,
+    flags: u16,
+    descriptor: String,
+    annotations: Vec<rava_classfile::Annotation>,
+}
+
+fn executable_parameter_info(
+    shared: &Shared,
+    member: &crate::heap::ReflectMember,
+) -> Result<(LoaderId, Vec<ParameterInfo>), VmError> {
+    let entry = shared
+        .entry(member.class)
+        .ok_or_else(|| VmError::Loader(format!("class id {} is not loaded", member.class.0)))?;
+    let metadata = entry.metadata()?;
+    let method = metadata
+        .methods
+        .iter()
+        .find(|method| method.name == member.name && method.descriptor == member.descriptor)
+        .ok_or_else(|| {
+            VmError::Native(format!(
+                "reflected executable {}::{}:{} is not declared",
+                entry.name, member.name, member.descriptor
+            ))
+        })?;
+    let descriptors = parameter_descriptors(&member.descriptor)?;
+    let names = method.parameter_names().unwrap_or_default();
+    let visible = method.parameter_annotations.clone().unwrap_or_default();
+    let invisible = method
+        .invisible_parameter_annotations
+        .clone()
+        .unwrap_or_default();
+    let flags: Vec<u16> = method
+        .parameters
+        .as_ref()
+        .map(|parameters| {
+            parameters
+                .iter()
+                .map(|parameter| parameter.access_flags)
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut infos = Vec::with_capacity(descriptors.len());
+    for (index, descriptor) in descriptors.into_iter().enumerate() {
+        let mut annotations = visible.get(index).cloned().unwrap_or_default();
+        annotations.extend(invisible.get(index).cloned().unwrap_or_default());
+        infos.push(ParameterInfo {
+            name: names.get(index).and_then(|name| name.map(str::to_owned)),
+            flags: flags.get(index).copied().unwrap_or(0),
+            descriptor: descriptor.to_owned(),
+            annotations,
+        });
+    }
+    Ok((entry.loader, infos))
+}
+
+fn executable_get_parameters(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    _args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let member = member_of(shared, receiver)?;
+    let (_, infos) = executable_parameter_info(shared, &member)?;
+    let parameter_class = shared.load_library_class("java/lang/reflect/Parameter")?;
+    let mut parameters = Vec::with_capacity(infos.len());
+    for _ in 0..infos.len() {
+        let parameter = {
+            let mut heap = shared.heap();
+            heap.allocate_instance(parameter_class, &crate::heap::FieldLayout::new())
+        };
+        parameters.push(parameter);
+    }
+    for (index, parameter) in parameters.iter().enumerate() {
+        shared
+            .parameter_state()
+            .insert(*parameter, (receiver, index));
+    }
+    let array = shared
+        .heap()
+        .allocate_array(ClassRef::Named(parameter_class), parameters.len());
+    {
+        let mut heap = shared.heap();
+        let slots = heap
+            .array_mut(array)
+            .map_err(|error| VmError::Native(error.to_string()))?;
+        for (slot, parameter) in slots.elements.iter_mut().zip(parameters) {
+            *slot = Value::Ref(parameter);
+        }
+    }
+    Ok(Some(Value::Ref(array)))
+}
+
+fn parameter_member(
+    shared: &Shared,
+    receiver: ObjRef,
+    method: &str,
+) -> Result<(crate::heap::ReflectMember, usize, ParameterInfo), VmError> {
+    let (executable, index) = shared
+        .parameter_state()
+        .get(&receiver)
+        .copied()
+        .ok_or_else(|| VmError::Native(format!("{method}: Parameter has no state")))?;
+    let member = member_of(shared, executable)?;
+    let (_, infos) = executable_parameter_info(shared, &member)?;
+    let info = infos.into_iter().nth(index).ok_or_else(|| {
+        VmError::Native(format!(
+            "{method}: Parameter index {index} is outside the executable"
+        ))
+    })?;
+    Ok((member, index, info))
+}
+
+fn parameter_get_name(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    _args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let (_, index, info) = parameter_member(shared, receiver, "Parameter.getName")?;
+    let name = info.name.unwrap_or_else(|| format!("arg{index}"));
+    Ok(Some(Value::Ref(shared.heap().allocate_string(name))))
+}
+
+fn parameter_get_type(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    _args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let (member, _, info) = parameter_member(shared, receiver, "Parameter.getType")?;
+    let loader = declaring_loader(shared, &member)?;
+    Ok(Some(Value::Ref(class_for_descriptor(
+        shared,
+        loader,
+        &info.descriptor,
+    )?)))
+}
+
+fn parameter_get_modifiers(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    _args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let (_, _, info) = parameter_member(shared, receiver, "Parameter.getModifiers")?;
+    Ok(Some(Value::Int(i32::from(info.flags))))
+}
+
+fn parameter_is_name_present(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    _args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let (_, _, info) = parameter_member(shared, receiver, "Parameter.isNamePresent")?;
+    Ok(Some(Value::Int(i32::from(info.name.is_some()))))
+}
+
+fn parameter_get_annotations(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    _args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let (member, _, info) = parameter_member(shared, receiver, "Parameter.getAnnotations")?;
+    let loader = declaring_loader(shared, &member)?;
+    let objects = crate::annotation::annotation_objects(shared, loader, &info.annotations)?;
+    let annotation_class = shared.load_library_class("java/lang/annotation/Annotation")?;
+    Ok(Some(Value::Ref(allocate_reference_array(
+        shared,
+        ClassRef::Named(annotation_class),
+        &objects,
+    )?)))
+}
+
+fn parameter_get_declaring_executable(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    _args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let (executable, _) = shared
+        .parameter_state()
+        .get(&receiver)
+        .copied()
+        .ok_or_else(|| {
+            VmError::Native("Parameter.getDeclaringExecutable: Parameter has no state".to_owned())
+        })?;
+    Ok(Some(Value::Ref(executable)))
 }
