@@ -182,6 +182,19 @@ fn identity_map_stays_reference_based() {
 }
 
 #[test]
+fn text_conversions_call_java_to_string() {
+    let fixture = fixture();
+    assert!(bool_value(&fixture, "stringValueOfUsesToString"));
+    assert!(bool_value(&fixture, "concatUsesToString"));
+    assert!(bool_value(&fixture, "formatUsesToString"));
+    assert!(bool_value(&fixture, "builderAppendUsesToString"));
+    assert!(bool_value(&fixture, "bufferAppendUsesToString"));
+    assert!(bool_value(&fixture, "objectsToStringUsesToString"));
+    assert!(bool_value(&fixture, "arraysToStringUsesToString"));
+    assert!(bool_value(&fixture, "defaultToStringStaysStructural"));
+}
+
+#[test]
 fn property_descriptor_constructor_uses_the_bean_methods() {
     let fixture = fixture();
     assert!(bool_value(&fixture, "propertyDescriptor"));

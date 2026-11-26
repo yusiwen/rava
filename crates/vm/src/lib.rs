@@ -31,6 +31,7 @@ pub mod jul;
 pub mod library;
 pub mod loader;
 pub mod locks;
+pub mod manifest;
 pub mod maps;
 pub mod math;
 pub mod memory;

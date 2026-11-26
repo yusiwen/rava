@@ -207,14 +207,14 @@ fn objects_hash_code(
 /// `Objects.toString(Object)`: `"null"` for null, the value's text otherwise.
 fn objects_to_string(
     shared: &Shared,
-    _thread: &ThreadState,
+    thread: &ThreadState,
     _loader: LoaderId,
     _receiver: ObjRef,
     args: &[Value],
 ) -> Result<Option<Value>, VmError> {
     let text = match args.first().copied() {
         Some(Value::Ref(reference)) => {
-            crate::string::object_text(shared, reference, "Objects.toString")?
+            crate::string::object_text(shared, thread, reference, "Objects.toString")?
         }
         Some(Value::Int(value)) => value.to_string(),
         Some(Value::Long(value)) => value.to_string(),

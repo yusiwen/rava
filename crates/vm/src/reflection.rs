@@ -131,6 +131,18 @@ pub fn register_natives(shared: &Shared) {
     );
     shared.register_native(
         "java/lang/Class",
+        "getPackage",
+        "()Ljava/lang/Package;",
+        class_get_package,
+    );
+    shared.register_native(
+        "java/lang/Class",
+        "getPackageName",
+        "()Ljava/lang/String;",
+        class_get_package_name,
+    );
+    shared.register_native(
+        "java/lang/Class",
         "toString",
         "()Ljava/lang/String;",
         class_to_string,
@@ -716,6 +728,57 @@ fn object_get_class(
 
 /// `Class.getName()`: the dotted binary name of a loaded class, the primitive's Java name
 /// (`int`, `void`), or the JDK's descriptor form for an array (`[I`, `[Ljava.lang.String;`).
+/// `Class.getPackage()`: a `Package` for the class's dotted package, or null for the
+/// unnamed package. The object is side-table state; `Package.getImplementationVersion`
+/// answers null because this VM has no package manifest metadata.
+fn class_get_package(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    _args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let class = match class_object_of(shared, receiver)? {
+        ClassObject::Named(class) => class,
+        ClassObject::Primitive(_) | ClassObject::Array(_) => {
+            return Ok(Some(Value::Ref(ObjRef::NULL)));
+        }
+    };
+    let binary = shared
+        .entry(class)
+        .map(|entry| entry.name.clone())
+        .unwrap_or_default();
+    let Some((package, _)) = binary.rsplit_once('/') else {
+        return Ok(Some(Value::Ref(ObjRef::NULL)));
+    };
+    let package_class = shared.load_library_class("java/lang/Package")?;
+    let object = shared.allocate_instance(package_class)?;
+    shared.set_package_name(object, package.replace('/', "."));
+    Ok(Some(Value::Ref(object)))
+}
+
+/// `Class.getPackageName()`: the dotted package, or `""` for the unnamed package.
+fn class_get_package_name(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    _args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let name = match class_object_of(shared, receiver)? {
+        ClassObject::Named(class) => shared
+            .entry(class)
+            .map(|entry| entry.name.clone())
+            .unwrap_or_default(),
+        ClassObject::Primitive(_) | ClassObject::Array(_) => String::new(),
+    };
+    let package = name
+        .rsplit_once('/')
+        .map(|(package, _)| package.replace('/', "."))
+        .unwrap_or_default();
+    Ok(Some(Value::Ref(shared.intern_string(&package))))
+}
+
 fn class_get_name(
     shared: &Shared,
     _thread: &ThreadState,

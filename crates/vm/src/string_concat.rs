@@ -27,6 +27,7 @@ use crate::VmError;
 use crate::heap::ObjRef;
 use crate::shared::Shared;
 use crate::string::{double_text, float_text, object_text};
+use crate::thread::ThreadState;
 use crate::value::Value;
 
 /// The internal name of the sole supported bootstrap owner.
@@ -42,6 +43,7 @@ pub const MAKE_CONCAT_WITH_CONSTANTS: &str = "makeConcatWithConstants";
 /// `args` are the values popped from the operand stack, in call-site order.
 pub fn invoke_call_site(
     shared: &Shared,
+    thread: &ThreadState,
     bootstrap: &BootstrapMethodEntry,
     call_site_name: &str,
     descriptor: &str,
@@ -75,10 +77,11 @@ pub fn invoke_call_site(
                     bootstrap.arguments.len()
                 )));
             }
-            concat_all(shared, &descriptors, args)?
+            concat_all(shared, thread, &descriptors, args)?
         }
         MAKE_CONCAT_WITH_CONSTANTS => concat_with_recipe(
             shared,
+            thread,
             call_site_name,
             &descriptors,
             args,
@@ -101,10 +104,15 @@ fn unsupported(handle: &rava_classfile::BootstrapMethodHandle) -> VmError {
 }
 
 /// `makeConcat`: concatenate every dynamic argument with `String.valueOf` semantics.
-fn concat_all(shared: &Shared, descriptors: &[&str], args: &[Value]) -> Result<String, VmError> {
+fn concat_all(
+    shared: &Shared,
+    thread: &ThreadState,
+    descriptors: &[&str],
+    args: &[Value],
+) -> Result<String, VmError> {
     let mut text = String::new();
     for (descriptor, value) in descriptors.iter().zip(args.iter()) {
-        text.push_str(&argument_text(shared, descriptor, *value)?);
+        text.push_str(&argument_text(shared, thread, descriptor, *value)?);
     }
     Ok(text)
 }
@@ -113,6 +121,7 @@ fn concat_all(shared: &Shared, descriptors: &[&str], args: &[Value]) -> Result<S
 /// bootstrap's static arguments.
 fn concat_with_recipe(
     shared: &Shared,
+    thread: &ThreadState,
     call_site_name: &str,
     descriptors: &[&str],
     args: &[Value],
@@ -142,7 +151,7 @@ fn concat_with_recipe(
                         "{call_site_name} is missing dynamic argument {dynamic}"
                     )));
                 };
-                text.push_str(&argument_text(shared, descriptor, *value)?);
+                text.push_str(&argument_text(shared, thread, descriptor, *value)?);
                 dynamic += 1;
             }
             '\u{2}' => {
@@ -204,7 +213,12 @@ fn constant_text(argument: &BootstrapArgument) -> Result<String, VmError> {
 }
 
 /// The text one dynamic argument contributes, according to its parameter descriptor.
-fn argument_text(shared: &Shared, descriptor: &str, value: Value) -> Result<String, VmError> {
+fn argument_text(
+    shared: &Shared,
+    thread: &ThreadState,
+    descriptor: &str,
+    value: Value,
+) -> Result<String, VmError> {
     match descriptor {
         "Z" => Ok(if int_value(value, descriptor)? == 0 {
             "false".to_owned()
@@ -233,7 +247,7 @@ fn argument_text(shared: &Shared, descriptor: &str, value: Value) -> Result<Stri
             _ => Err(mismatch(descriptor)),
         },
         descriptor if descriptor.starts_with('L') || descriptor.starts_with('[') => match value {
-            Value::Ref(reference) => object_text(shared, reference, "StringConcatFactory"),
+            Value::Ref(reference) => object_text(shared, thread, reference, "StringConcatFactory"),
             _ => Err(mismatch(descriptor)),
         },
         _ => Err(VmError::Native(format!(

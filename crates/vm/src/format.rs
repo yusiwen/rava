@@ -293,9 +293,14 @@ fn buffer_argument(
 }
 
 /// One argument's text for a `{index}` placeholder.
-fn argument_text(shared: &Shared, value: Value, method: &'static str) -> Result<String, VmError> {
+fn argument_text(
+    shared: &Shared,
+    thread: &ThreadState,
+    value: Value,
+    method: &'static str,
+) -> Result<String, VmError> {
     match value {
-        Value::Ref(reference) => object_text(shared, reference, method),
+        Value::Ref(reference) => object_text(shared, thread, reference, method),
         // An `Object[]` element is always a reference; a primitive here means the caller
         // handed the native a malformed array.
         _ => Err(VmError::Native(format!(
@@ -337,6 +342,7 @@ fn parse_placeholder(segment: &str) -> Result<(usize, String), VmError> {
 /// Format `pattern` over `args`.
 fn format_pattern(
     shared: &Shared,
+    thread: &ThreadState,
     pattern: &str,
     args: &[Value],
     method: &'static str,
@@ -386,7 +392,7 @@ fn format_pattern(
                                 "MessageFormat: the `{format_type}` subformat is not implemented"
                             )));
                         }
-                        out.push_str(&argument_text(shared, *value, method)?);
+                        out.push_str(&argument_text(shared, thread, *value, method)?);
                     }
                 }
             }
@@ -399,14 +405,14 @@ fn format_pattern(
 /// `MessageFormat.<init>(String)` and `MessageFormat.<init>(String, Locale)`.
 fn message_format_init(
     shared: &Shared,
-    _thread: &ThreadState,
+    thread: &ThreadState,
     _loader: LoaderId,
     receiver: ObjRef,
     args: &[Value],
 ) -> Result<Option<Value>, VmError> {
     let pattern = string_argument(shared, args, 0, "MessageFormat.<init>")?;
     // Parse once so a malformed pattern fails at construction, as on the JDK.
-    format_pattern(shared, &pattern, &[], "MessageFormat.<init>")?;
+    format_pattern(shared, thread, &pattern, &[], "MessageFormat.<init>")?;
     set_pattern(shared, receiver, pattern)?;
     Ok(None)
 }
@@ -425,13 +431,13 @@ fn message_format_init_locale(
 /// `MessageFormat.applyPattern(String)`.
 fn message_format_apply_pattern(
     shared: &Shared,
-    _thread: &ThreadState,
+    thread: &ThreadState,
     _loader: LoaderId,
     receiver: ObjRef,
     args: &[Value],
 ) -> Result<Option<Value>, VmError> {
     let pattern = string_argument(shared, args, 0, "MessageFormat.applyPattern")?;
-    format_pattern(shared, &pattern, &[], "MessageFormat.applyPattern")?;
+    format_pattern(shared, thread, &pattern, &[], "MessageFormat.applyPattern")?;
     set_pattern(shared, receiver, pattern)?;
     Ok(None)
 }
@@ -465,51 +471,52 @@ fn message_format_to_pattern(
 /// `Format.format(Object)`: format an `Object[]` (or `null`) into a fresh `String`.
 fn message_format_format_object(
     shared: &Shared,
-    _thread: &ThreadState,
+    thread: &ThreadState,
     _loader: LoaderId,
     receiver: ObjRef,
     args: &[Value],
 ) -> Result<Option<Value>, VmError> {
     let pattern = receiver_pattern(shared, receiver, "Format.format")?;
     let arguments = argument_array(shared, args.first().copied(), "Format.format")?;
-    let text = format_pattern(shared, &pattern, &arguments, "Format.format")?;
+    let text = format_pattern(shared, thread, &pattern, &arguments, "Format.format")?;
     Ok(Some(Value::Ref(shared.heap().allocate_string(text))))
 }
 
 /// `MessageFormat.format(Object, StringBuffer, FieldPosition)`.
 fn message_format_format_object_buffer(
     shared: &Shared,
-    _thread: &ThreadState,
+    thread: &ThreadState,
     _loader: LoaderId,
     receiver: ObjRef,
     args: &[Value],
 ) -> Result<Option<Value>, VmError> {
     let pattern = receiver_pattern(shared, receiver, "MessageFormat.format")?;
     let arguments = argument_array(shared, args.first().copied(), "MessageFormat.format")?;
-    append_to_buffer(shared, &pattern, &arguments, args)
+    append_to_buffer(shared, thread, &pattern, &arguments, args)
 }
 
 /// `MessageFormat.format(Object[], StringBuffer, FieldPosition)`.
 fn message_format_format_array_buffer(
     shared: &Shared,
-    _thread: &ThreadState,
+    thread: &ThreadState,
     _loader: LoaderId,
     receiver: ObjRef,
     args: &[Value],
 ) -> Result<Option<Value>, VmError> {
     let pattern = receiver_pattern(shared, receiver, "MessageFormat.format")?;
     let arguments = argument_array(shared, args.first().copied(), "MessageFormat.format")?;
-    append_to_buffer(shared, &pattern, &arguments, args)
+    append_to_buffer(shared, thread, &pattern, &arguments, args)
 }
 
 fn append_to_buffer(
     shared: &Shared,
+    thread: &ThreadState,
     pattern: &str,
     arguments: &[Value],
     args: &[Value],
 ) -> Result<Option<Value>, VmError> {
     let buffer = buffer_argument(shared, args, 1, "MessageFormat.format")?;
-    let text = format_pattern(shared, pattern, arguments, "MessageFormat.format")?;
+    let text = format_pattern(shared, thread, pattern, arguments, "MessageFormat.format")?;
     shared
         .heap()
         .string_buffer_mut(buffer)
@@ -521,14 +528,14 @@ fn append_to_buffer(
 /// The static `MessageFormat.format(String, Object...)`.
 fn message_format_format_static(
     shared: &Shared,
-    _thread: &ThreadState,
+    thread: &ThreadState,
     _loader: LoaderId,
     _receiver: ObjRef,
     args: &[Value],
 ) -> Result<Option<Value>, VmError> {
     let pattern = string_argument(shared, args, 0, "MessageFormat.format")?;
     let arguments = argument_array(shared, args.get(1).copied(), "MessageFormat.format")?;
-    let text = format_pattern(shared, &pattern, &arguments, "MessageFormat.format")?;
+    let text = format_pattern(shared, thread, &pattern, &arguments, "MessageFormat.format")?;
     Ok(Some(Value::Ref(shared.heap().allocate_string(text))))
 }
 
@@ -655,14 +662,14 @@ fn set_buffer_text(shared: &Shared, receiver: ObjRef, text: String) -> Result<()
 /// `String.format(String, Object...)`.
 fn string_format(
     shared: &Shared,
-    _thread: &ThreadState,
+    thread: &ThreadState,
     _loader: LoaderId,
     _receiver: ObjRef,
     args: &[Value],
 ) -> Result<Option<Value>, VmError> {
     let pattern = string_argument(shared, args, 0, "String.format")?;
     let arguments = argument_array(shared, args.get(1).copied(), "String.format")?;
-    let text = format_java(shared, &pattern, &arguments, "String.format")?;
+    let text = format_java(shared, thread, &pattern, &arguments, "String.format")?;
     Ok(Some(Value::Ref(shared.heap().allocate_string(text))))
 }
 
@@ -672,14 +679,14 @@ fn string_format(
 /// locale-sensitive conversion is a typed error rather than a silently wrong locale.
 fn string_format_locale(
     shared: &Shared,
-    _thread: &ThreadState,
+    thread: &ThreadState,
     _loader: LoaderId,
     _receiver: ObjRef,
     args: &[Value],
 ) -> Result<Option<Value>, VmError> {
     let pattern = string_argument(shared, args, 1, "String.format")?;
     let arguments = argument_array(shared, args.get(2).copied(), "String.format")?;
-    let text = format_java(shared, &pattern, &arguments, "String.format")?;
+    let text = format_java(shared, thread, &pattern, &arguments, "String.format")?;
     Ok(Some(Value::Ref(shared.heap().allocate_string(text))))
 }
 
@@ -695,6 +702,7 @@ struct FormatFlags {
 /// Format `pattern` over `arguments` with the `java.util.Formatter` conversion subset.
 fn format_java(
     shared: &Shared,
+    thread: &ThreadState,
     pattern: &str,
     arguments: &[Value],
     method: &'static str,
@@ -785,6 +793,7 @@ fn format_java(
         next_argument += 1;
         let mut text = format_conversion(
             shared,
+            thread,
             conversion,
             argument,
             precision,
@@ -833,8 +842,12 @@ fn format_java(
     Ok(out)
 }
 
+// The specifier, precision, flags and argument index are the call site's state; grouping
+// them would only move the fields, as the same allowance in `rava-interp` records.
+#[allow(clippy::too_many_arguments)]
 fn format_conversion(
     shared: &Shared,
+    thread: &ThreadState,
     conversion: char,
     argument: Option<Value>,
     precision: Option<usize>,
@@ -850,7 +863,7 @@ fn format_conversion(
     })?;
     match conversion {
         's' | 'S' => {
-            let text = argument_text(shared, value, method)?;
+            let text = argument_text(shared, thread, value, method)?;
             Ok(if conversion == 'S' {
                 text.to_uppercase()
             } else {
@@ -1093,7 +1106,7 @@ fn string_buffer_append_boolean(
 
 fn string_buffer_append_object(
     shared: &Shared,
-    _thread: &ThreadState,
+    thread: &ThreadState,
     _loader: LoaderId,
     receiver: ObjRef,
     args: &[Value],
@@ -1103,7 +1116,7 @@ fn string_buffer_append_object(
             "StringBuffer.append expects a reference".to_owned(),
         ));
     };
-    let text = object_text(shared, reference, "StringBuffer.append")?;
+    let text = object_text(shared, thread, reference, "StringBuffer.append")?;
     append_buffer(shared, receiver, &text)
 }
 

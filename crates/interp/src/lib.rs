@@ -45,6 +45,7 @@ pub mod iterables;
 mod lambda;
 pub mod method_handles;
 pub mod object_methods;
+pub mod object_text;
 pub mod objects;
 pub mod proxy;
 pub mod reflect_invoke;
@@ -89,6 +90,7 @@ pub fn register_all(shared: &Shared) -> Result<(), VmError> {
     streams::register_natives(shared);
     futures::register_natives(shared);
     object_methods::register_natives(shared);
+    object_text::register(shared);
     service_loader::register_natives(shared);
     collection_equality::register_natives(shared);
     functional::register_natives(shared);
@@ -862,6 +864,7 @@ fn execute(
                 } else {
                     Value::Ref(rava_vm::string_concat::invoke_call_site(
                         shared,
+                        thread,
                         &bootstrap,
                         &name,
                         &descriptor,

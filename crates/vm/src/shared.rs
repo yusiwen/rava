@@ -246,6 +246,10 @@ pub struct Shared {
     accessible: Mutex<HashSet<ObjRef>>,
     /// The detail message of each throwable a constructor created.
     throwable_messages: Mutex<HashMap<ObjRef, String>>,
+    /// `java.lang.Package` objects' dotted names, keyed by the package object.
+    package_names: Mutex<HashMap<ObjRef, String>>,
+    /// Manifest/Attributes attribute maps, keyed by the object that owns them.
+    manifest_attributes: Mutex<HashMap<ObjRef, std::collections::BTreeMap<String, String>>>,
     /// `Throwable.addSuppressed` targets, in declaration order.
     throwable_suppressed: Mutex<HashMap<ObjRef, Vec<ObjRef>>>,
     /// The cause of each throwable a constructor or `initCause` recorded.
@@ -340,6 +344,8 @@ impl Shared {
             object_loaders: Mutex::new(HashMap::new()),
             accessible: Mutex::new(HashSet::new()),
             throwable_messages: Mutex::new(HashMap::new()),
+            package_names: Mutex::new(HashMap::new()),
+            manifest_attributes: Mutex::new(HashMap::new()),
             throwable_causes: Mutex::new(HashMap::new()),
             throwable_suppressed: Mutex::new(HashMap::new()),
             resources: Mutex::new(crate::resources::ResourceState::default()),
@@ -2407,6 +2413,47 @@ impl Shared {
         }
         *state = ClassState::Initialized;
         Ok(())
+    }
+
+    /// Record a `java.lang.Package` object's dotted name.
+    pub fn set_package_name(&self, reference: ObjRef, name: String) {
+        self.package_names
+            .lock()
+            .expect("package name lock poisoned")
+            .insert(reference, name);
+    }
+
+    /// A `java.lang.Package` object's dotted name.
+    pub fn package_name(&self, reference: ObjRef) -> Option<String> {
+        self.package_names
+            .lock()
+            .expect("package name lock poisoned")
+            .get(&reference)
+            .cloned()
+    }
+
+    /// Record a `Manifest` or `Attributes` object's main attributes.
+    pub fn set_manifest_attributes(
+        &self,
+        reference: ObjRef,
+        attributes: std::collections::BTreeMap<String, String>,
+    ) {
+        self.manifest_attributes
+            .lock()
+            .expect("manifest attribute lock poisoned")
+            .insert(reference, attributes);
+    }
+
+    /// A `Manifest`/`Attributes` object's main attributes.
+    pub fn manifest_attributes(
+        &self,
+        reference: ObjRef,
+    ) -> Option<std::collections::BTreeMap<String, String>> {
+        self.manifest_attributes
+            .lock()
+            .expect("manifest attribute lock poisoned")
+            .get(&reference)
+            .cloned()
     }
 
     /// Record a throwable's detail message.
