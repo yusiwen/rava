@@ -740,19 +740,50 @@ fn read_url_bytes(url: &UrlData) -> Result<Vec<u8>, VmError> {
 }
 
 /// `jar:file:<jar>!/<entry>` — the inner form is a `file:` URL and the rest an entry name.
+///
+/// Spring Boot's nested layout adds a second `!/`: the classes root is
+/// `...!/BOOT-INF/classes!/<name>` and a nested dependency is
+/// `...!/BOOT-INF/lib/<lib>.jar!/<name>`. A URL with one `!/` is the flat form and is
+/// read exactly as before; a URL with two is resolved through
+/// [`crate::boot::BootJarSource`], so there is one nested-jar parser rather than two.
 fn read_jar_url(path: &str) -> Result<Vec<u8>, VmError> {
     let inner = path
         .strip_prefix("file:")
         .ok_or_else(|| VmError::Native(format!("jar URL does not wrap a file: URL: {path}")))?;
-    let (jar, entry) = inner
+    let (jar, rest) = inner
         .split_once("!/")
         .ok_or_else(|| VmError::Native(format!("jar URL has no !/ entry separator: {path}")))?;
-    if entry.is_empty() {
+    let jar = PathBuf::from(percent_decode(jar)?);
+
+    if let Some((root, entry)) = rest.split_once("!/") {
+        if entry.is_empty() {
+            return Err(VmError::Native(format!("jar URL names no entry: {path}")));
+        }
+        let root = percent_decode(root)?;
+        let entry = percent_decode(entry)?;
+        let source = crate::boot::BootJarSource::open(&jar)?.ok_or_else(|| {
+            VmError::Native(format!(
+                "jar URL names a Boot root but {} has no Boot layout: {path}",
+                jar.display()
+            ))
+        })?;
+        let bytes = match root.as_str() {
+            "BOOT-INF/classes" => source.read_classes_entry(&entry)?,
+            _ if root.starts_with("BOOT-INF/lib/") => source.read_library_entry(&root, &entry)?,
+            _ => {
+                return Err(VmError::Native(format!(
+                    "jar URL has an unknown nested root {root}: {path}"
+                )));
+            }
+        };
+        return bytes.ok_or_else(|| VmError::Native(format!("jar has no entry {entry}")));
+    }
+
+    if rest.is_empty() {
         return Err(VmError::Native(format!("jar URL names no entry: {path}")));
     }
-    let jar = percent_decode(jar)?;
-    let entry = percent_decode(entry)?;
-    let source = crate::source::JarSource::open(PathBuf::from(jar))?;
+    let entry = percent_decode(rest)?;
+    let source = crate::source::JarSource::open(jar)?;
     source
         .read_entry(&entry)?
         .ok_or_else(|| VmError::Native(format!("jar has no entry {entry}")))

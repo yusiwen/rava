@@ -307,9 +307,19 @@ impl JarSource {
             path: path.clone(),
             source,
         })?;
+        Self::from_bytes(path, bytes)
+    }
+
+    /// Index a jar from bytes already in memory.
+    ///
+    /// `path` is a diagnostic label, not a file that is read. A nested jar has no
+    /// standalone file, so [`crate::boot::BootJarSource`] passes its `BOOT-INF/lib` entry
+    /// name and builds the nested external URL itself; `open` is the file-backed wrapper
+    /// around this constructor.
+    pub fn from_bytes(path: impl Into<PathBuf>, bytes: Vec<u8>) -> Result<Self, VmError> {
         let entries = central_directory(&bytes)?;
         Ok(Self {
-            path,
+            path: path.into(),
             bytes: Arc::new(bytes),
             entries,
         })
@@ -440,7 +450,7 @@ impl ClassSource for JarSource {
 }
 
 /// An absolute path, canonical when the filesystem can provide it.
-fn absolute_path(path: &Path) -> PathBuf {
+pub(crate) fn absolute_path(path: &Path) -> PathBuf {
     std::fs::canonicalize(path)
         .or_else(|_| std::path::absolute(path))
         .unwrap_or_else(|_| path.to_path_buf())
@@ -459,7 +469,7 @@ fn file_url(path: &Path) -> String {
 /// Only spaces are required for the M4.1 fixtures, but `%`, `#` and `?` would change the
 /// meaning of the URL and non-ASCII bytes are not valid in an external form, so all four
 /// classes are escaped. `/` and ordinary punctuation stay literal.
-fn percent_encode_path(text: &str) -> String {
+pub(crate) fn percent_encode_path(text: &str) -> String {
     let mut encoded = String::with_capacity(text.len());
     for byte in text.bytes() {
         match byte {
@@ -548,6 +558,104 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    /// Build a zip whose entries are stored or DEFLATE-compressed, according to `deflate`.
+    /// `JarSource` validates the structure and sizes, not the checksum, so a zero CRC is
+    /// fine.
+    fn zip(entries: &[(&str, &[u8], bool)]) -> Vec<u8> {
+        use std::io::Write;
+
+        use flate2::Compression;
+        use flate2::write::DeflateEncoder;
+
+        let mut out = Vec::new();
+        let mut directory = Vec::new();
+        for (name, data, deflate) in entries {
+            let payload = if *deflate {
+                let mut encoder = DeflateEncoder::new(Vec::new(), Compression::default());
+                encoder.write_all(data).unwrap();
+                encoder.finish().unwrap()
+            } else {
+                data.to_vec()
+            };
+            let method = if *deflate { 8u16 } else { 0u16 };
+            let offset = out.len() as u32;
+            let compressed_size = payload.len() as u32;
+            let uncompressed_size = data.len() as u32;
+            let name_len = name.len() as u16;
+
+            out.extend_from_slice(&0x0403_4B50u32.to_le_bytes());
+            out.extend_from_slice(&20u16.to_le_bytes());
+            out.extend_from_slice(&0u16.to_le_bytes());
+            out.extend_from_slice(&method.to_le_bytes());
+            out.extend_from_slice(&0u16.to_le_bytes());
+            out.extend_from_slice(&0u16.to_le_bytes());
+            out.extend_from_slice(&0u32.to_le_bytes());
+            out.extend_from_slice(&compressed_size.to_le_bytes());
+            out.extend_from_slice(&uncompressed_size.to_le_bytes());
+            out.extend_from_slice(&name_len.to_le_bytes());
+            out.extend_from_slice(&0u16.to_le_bytes());
+            out.extend_from_slice(name.as_bytes());
+            out.extend_from_slice(&payload);
+
+            directory.extend_from_slice(&0x0201_4B50u32.to_le_bytes());
+            directory.extend_from_slice(&20u16.to_le_bytes());
+            directory.extend_from_slice(&20u16.to_le_bytes());
+            directory.extend_from_slice(&0u16.to_le_bytes());
+            directory.extend_from_slice(&method.to_le_bytes());
+            directory.extend_from_slice(&0u16.to_le_bytes());
+            directory.extend_from_slice(&0u16.to_le_bytes());
+            directory.extend_from_slice(&0u32.to_le_bytes());
+            directory.extend_from_slice(&compressed_size.to_le_bytes());
+            directory.extend_from_slice(&uncompressed_size.to_le_bytes());
+            directory.extend_from_slice(&name_len.to_le_bytes());
+            directory.extend_from_slice(&0u16.to_le_bytes());
+            directory.extend_from_slice(&0u16.to_le_bytes());
+            directory.extend_from_slice(&0u16.to_le_bytes());
+            directory.extend_from_slice(&0u16.to_le_bytes());
+            directory.extend_from_slice(&0u32.to_le_bytes());
+            directory.extend_from_slice(&offset.to_le_bytes());
+            directory.extend_from_slice(name.as_bytes());
+        }
+
+        let directory_offset = out.len() as u32;
+        out.extend_from_slice(&directory);
+        out.extend_from_slice(&0x0605_4B50u32.to_le_bytes());
+        out.extend_from_slice(&0u16.to_le_bytes());
+        out.extend_from_slice(&0u16.to_le_bytes());
+        out.extend_from_slice(&(entries.len() as u16).to_le_bytes());
+        out.extend_from_slice(&(entries.len() as u16).to_le_bytes());
+        out.extend_from_slice(&(directory.len() as u32).to_le_bytes());
+        out.extend_from_slice(&directory_offset.to_le_bytes());
+        out.extend_from_slice(&0u16.to_le_bytes());
+        out
+    }
+
+    #[test]
+    fn from_bytes_indexes_stored_and_deflated_entries() {
+        let bytes = zip(&[
+            ("stored.txt", b"stored payload", false),
+            ("deflated.txt", b"deflated payload", true),
+        ]);
+        let source = JarSource::from_bytes("nested.jar", bytes).unwrap();
+
+        assert_eq!(
+            source.read_entry("stored.txt").unwrap().as_deref(),
+            Some(&b"stored payload"[..])
+        );
+        assert_eq!(
+            source.read_entry("deflated.txt").unwrap().as_deref(),
+            Some(&b"deflated payload"[..])
+        );
+        assert_eq!(source.entry_names(), vec!["deflated.txt", "stored.txt"]);
+    }
+
+    #[test]
+    fn from_bytes_rejects_bytes_that_are_not_a_zip() {
+        let error = JarSource::from_bytes("broken.jar", b"not a zip archive".to_vec())
+            .expect_err("the bytes are not a zip");
+        assert!(matches!(error, VmError::Jar(_)));
     }
 
     #[test]

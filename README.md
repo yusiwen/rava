@@ -4,8 +4,8 @@ A Java 17 runtime in Rust, built to run Spring — not just a corpus.
 
 ## Status
 
-**M0, M1, M2 and M3 are complete (2026-11-25); M4 is in progress (M4.1, M4.2 and
-M4.3 landed).** A pinned Spring
+**M0, M1, M2 and M3 are complete (2026-11-25); M4 is in progress (M4.1, M4.2, M4.3
+and M4.4 landed).** A pinned Spring
 `AnnotationConfigApplicationContext` starts on rava, returns its `hello` bean and exits
 0; the C2 gate additionally runs Proxy, CGLIB, Objenesis, Spring AOP and an
 `Unsafe` U0-only call log. The [project ledger](PROJECT.md) owns the per-slice record,
@@ -26,7 +26,7 @@ commands and evidence.
 
 Proven today: `compat check` resolves 1,047 classes and 4,851 member records with 0
 unresolved; the C1 metadata diff is 0 across 1,011 referenced classes; the workspace
-passes 537 tests plus `cargo fmt --all --check` and
+passes 552 tests plus `cargo fmt --all --check` and
 `cargo clippy --workspace --all-targets -- -D warnings`; and
 `RAVA_C2_ACCEPTANCE=1 cargo test -p rava-cli --test c2_gate` exits 0 with real Proxy,
 CGLIB, Objenesis, Spring AOP and an `Unsafe` U0-only log. M4.1 adds real `file:` and
@@ -35,8 +35,11 @@ CGLIB, Objenesis, Spring AOP and an `Unsafe` U0-only log. M4.1 adds real `file:`
 `META-INF/services` with lazy provider construction and typed configuration errors
 (`cargo test -p rava-cli --test service_loader`); M4.3 adds executable-jar launch with
 `META-INF/MANIFEST.MF`, `Main-Class`, `Class-Path` and program arguments
-(`cargo test -p rava-cli --test jar_launch`). Nested jars and the non-web Boot gate are
-next. Known gaps are listed in the
+(`cargo test -p rava-cli --test jar_launch`); M4.4 adds Spring Boot's nested-jar layout
+(`BOOT-INF/classes`, `BOOT-INF/lib/*.jar`, nested `jar:` URLs) and launches a Boot jar's
+`Start-Class` (or its ordinary `Main-Class`) over a Boot-aware class source
+(`cargo test -p rava-cli --test nested_jars`). The non-web Boot gate (M4.5) is next.
+Known gaps are listed in the
 [M3 history note](docs/notes/M3.md); the local long/double slot bug (#52) is fixed, and
 `Class.getFields` (#53) is implemented against the observed C1 tree, whose 69/35/44
 closure boundary is documented in the
@@ -115,11 +118,24 @@ and colon-separated. The launcher also accepts an executable jar, reading its
 cargo run -p rava-cli -- -jar crates/cli/tests/fixtures/jar_launch/app.jar
 ```
 
+A Spring Boot executable jar uses the same command:
+
+```sh
+cargo run -p rava-cli -- -jar crates/cli/tests/fixtures/nested_jars/fat.jar
+```
+
+The launcher detects the `BOOT-INF/classes`/`BOOT-INF/lib` layout and runs the manifest's
+`Start-Class` directly over a Boot-aware class source. The pinned jars carry no Boot loader
+classes, so this is a documented launcher substitution, not a run of Boot's `JarLauncher`
+or a `URLClassLoader`. A Boot layout's manifest `Class-Path` is ignored; see
+[the class-loading explanation](docs/explanation/class-loading-and-libraries.md#5d-spring-boot-nested-jars-m44).
+
 The runner's tests need no JDK:
 
 ```sh
 cargo test -p rava-cli --test classpath_run
 cargo test -p rava-cli --test jar_launch
+cargo test -p rava-cli --test nested_jars
 ```
 
 The pinned target and jar set are checked with:

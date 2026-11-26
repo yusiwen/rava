@@ -19,7 +19,7 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use rava_interp::run_static_method;
-use rava_vm::{ClassPathSource, ClassRef, LoaderId, Shared, Value, VmError, library};
+use rava_vm::{ClassPathSource, ClassRef, ClassSource, LoaderId, Shared, Value, VmError, library};
 
 /// The Java entry-point descriptor.
 const MAIN_DESCRIPTOR: &str = "([Ljava/lang/String;)V";
@@ -68,20 +68,24 @@ pub fn command(args: &[String]) -> ExitCode {
 fn execute(options: &Options) -> Result<(), String> {
     let classpath = ClassPathSource::from_paths(options.classpath.iter().cloned())
         .map_err(|error| format!("cannot build the classpath: {error}"))?;
-    execute_with(options, classpath)
+    execute_with(options, Arc::new(classpath))
 }
 
-/// Run `main` from an already-built classpath.
+/// Run `main` from an already-built class source.
 ///
-/// `rava run` builds its source from [`Options::classpath`]; `rava -jar` builds one from
-/// the executable jar and the manifest's `Class-Path` entries. Everything after the
-/// source — the one application loader, native registration, argument allocation and the
-/// `main([Ljava/lang/String;)V` call — is shared here, so the two commands cannot drift.
-/// The `classpath` field of `options` is not read by this function.
-pub(crate) fn execute_with(options: &Options, classpath: ClassPathSource) -> Result<(), String> {
+/// `rava run` builds a [`ClassPathSource`] from [`Options::classpath`]; `rava -jar` builds
+/// either a classpath (flat jar) or a [`rava_vm::BootJarSource`] (Spring Boot nested
+/// layout). Everything after the source — the one application loader, native
+/// registration, argument allocation and the `main([Ljava/lang/String;)V` call — is
+/// shared here, so the commands cannot drift. The `classpath` field of `options` is not
+/// read by this function.
+pub(crate) fn execute_with(
+    options: &Options,
+    classpath: Arc<dyn ClassSource>,
+) -> Result<(), String> {
     let shared = Shared::with_library_dir(&options.stdlib);
     let loader = shared
-        .add_loader(LoaderId::BOOTSTRAP, Arc::new(classpath))
+        .add_loader(LoaderId::BOOTSTRAP, classpath)
         .map_err(|error| format!("cannot create the application loader: {error}"))?;
     library::register_all(&shared)
         .map_err(|error| format!("cannot register the class library: {error}"))?;
@@ -104,7 +108,11 @@ pub(crate) fn execute_with(options: &Options, classpath: ClassPathSource) -> Res
     // the snapshot iterator entries and delegate to them for ordinary iterators.
     rava_interp::service_loader::register_natives(&shared);
 
-    let main_class = match shared.load_class(loader, &options.main_class) {
+    // A launcher argument (and a manifest `Main-Class`/`Start-Class`) uses the binary
+    // dotted form; the class table's identity is the internal `a/b/C` form every other
+    // loader path uses. Normalize the lookup, but keep the user-facing spelling in errors.
+    let lookup = options.main_class.replace('.', "/");
+    let main_class = match shared.load_class(loader, &lookup) {
         Ok(class) => class,
         Err(VmError::ClassNotFound { .. }) => {
             return Err(format!(

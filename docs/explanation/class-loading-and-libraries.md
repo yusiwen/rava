@@ -50,8 +50,9 @@ Three implementations exist:
 | Source | Behavior |
 | :--- | :--- |
 | `DirectorySource` | Reads `<root>/<binary/name>.class`; a missing file is `None`, other I/O errors are `VmError::Io`. Resources use a `file:/<absolute-path>` URL and `resource_names` walks files under the prefix. |
-| `JarSource` | Reads the zip central directory once; stored and DEFLATE entries are supported; Zip64 is rejected; `read` converts the binary name to `<name>.class`. Resources use `jar:file:/<absolute-jar>!/<entry>`; `entry_names`/`class_entry_names`/`read_entry` are the scanner-facing views used by the manifest tool. |
+| `JarSource` | Reads the zip central directory once; stored and DEFLATE entries are supported; Zip64 is rejected; `read` converts the binary name to `<name>.class`. `from_bytes` indexes a jar whose bytes are already in memory (used for a Boot nested jar); `open` reads the file and delegates to it. Resources use `jar:file:/<absolute-jar>!/<entry>`; `entry_names`/`class_entry_names`/`read_entry` are the scanner-facing views used by the manifest tool. |
 | `ClassPathSource` | An ordered list of directories and jars; the first entry that returns `Some` wins, matching Java classpath order. Resource URLs/names concatenate in that same order, and `read_resources` returns every matching entry in that order rather than only the first. A nonexistent path fails when the source is built, rather than silently changing the search. |
+| `BootJarSource` | A Spring Boot layout: `BOOT-INF/classes/` first and then each `BOOT-INF/lib/*.jar` in lexical entry-name order. Resources and names use the Boot nested external forms; a malformed nested entry is `VmError::BootEntry`. See § 5d. |
 
 The manifest tool scans jars through `JarSource::class_entry_names`, not through the
 runtime loader; the runner uses `ClassPathSource` as an application source.
@@ -218,9 +219,60 @@ The committed `crates/cli/tests/fixtures/jar_launch/` fixture has `app.jar` with
 `lib/helper.jar` with `demo.Helper`. `cargo test -p rava-cli --test jar_launch` asserts
 the exact stdout, ordered program arguments, `--` literal arguments, an explicit and the
 default `--stdlib`, exit 1 for a bad executable jar or `Main-Class`, exit 2 for usage
-errors, and exit 0 when an unusable `Class-Path` entry is skipped. Limits: flat
-executable jars only; no nested `BOOT-INF` jars, Boot launcher or `URLClassLoader`
-(M4.4/later), and only `Main-Class`/`Class-Path` are read.
+errors, and exit 0 when an unusable `Class-Path` entry is skipped. This is the flat
+layout; § 5d adds the Boot nested layout without a Boot loader or `URLClassLoader`, and
+only `Main-Class`/`Class-Path` (plus Boot's `Start-Class`) are read.
+
+## 5d. Spring Boot nested jars (M4.4)
+
+A Boot executable jar is one outer zip: the application classes under
+`BOOT-INF/classes/`, the dependencies as whole jars under `BOOT-INF/lib/`, and a manifest
+whose `Main-Class` is Boot's launcher and whose `Start-Class` is the application entry
+point. `crates/vm/src/boot.rs::BootJarSource` models the source half of that layout:
+
+- [`BootJarSource::is_boot`](../../crates/vm/src/boot.rs) recognises a
+  `BOOT-INF/classes/` or `BOOT-INF/lib/` entry; a jar without one is not a Boot source and
+  stays on the flat path.
+- Each `BOOT-INF/lib/*.jar` entry is read with `JarSource::from_bytes` (a nested jar has no
+  file of its own) and searched in **lexical entry-name order**, so duplicate classes and
+  resources resolve deterministically. A malformed entry is `VmError::BootEntry`, naming
+  the entry.
+- `read`/`read_resource` search the classes root first and then each nested jar;
+  `read_resources` returns every copy in that order; `resource_names` strips
+  `BOOT-INF/classes/` and appends each nested jar's names.
+- `resource_urls` returns Boot's nested external forms:
+  `jar:file:<outer-abs>!/BOOT-INF/classes!/<name>` and
+  `jar:file:<outer-abs>!/BOOT-INF/lib/<lib>.jar!/<name>`, percent-encoded like the M4.1
+  flat forms.
+
+`resources.rs::read_jar_url` keeps a one-`!/` URL as the flat form and resolves a two-`!/`
+URL through `BootJarSource`, so `URL.getPath`/`getFile`/`toString`/`openStream` work on
+both nested forms, including a URL made with `new URL(externalForm)`. `rava -jar` detects
+the layout before building a flat classpath and passes the `BootJarSource` to the same
+`run::execute_with` (now `Arc<dyn ClassSource>`), so the application loader, class
+identity, `String[]` allocation and `main([Ljava/lang/String;)V` call are unchanged.
+
+The launcher substitution is explicit: the pinned jars carry no Boot loader classes, so
+`Main-Class: org.springframework.boot.loader...` is not loaded or run. A Boot layout whose
+`Main-Class` is an ordinary application class runs that class directly; a Boot-launcher
+(or missing) `Main-Class` requires a non-empty `Start-Class` (exit 1 otherwise), and
+`rava -jar` runs that class over `BootJarSource` without claiming Boot's `JarLauncher`
+ran. A Boot layout's manifest `Class-Path` is ignored because Boot's launcher builds its
+classpath from `BOOT-INF`, not from that header; the flat-jar path keeps the M4.3
+`Class-Path` behaviour.
+
+The committed `crates/cli/tests/fixtures/nested_jars/` fixture is a real Boot jar
+(`Main-Class` is `JarLauncher`, `Start-Class` is `demo.NestedMain`) with the helper class,
+`inner.txt` and the `META-INF/services` provider in `BOOT-INF/lib/demo-helper.jar`. Its
+exact stdout shows nested class loading, both resource roots, `getResources` counts, both
+URL forms through `openStream` (plus the `new URL(...)` round trip) and the nested
+`ServiceLoader`; `cargo test -p rava-cli --test nested_jars` also covers a Boot launcher
+without `Start-Class` (exit 1), an ordinary `Main-Class` in a Boot layout running without
+`Start-Class`, a malformed nested jar (the error names the entry), an ignored Boot
+`Class-Path` and a flat jar still taking the flat path. Limits: no Boot loader classes or
+`URLClassLoader`, no `loader.path`/exec, no nested-jar `Class-Path`, lexical (not
+central-directory) nested-jar order, and eager in-memory indexing of every nested jar
+(no lazy or streaming access).
 
 ## 6. Native dispatch: registry before `Code`
 
@@ -269,11 +321,13 @@ native fallback instead. This is a deliberate C1/M2 boundary, not a JDK-equivale
 
 ## 8. What the runtime does not do yet
 
-- Resources are `file:` and `jar:file:...!/entry` only. There is no network transport,
-  no URLConnection headers/content type/dates, no nested jars (M4.4), no custom
+- Resources are `file:`, flat `jar:file:...!/entry` and Boot's two nested forms. There is
+  no network transport, no URLConnection headers/content type/dates, no custom
   `URLStreamHandler`, and no charset table (`URLDecoder` decodes UTF-8).
-- No module layer, multi-release selection, nested jars, wildcard/remote classpath or
-  class unloading.
+- No module layer, multi-release selection, wildcard/remote classpath or class unloading.
+  Boot nested jars are read as a `ClassSource`, but there are no Boot loader classes, no
+  `URLClassLoader`, no `loader.path`/exec and no nested-jar `Class-Path`; `rava run --cp`
+  still treats a jar as flat.
 - `ServiceLoader` reads `META-INF/services` only: one provider name per line, no
   `loadInstalled`/module layer, no `Provider`/`stream`/`findFirst`, and a configuration
   failure is a typed VM error rather than a `ServiceConfigurationError` object.
@@ -293,17 +347,19 @@ $ cargo test -p rava-vm --test c1_runtime           # C1 tree as bootstrap, meta
 $ cargo test -p rava-cli --test classpath_run       # directory/jar/order/missing main
 $ cargo test -p rava-cli --test resources          # classpath resources, URLs and streams
 $ cargo test -p rava-cli --test service_loader     # META-INF/services and lazy providers
+$ cargo test -p rava-cli --test nested_jars         # Boot nested jars, URLs, Start-Class
 $ cargo run -p rava-cli -- compat check             # manifest + synthetic link tree
 $ RAVA_SPRING_ACCEPTANCE=1 cargo test -p rava-cli --test spring_context
 ```
 
-The first five are regular workspace tests; `compat check` needs the fetched jars and
+The first six are regular workspace tests; `compat check` needs the fetched jars and
 the Spring test is opt-in for the same reason. The compatibility-level interpretation is
 in [`compatibility-gates.md`](compatibility-gates.md).
 
 ## Owners
 
 - [`crates/vm/src/source.rs`](../../crates/vm/src/source.rs) — sources/classpath.
+- [`crates/vm/src/boot.rs`](../../crates/vm/src/boot.rs) — Spring Boot nested-jar source and URLs.
 - [`crates/vm/src/loader.rs`](../../crates/vm/src/loader.rs) — identity, table, delegation.
 - [`crates/vm/src/shared.rs`](../../crates/vm/src/shared.rs) — locks, caches, roots, registry entry points.
 - [`crates/vm/src/services.rs`](../../crates/vm/src/services.rs) — `ServiceLoader` side-table state.
