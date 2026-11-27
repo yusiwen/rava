@@ -3,7 +3,9 @@
 //! The runtime class is [`crate::HeapObject::MessageFormat`], a dedicated heap shape that
 //! holds the pattern text; the C1 stub declares no instance field for it and this slice
 //! does not invent one. The `Locale`-taking `String.format` uses the locale's decimal
-//! separator for `%f`/`%e`; other locale-sensitive conversions stay a typed error. A
+//! separator for `%f`/`%e`; other locale-sensitive conversions stay a typed error.
+//! `PrintStream.printf`/`format` call [`format_stream`], so the stream and
+//! `String.format` share one conversion subset and one decimal-separator rule. A
 //! `MessageFormat` `Locale` is accepted by the two-argument constructor but not
 //! stored, because the supported formatting subset is locale-independent.
 //!
@@ -234,7 +236,7 @@ fn receiver_pattern(
 ///
 /// `null` is the JDK's empty argument list. A reference value must be an `Object[]`-shaped
 /// array; a non-array is the JDK's `ClassCastException`, reported here as a typed error.
-fn argument_array(
+pub(crate) fn argument_array(
     shared: &Shared,
     value: Option<Value>,
     method: &'static str,
@@ -723,6 +725,28 @@ struct FormatFlags {
     zero_pad: bool,
     plus: bool,
     space: bool,
+}
+
+/// Format for a `PrintStream.printf`/`format` call.
+///
+/// The locale supplies the decimal separator (as in `String.format(Locale,…)`); a null or
+/// absent locale uses the host default. The conversion subset is exactly `format_java`'s, so
+/// `PrintStream` and `String.format` cannot disagree.
+pub(crate) fn format_stream(
+    shared: &Shared,
+    thread: &ThreadState,
+    pattern: &str,
+    arguments: &[Value],
+    locale: Option<ObjRef>,
+    method: &'static str,
+) -> Result<String, VmError> {
+    let separator = match locale {
+        Some(locale) if !locale.is_null() => {
+            decimal_separator(&shared.time_state().locale_tag(locale).unwrap_or_default())
+        }
+        _ => decimal_separator(&crate::java_time::host_locale()),
+    };
+    format_java(shared, thread, pattern, arguments, method, separator)
 }
 
 /// Format `pattern` over `arguments` with the `java.util.Formatter` conversion subset.
