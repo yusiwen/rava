@@ -106,6 +106,22 @@ fn print_stream_overloads_match_the_jdk() {
 }
 
 #[test]
+fn print_stream_formatting_and_append_match_the_jdk() {
+    let output = run("demo.PrintFormat");
+    assert!(
+        output.status.success(),
+        "PrintFormat should exit 0, got {:?}\nstderr:\n{}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "42 x\n1.50\n1,50\nabcde\nnull<null>\nbc<range>\nxtrue\n"
+    );
+    assert_eq!(String::from_utf8_lossy(&output.stderr), "7 err\nER\n");
+}
+
+#[test]
 fn print_object_uses_the_identity_fallback() {
     let output = run("demo.PrintObject");
     assert!(output.status.success());

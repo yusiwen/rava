@@ -10,7 +10,9 @@
   frames (the VM records no Java frames);
 - `addSuppressed`/`getSuppressed` round-trip;
 - every `PrintStream` `print`/`println` overload (primitives, `char[]`, an Object with a
-  `toString` override, and the identity fallback) prints the JDK's text on both streams.
+  `toString` override, and the identity fallback) prints the JDK's text on both streams;
+- `PrintStream.printf`/`format` (including the Locale decimal separator) and
+  `append`/`append(CharSequence,int,int)`/`append(char)` match the JDK on both streams.
 
 Committed files:
 

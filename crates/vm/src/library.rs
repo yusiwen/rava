@@ -156,6 +156,63 @@ fn register_print_stream(shared: &Shared) {
     ] {
         shared.register_native(PRINT_STREAM_CLASS, name, descriptor, function);
     }
+    // `printf`/`format` reuse `String.format`'s conversion subset; `append` writes text and
+    // returns the receiver. The `Appendable` descriptors are the bridge methods javac emits
+    // for an interface call site.
+    for (name, descriptor, function) in [
+        (
+            "printf",
+            "(Ljava/lang/String;[Ljava/lang/Object;)Ljava/io/PrintStream;",
+            print_stream_printf as crate::NativeFn,
+        ),
+        (
+            "printf",
+            "(Ljava/util/Locale;Ljava/lang/String;[Ljava/lang/Object;)Ljava/io/PrintStream;",
+            print_stream_printf_locale,
+        ),
+        (
+            "format",
+            "(Ljava/lang/String;[Ljava/lang/Object;)Ljava/io/PrintStream;",
+            print_stream_format,
+        ),
+        (
+            "format",
+            "(Ljava/util/Locale;Ljava/lang/String;[Ljava/lang/Object;)Ljava/io/PrintStream;",
+            print_stream_format_locale,
+        ),
+        (
+            "append",
+            "(C)Ljava/io/PrintStream;",
+            print_stream_append_char,
+        ),
+        (
+            "append",
+            "(C)Ljava/lang/Appendable;",
+            print_stream_append_char,
+        ),
+        (
+            "append",
+            "(Ljava/lang/CharSequence;)Ljava/io/PrintStream;",
+            print_stream_append_chars,
+        ),
+        (
+            "append",
+            "(Ljava/lang/CharSequence;)Ljava/lang/Appendable;",
+            print_stream_append_chars,
+        ),
+        (
+            "append",
+            "(Ljava/lang/CharSequence;II)Ljava/io/PrintStream;",
+            print_stream_append_range,
+        ),
+        (
+            "append",
+            "(Ljava/lang/CharSequence;II)Ljava/lang/Appendable;",
+            print_stream_append_range,
+        ),
+    ] {
+        shared.register_native(PRINT_STREAM_CLASS, name, descriptor, function);
+    }
     // A `PrintStream` over the standard output is a byte sink for logback's console
     // target, which writes its encoded bytes through `write`.
     shared.register_native(PRINT_STREAM_CLASS, "write", "(I)V", print_stream_write);
@@ -649,6 +706,212 @@ fn print_stream_println_object(
         PrintScalar::Object,
         "PrintStream.println",
     )
+}
+
+/// `PrintStream.printf`/`format` without a locale.
+fn print_stream_printf(
+    shared: &Shared,
+    thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    print_stream_format_call(
+        shared,
+        thread,
+        receiver,
+        args,
+        0,
+        1,
+        None,
+        "PrintStream.printf",
+    )
+}
+
+/// `PrintStream.printf(Locale, String, Object...)`.
+fn print_stream_printf_locale(
+    shared: &Shared,
+    thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    print_stream_format_call(
+        shared,
+        thread,
+        receiver,
+        args,
+        1,
+        2,
+        Some(0),
+        "PrintStream.printf",
+    )
+}
+
+/// `PrintStream.format(String, Object...)`.
+fn print_stream_format(
+    shared: &Shared,
+    thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    print_stream_format_call(
+        shared,
+        thread,
+        receiver,
+        args,
+        0,
+        1,
+        None,
+        "PrintStream.format",
+    )
+}
+
+/// `PrintStream.format(Locale, String, Object...)`.
+fn print_stream_format_locale(
+    shared: &Shared,
+    thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    print_stream_format_call(
+        shared,
+        thread,
+        receiver,
+        args,
+        1,
+        2,
+        Some(0),
+        "PrintStream.format",
+    )
+}
+
+/// Format one `PrintStream.printf`/`format` call and write the text.
+// The argument positions and the method name are the two call-site shapes; grouping them
+// would only move the fields, as the same allowance in `rava-interp` records.
+#[allow(clippy::too_many_arguments)]
+fn print_stream_format_call(
+    shared: &Shared,
+    thread: &ThreadState,
+    receiver: ObjRef,
+    args: &[Value],
+    pattern_index: usize,
+    arguments_index: usize,
+    locale_index: Option<usize>,
+    method: &'static str,
+) -> Result<Option<Value>, VmError> {
+    require_receiver(receiver, method)?;
+    let pattern = match args.get(pattern_index).copied() {
+        Some(Value::Ref(reference)) if !reference.is_null() => {
+            let heap = shared.heap();
+            heap.string(reference)
+                .map_err(|error| VmError::Native(format!("{method}: {error}")))?
+                .to_owned()
+        }
+        _ => {
+            return Err(VmError::Native(format!(
+                "{method} expects a non-null format string"
+            )));
+        }
+    };
+    let arguments = format::argument_array(shared, args.get(arguments_index).copied(), method)?;
+    let locale = locale_index.and_then(|index| match args.get(index).copied() {
+        Some(Value::Ref(reference)) if !reference.is_null() => Some(reference),
+        _ => None,
+    });
+    let text = format::format_stream(shared, thread, &pattern, &arguments, locale, method)?;
+    shared.write_output(receiver, text.as_bytes());
+    Ok(Some(Value::Ref(receiver)))
+}
+
+/// `PrintStream.append(char)` and its `Appendable` bridge.
+fn print_stream_append_char(
+    shared: &Shared,
+    _thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    require_receiver(receiver, "PrintStream.append")?;
+    let character = match args.first().copied() {
+        Some(Value::Int(code)) => char::from_u32(u32::from(code as u16)).unwrap_or('\u{FFFD}'),
+        _ => {
+            return Err(VmError::Native(
+                "PrintStream.append expects a char".to_owned(),
+            ));
+        }
+    };
+    shared.write_output(receiver, character.to_string().as_bytes());
+    Ok(Some(Value::Ref(receiver)))
+}
+
+/// `PrintStream.append(CharSequence)` and its `Appendable` bridge.
+fn print_stream_append_chars(
+    shared: &Shared,
+    thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    require_receiver(receiver, "PrintStream.append")?;
+    let text = char_sequence_text(shared, thread, args.first().copied(), "PrintStream.append")?;
+    shared.write_output(receiver, text.as_bytes());
+    Ok(Some(Value::Ref(receiver)))
+}
+
+/// `PrintStream.append(CharSequence, int, int)` and its `Appendable` bridge.
+fn print_stream_append_range(
+    shared: &Shared,
+    thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    require_receiver(receiver, "PrintStream.append")?;
+    let start = match args.get(1).copied() {
+        Some(Value::Int(value)) => value,
+        _ => {
+            return Err(VmError::Native(
+                "PrintStream.append expects an int start".to_owned(),
+            ));
+        }
+    };
+    let end = match args.get(2).copied() {
+        Some(Value::Int(value)) => value,
+        _ => {
+            return Err(VmError::Native(
+                "PrintStream.append expects an int end".to_owned(),
+            ));
+        }
+    };
+    let text = char_sequence_text(shared, thread, args.first().copied(), "PrintStream.append")?;
+    let units: Vec<u16> = text.encode_utf16().collect();
+    if start < 0 || end < 0 || start > end || end as usize > units.len() {
+        return Err(VmError::Native(format!(
+            "PrintStream.append: range {start}..{end} is outside a {}-unit CharSequence",
+            units.len()
+        )));
+    }
+    let text = String::from_utf16_lossy(&units[start as usize..end as usize]);
+    shared.write_output(receiver, text.as_bytes());
+    Ok(Some(Value::Ref(receiver)))
+}
+
+/// The text of a `CharSequence` argument; null is the JDK's `"null"`.
+fn char_sequence_text(
+    shared: &Shared,
+    thread: &ThreadState,
+    value: Option<Value>,
+    method: &'static str,
+) -> Result<String, VmError> {
+    match value {
+        Some(Value::Ref(reference)) => string::object_text(shared, thread, reference, method),
+        _ => Err(VmError::Native(format!(
+            "{method} expects a CharSequence argument"
+        ))),
+    }
 }
 
 fn print_stream_flush(
