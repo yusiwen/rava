@@ -74,14 +74,22 @@ probe's Java `equals`, via the interpreter-side overrides in
 `containsKey`, `containsValue`, `put`, `putIfAbsent`, `computeIfAbsent`, `getOrDefault`,
 `remove`) follow the same rule, and a `put` with an equal key keeps the stored key and
 replaces the value. `IdentityHashMap` keeps reference identity, including a `Map`-typed
-call: the override checks the receiver's runtime class. `TreeSet`/`TreeMap` stay
-insertion-ordered and compare with `equals`, not a comparator.
+call: the override checks the receiver's runtime class.
+
+`TreeSet`/`TreeMap` are sorted containers in the interpreter's `sorted_collections`
+overrides: each object's comparator (or natural `Comparable` ordering when absent) stores in
+a side table, `add`/`put` insert at the comparator position, and membership uses
+`compare == 0`. `TreeSet(Collection)`/`TreeMap(Map)` copy with natural ordering;
+`TreeSet(SortedSet)`/`TreeMap(SortedMap)` inherit the source comparator. The map copy
+constructors `HashMap(Map)`, `LinkedHashMap(Map)` and `Hashtable(Map)` copy with Java
+`equals` and keep the first key object and last value.
 
 The `rava-vm` natives underneath still use the older rule — strings by content, boxed
 primitives by per-kind value, everything else by identity — and the runner installs the
-overrides after them, so a VM-only test sees the VM layer. Map copy constructors still
-copy with the VM rule; the set copy constructors and the bulk operations are covered by
-the overrides above.
+overrides after them, so a VM-only test sees the VM layer. The tree range/navigation views
+(`subSet`, `headSet`, `tailSet`, `descendingSet`, `floor`/`ceiling`/`higher`/`lower`) and
+`TreeMap` navigation are not implemented; `TreeSet`/`TreeMap.toString` still prints the
+structural identity shape.
 
 ## 5. Text formatting
 

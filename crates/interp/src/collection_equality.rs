@@ -21,7 +21,9 @@
 //! keeps the stored key object when an equal key arrives, and `IdentityHashMap` is the
 //! exception (reference identity, including a `Map`-typed call, which checks the receiver's
 //! runtime class). The set copy constructors and the `Collection` bulk operations use the
-//! same Java-`equals` rule; map copy constructors still copy with the `rava-vm` rule.
+//! same Java-`equals` rule. Sorted collections and the map copy constructors live in
+//! [`crate::sorted_collections`] because their comparator/ordering work also re-enters the
+//! interpreter.
 
 use rava_vm::collections::{
     ARRAY_DEQUE_CLASS, ARRAY_LIST_CLASS, CONCURRENT_LINKED_DEQUE_CLASS,
@@ -35,6 +37,7 @@ use rava_vm::maps::{
 };
 use rava_vm::{HeapObject, LoaderId, ObjRef, Shared, ThreadState, Value, VmError};
 
+use crate::sorted_collections;
 use crate::{InterpError, resolve_virtual, run_instance_method, runtime_class};
 
 /// The list classes and interfaces whose element search calls Java `equals`.
@@ -265,8 +268,8 @@ fn map_uses_identity(shared: &Shared, receiver: ObjRef) -> Result<bool, VmError>
     Ok(name == IDENTITY_HASH_MAP_CLASS)
 }
 
-/// The JDK's key/value comparison for this receiver: Java `equals`, or identity.
-fn map_values_equal(
+/// The JDK's value comparison: Java `equals`, or identity for `IdentityHashMap`.
+fn map_value_equal(
     shared: &Shared,
     thread: &ThreadState,
     identity: bool,
@@ -279,7 +282,26 @@ fn map_values_equal(
     objects_equal(shared, thread, probe, stored).map_err(interp_to_vm)
 }
 
-fn interp_to_vm(error: InterpError) -> VmError {
+/// The JDK's key comparison: `TreeMap` compares with its comparator/natural order;
+/// every other map uses `equals` (or identity for `IdentityHashMap`).
+fn map_key_equal(
+    shared: &Shared,
+    thread: &ThreadState,
+    receiver: ObjRef,
+    identity: bool,
+    probe: Value,
+    stored: Value,
+) -> Result<bool, VmError> {
+    if sorted_collections::is_tree_map(shared, receiver) {
+        return Ok(
+            sorted_collections::compare_for(shared, thread, receiver, probe, stored)?
+                == std::cmp::Ordering::Equal,
+        );
+    }
+    map_value_equal(shared, thread, identity, probe, stored)
+}
+
+pub(crate) fn interp_to_vm(error: InterpError) -> VmError {
     match error {
         InterpError::Vm(error) => error,
         InterpError::Thrown(throwable) => VmError::Thrown(throwable),
@@ -291,12 +313,13 @@ fn interp_to_vm(error: InterpError) -> VmError {
 fn map_position(
     shared: &Shared,
     thread: &ThreadState,
+    receiver: ObjRef,
     identity: bool,
     entries: &[(Value, Value)],
     probe: Value,
 ) -> Result<Option<usize>, VmError> {
     for (position, (key, _)) in entries.iter().enumerate() {
-        if map_values_equal(shared, thread, identity, probe, *key)? {
+        if map_key_equal(shared, thread, receiver, identity, probe, *key)? {
             return Ok(Some(position));
         }
     }
@@ -346,7 +369,14 @@ fn map_get(
     let key = map_reference_argument(args, 0, "Map.get")?;
     let entries = map_entries(shared, receiver, "Map.get")?;
     let identity = map_uses_identity(shared, receiver)?;
-    match map_position(shared, thread, identity, &entries, Value::Ref(key))? {
+    match map_position(
+        shared,
+        thread,
+        receiver,
+        identity,
+        &entries,
+        Value::Ref(key),
+    )? {
         Some(position) => {
             let value = entries[position].1;
             touch_map_entry(shared, receiver, position)?;
@@ -366,7 +396,15 @@ fn map_contains_key(
     let key = map_reference_argument(args, 0, "Map.containsKey")?;
     let entries = map_entries(shared, receiver, "Map.containsKey")?;
     let identity = map_uses_identity(shared, receiver)?;
-    let found = map_position(shared, thread, identity, &entries, Value::Ref(key))?.is_some();
+    let found = map_position(
+        shared,
+        thread,
+        receiver,
+        identity,
+        &entries,
+        Value::Ref(key),
+    )?
+    .is_some();
     Ok(Some(Value::Int(i32::from(found))))
 }
 
@@ -381,7 +419,7 @@ fn map_contains_value(
     let entries = map_entries(shared, receiver, "Map.containsValue")?;
     let identity = map_uses_identity(shared, receiver)?;
     for (_, stored) in &entries {
-        if map_values_equal(shared, thread, identity, Value::Ref(value), *stored)? {
+        if map_value_equal(shared, thread, identity, Value::Ref(value), *stored)? {
             return Ok(Some(Value::Int(1)));
         }
     }
@@ -399,7 +437,25 @@ fn map_put(
     let value = map_reference_argument(args, 1, "Map.put")?;
     let entries = map_entries(shared, receiver, "Map.put")?;
     let identity = map_uses_identity(shared, receiver)?;
-    let position = map_position(shared, thread, identity, &entries, Value::Ref(key))?;
+    let position = map_position(
+        shared,
+        thread,
+        receiver,
+        identity,
+        &entries,
+        Value::Ref(key),
+    )?;
+    let insert_at = if position.is_none() && sorted_collections::is_tree_map(shared, receiver) {
+        Some(sorted_collections::map_insert_position(
+            shared,
+            thread,
+            receiver,
+            &entries,
+            Value::Ref(key),
+        )?)
+    } else {
+        None
+    };
     let previous = {
         let mut heap = shared.heap();
         let entries = heap
@@ -408,7 +464,10 @@ fn map_put(
         match position {
             Some(position) => std::mem::replace(&mut entries[position].1, Value::Ref(value)),
             None => {
-                entries.push((Value::Ref(key), Value::Ref(value)));
+                match insert_at {
+                    Some(index) => entries.insert(index, (Value::Ref(key), Value::Ref(value))),
+                    None => entries.push((Value::Ref(key), Value::Ref(value))),
+                }
                 Value::Ref(ObjRef::NULL)
             }
         }
@@ -431,7 +490,25 @@ fn map_put_if_absent(
     let value = map_reference_argument(args, 1, "Map.putIfAbsent")?;
     let entries = map_entries(shared, receiver, "Map.putIfAbsent")?;
     let identity = map_uses_identity(shared, receiver)?;
-    let position = map_position(shared, thread, identity, &entries, Value::Ref(key))?;
+    let position = map_position(
+        shared,
+        thread,
+        receiver,
+        identity,
+        &entries,
+        Value::Ref(key),
+    )?;
+    let insert_at = if position.is_none() && sorted_collections::is_tree_map(shared, receiver) {
+        Some(sorted_collections::map_insert_position(
+            shared,
+            thread,
+            receiver,
+            &entries,
+            Value::Ref(key),
+        )?)
+    } else {
+        None
+    };
     match position {
         Some(position) => {
             let existing = entries[position].1;
@@ -451,11 +528,14 @@ fn map_put_if_absent(
             Ok(Some(Value::Ref(ObjRef::NULL)))
         }
         None => {
-            shared
-                .heap()
+            let mut heap = shared.heap();
+            let entries = heap
                 .map_mut(receiver)
-                .map_err(|error| VmError::Native(error.to_string()))?
-                .push((Value::Ref(key), Value::Ref(value)));
+                .map_err(|error| VmError::Native(error.to_string()))?;
+            match insert_at {
+                Some(index) => entries.insert(index, (Value::Ref(key), Value::Ref(value))),
+                None => entries.push((Value::Ref(key), Value::Ref(value))),
+            }
             Ok(Some(Value::Ref(ObjRef::NULL)))
         }
     }
@@ -472,7 +552,14 @@ fn map_get_or_default(
     let fallback = map_reference_argument(args, 1, "Map.getOrDefault")?;
     let entries = map_entries(shared, receiver, "Map.getOrDefault")?;
     let identity = map_uses_identity(shared, receiver)?;
-    match map_position(shared, thread, identity, &entries, Value::Ref(key))? {
+    match map_position(
+        shared,
+        thread,
+        receiver,
+        identity,
+        &entries,
+        Value::Ref(key),
+    )? {
         Some(position) => {
             let value = entries[position].1;
             touch_map_entry(shared, receiver, position)?;
@@ -493,7 +580,25 @@ fn map_compute_if_absent(
     let function = map_reference_argument(args, 1, "Map.computeIfAbsent")?;
     let entries = map_entries(shared, receiver, "Map.computeIfAbsent")?;
     let identity = map_uses_identity(shared, receiver)?;
-    let position = map_position(shared, thread, identity, &entries, Value::Ref(key))?;
+    let position = map_position(
+        shared,
+        thread,
+        receiver,
+        identity,
+        &entries,
+        Value::Ref(key),
+    )?;
+    let insert_at = if position.is_none() && sorted_collections::is_tree_map(shared, receiver) {
+        Some(sorted_collections::map_insert_position(
+            shared,
+            thread,
+            receiver,
+            &entries,
+            Value::Ref(key),
+        )?)
+    } else {
+        None
+    };
     if let Some(position) = position {
         let existing = entries[position].1;
         if existing != Value::Ref(ObjRef::NULL) {
@@ -516,7 +621,10 @@ fn map_compute_if_absent(
         .map_err(|error| VmError::Native(error.to_string()))?;
     match position {
         Some(position) => entries[position].1 = value,
-        None => entries.push((Value::Ref(key), value)),
+        None => match insert_at {
+            Some(index) => entries.insert(index, (Value::Ref(key), value)),
+            None => entries.push((Value::Ref(key), value)),
+        },
     }
     Ok(Some(value))
 }
@@ -576,7 +684,15 @@ fn map_remove(
     let key = map_reference_argument(args, 0, "Map.remove")?;
     let entries = map_entries(shared, receiver, "Map.remove")?;
     let identity = map_uses_identity(shared, receiver)?;
-    let Some(position) = map_position(shared, thread, identity, &entries, Value::Ref(key))? else {
+    let Some(position) = map_position(
+        shared,
+        thread,
+        receiver,
+        identity,
+        &entries,
+        Value::Ref(key),
+    )?
+    else {
         return Ok(Some(Value::Ref(ObjRef::NULL)));
     };
     let removed = shared
@@ -598,10 +714,18 @@ fn map_remove_pair(
     let value = map_reference_argument(args, 1, "Map.remove")?;
     let entries = map_entries(shared, receiver, "Map.remove")?;
     let identity = map_uses_identity(shared, receiver)?;
-    let Some(position) = map_position(shared, thread, identity, &entries, Value::Ref(key))? else {
+    let Some(position) = map_position(
+        shared,
+        thread,
+        receiver,
+        identity,
+        &entries,
+        Value::Ref(key),
+    )?
+    else {
         return Ok(Some(Value::Int(0)));
     };
-    if !map_values_equal(
+    if !map_value_equal(
         shared,
         thread,
         identity,
@@ -631,7 +755,7 @@ fn list_elements(shared: &Shared, receiver: ObjRef, method: &str) -> Result<Vec<
 }
 
 /// Whether two values are equal by the JDK's `Objects.equals` rule.
-fn objects_equal(
+pub(crate) fn objects_equal(
     shared: &Shared,
     thread: &ThreadState,
     probe: Value,
@@ -689,10 +813,23 @@ fn collection_contains(
         }
         Err(error) => return Err(VmError::Native(error.to_string())),
     };
-    let found = match contains(shared, thread, &elements, probe) {
-        Ok(found) => found,
-        Err(InterpError::Thrown(throwable)) => return Err(VmError::Thrown(throwable)),
-        Err(error) => return Err(VmError::Native(error.to_string())),
+    let found = if sorted_collections::is_tree_set(shared, receiver) {
+        let mut found = false;
+        for element in &elements {
+            if sorted_collections::compare_for(shared, thread, receiver, probe, *element)?
+                == std::cmp::Ordering::Equal
+            {
+                found = true;
+                break;
+            }
+        }
+        found
+    } else {
+        match contains(shared, thread, &elements, probe) {
+            Ok(found) => found,
+            Err(InterpError::Thrown(throwable)) => return Err(VmError::Thrown(throwable)),
+            Err(error) => return Err(VmError::Native(error.to_string())),
+        }
     };
     Ok(Some(Value::Int(i32::from(found))))
 }
@@ -716,15 +853,26 @@ fn collection_remove(
         Err(error) => return Err(VmError::Native(error.to_string())),
     };
     let mut position = None;
-    for (index, element) in elements.iter().enumerate() {
-        match objects_equal(shared, thread, probe, *element) {
-            Ok(true) => {
+    if sorted_collections::is_tree_set(shared, receiver) {
+        for (index, element) in elements.iter().enumerate() {
+            if sorted_collections::compare_for(shared, thread, receiver, probe, *element)?
+                == std::cmp::Ordering::Equal
+            {
                 position = Some(index);
                 break;
             }
-            Ok(false) => {}
-            Err(InterpError::Thrown(throwable)) => return Err(VmError::Thrown(throwable)),
-            Err(error) => return Err(VmError::Native(error.to_string())),
+        }
+    } else {
+        for (index, element) in elements.iter().enumerate() {
+            match objects_equal(shared, thread, probe, *element) {
+                Ok(true) => {
+                    position = Some(index);
+                    break;
+                }
+                Ok(false) => {}
+                Err(InterpError::Thrown(throwable)) => return Err(VmError::Thrown(throwable)),
+                Err(error) => return Err(VmError::Native(error.to_string())),
+            }
         }
     }
     let Some(position) = position else {
@@ -915,10 +1063,16 @@ fn collection_add_all(
     let existing = collection_values(shared, receiver, "Collection.addAll")?;
     if is_set {
         let mut merged = existing.clone();
-        for value in incoming {
-            let present = contains(shared, thread, &merged, value).map_err(interp_to_vm)?;
-            if !present {
-                merged.push(value);
+        if sorted_collections::is_tree_set(shared, receiver) {
+            for value in incoming {
+                sorted_collections::set_insert(shared, thread, receiver, &mut merged, value)?;
+            }
+        } else {
+            for value in incoming {
+                let present = contains(shared, thread, &merged, value).map_err(interp_to_vm)?;
+                if !present {
+                    merged.push(value);
+                }
             }
         }
         let changed = merged.len() != existing.len();
@@ -1123,7 +1277,8 @@ fn map_equals(
     // accept the stored value.
     let right_identity = map_uses_identity(shared, other)?;
     for (key, value) in &left {
-        let Some(position) = map_position(shared, thread, right_identity, &right, *key)? else {
+        let Some(position) = map_position(shared, thread, other, right_identity, &right, *key)?
+        else {
             return Ok(Some(Value::Int(0)));
         };
         let other_value = right[position].1;

@@ -3,8 +3,10 @@ package demo;
 import java.beans.PropertyDescriptor;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.Hashtable;
 import java.util.IdentityHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -12,6 +14,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.Spliterator;
+import java.util.TreeMap;
 import java.util.TreeSet;
 import java.util.concurrent.CopyOnWriteArraySet;
 import java.util.function.BiPredicate;
@@ -167,6 +170,160 @@ public final class SurfaceProbe {
         source.clear();
         source.add(new Key(2));
         return contained + ":" + list.removeAll(source);
+    }
+
+    private static String join(java.util.Collection<?> values) {
+        StringBuilder text = new StringBuilder();
+        for (Object value : values) {
+            text.append(value).append(' ');
+        }
+        return text.toString().trim();
+    }
+
+    /** `TreeSet(Comparator)` sorts by the comparator (#104). */
+    public static String treeSetComparatorOrder() {
+        Set<Integer> set = new TreeSet<>(Comparator.reverseOrder());
+        set.add(1);
+        set.add(3);
+        set.add(2);
+        return join(set);
+    }
+
+    /** `TreeSet(Collection)` uses natural ordering (#104). */
+    public static String treeSetNaturalCopy() {
+        List<Integer> source = new ArrayList<>();
+        source.add(3);
+        source.add(1);
+        source.add(2);
+        return join(new TreeSet<>(source));
+    }
+
+    /** `TreeSet.first/last/comparator` (#104). */
+    public static String treeSetFirstLastComparator() {
+        TreeSet<Integer> set = new TreeSet<>(Comparator.reverseOrder());
+        set.add(1);
+        set.add(3);
+        return set.first() + ":" + set.last() + ":" + (set.comparator() != null);
+    }
+
+    /** `TreeSet(SortedSet)` inherits the comparator (#104). */
+    public static String treeSetSortedCopy() {
+        TreeSet<Integer> source = new TreeSet<>(Comparator.reverseOrder());
+        source.add(3);
+        source.add(1);
+        TreeSet<Integer> copy = new TreeSet<>(source);
+        return join(copy) + ":" + (copy.comparator() != null);
+    }
+
+    /** `TreeSet.addAll` inserts in comparator order (#104). */
+    public static String treeSetAddAllComparator() {
+        TreeSet<Integer> set = new TreeSet<>(Comparator.reverseOrder());
+        set.add(1);
+        List<Integer> source = new ArrayList<>();
+        source.add(3);
+        source.add(2);
+        set.addAll(source);
+        return join(set);
+    }
+
+    /** A non-`Comparable` first element is the JDK's `ClassCastException` (#104). */
+    public static String treeSetRejectsNonComparable() {
+        try {
+            new TreeSet<Object>().add(new Object());
+            return "no";
+        } catch (ClassCastException exception) {
+            return "CCE";
+        }
+    }
+
+    /** An empty `first()` is the JDK's `NoSuchElementException` (#104). */
+    public static String treeSetEmptyFirst() {
+        try {
+            new TreeSet<Object>().first();
+            return "no";
+        } catch (java.util.NoSuchElementException exception) {
+            return "NSEE";
+        }
+    }
+
+    /** `TreeMap(Comparator)` sorts its keys (#104). */
+    public static String treeMapComparatorOrder() {
+        Map<Integer, String> map = new TreeMap<>(Comparator.reverseOrder());
+        map.put(1, "a");
+        map.put(3, "c");
+        map.put(2, "b");
+        return join(map.keySet());
+    }
+
+    /** `TreeMap.firstKey/lastKey/comparator` (#104). */
+    public static String treeMapFirstLastComparator() {
+        TreeMap<Integer, String> map = new TreeMap<>(Comparator.reverseOrder());
+        map.put(1, "a");
+        map.put(3, "c");
+        return map.firstKey() + ":" + map.lastKey() + ":" + (map.comparator() != null);
+    }
+
+    /** `TreeMap(Map)` uses natural ordering (#104). */
+    public static String treeMapNaturalCopy() {
+        TreeMap<Integer, String> source = new TreeMap<>();
+        source.put(3, "c");
+        source.put(1, "a");
+        TreeMap<Integer, String> copy = new TreeMap<>(source);
+        return join(copy.keySet());
+    }
+
+    /** `TreeMap(SortedMap)` inherits the comparator (#104). */
+    public static String treeMapInheritsComparator() {
+        TreeMap<Integer, String> source = new TreeMap<>(Comparator.reverseOrder());
+        source.put(3, "c");
+        source.put(1, "a");
+        TreeMap<Integer, String> copy = new TreeMap<>(source);
+        return join(copy.keySet()) + ":" + (copy.comparator() != null);
+    }
+
+    /** `TreeMap.putAll` uses the comparator (#104). */
+    public static String treeMapPutAllComparator() {
+        TreeMap<Integer, String> map = new TreeMap<>(Comparator.reverseOrder());
+        map.put(1, "a");
+        Map<Integer, String> source = new HashMap<>();
+        source.put(2, "b");
+        source.put(3, "c");
+        map.putAll(source);
+        return join(map.keySet());
+    }
+
+    /** A natural-order `TreeMap` rejects a null key (#104). */
+    public static String treeMapNullKey() {
+        try {
+            new TreeMap<String, String>().put(null, "x");
+            return "no";
+        } catch (NullPointerException exception) {
+            return "NPE";
+        }
+    }
+
+    /** `HashMap(Map)` dedupes equal keys with Java `equals` (#104). */
+    public static int hashMapCopyDedupes() {
+        IdentityHashMap<Key, String> source = new IdentityHashMap<>();
+        source.put(new Key(1), "a");
+        source.put(new Key(1), "b");
+        return new HashMap<>(source).size();
+    }
+
+    /** `LinkedHashMap(Map)` dedupes equal keys with Java `equals` (#104). */
+    public static int linkedHashMapCopyDedupes() {
+        IdentityHashMap<Key, String> source = new IdentityHashMap<>();
+        source.put(new Key(1), "a");
+        source.put(new Key(1), "b");
+        return new java.util.LinkedHashMap<>(source).size();
+    }
+
+    /** `Hashtable(Map)` dedupes equal keys with Java `equals` (#104). */
+    public static int hashtableCopyDedupes() {
+        IdentityHashMap<Key, String> source = new IdentityHashMap<>();
+        source.put(new Key(1), "a");
+        source.put(new Key(1), "b");
+        return new Hashtable<>(source).size();
     }
 
     /** `List.contains` calls the element's Java `equals` (collection_equality). */

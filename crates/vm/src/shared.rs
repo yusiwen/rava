@@ -254,6 +254,8 @@ pub struct Shared {
     package_names: Mutex<HashMap<ObjRef, String>>,
     /// Manifest/Attributes attribute maps, keyed by the object that owns them.
     manifest_attributes: Mutex<HashMap<ObjRef, std::collections::BTreeMap<String, String>>>,
+    /// The comparator of a `TreeSet`/`TreeMap` object, when it is not natural ordering.
+    sorted_comparators: Mutex<HashMap<ObjRef, ObjRef>>,
     /// `Throwable.addSuppressed` targets, in declaration order.
     throwable_suppressed: Mutex<HashMap<ObjRef, Vec<ObjRef>>>,
     /// The cause of each throwable a constructor or `initCause` recorded.
@@ -355,6 +357,7 @@ impl Shared {
             throwable_messages: Mutex::new(HashMap::new()),
             package_names: Mutex::new(HashMap::new()),
             manifest_attributes: Mutex::new(HashMap::new()),
+            sorted_comparators: Mutex::new(HashMap::new()),
             throwable_causes: Mutex::new(HashMap::new()),
             throwable_suppressed: Mutex::new(HashMap::new()),
             resources: Mutex::new(crate::resources::ResourceState::default()),
@@ -1864,6 +1867,21 @@ impl Shared {
         }
 
         {
+            // A sorted collection keeps its comparator alive with it.
+            let comparators = self
+                .sorted_comparators
+                .lock()
+                .expect("sorted comparator lock poisoned");
+            for (object, comparator) in comparators.iter() {
+                for reference in [*object, *comparator] {
+                    if !reference.is_null() && seen.insert(reference) {
+                        roots.push(reference);
+                    }
+                }
+            }
+        }
+
+        {
             // A URL, connection or input stream owns Rust text/bytes in the side table;
             // reporting the keys here keeps that attachment a strong owner until M5.
             let resources = self
@@ -2481,6 +2499,36 @@ impl Shared {
             .expect("package name lock poisoned")
             .get(&reference)
             .cloned()
+    }
+
+    /// Record a `TreeSet`/`TreeMap` comparator; a null comparator means natural ordering.
+    pub fn set_sorted_comparator(&self, object: ObjRef, comparator: ObjRef) {
+        let mut comparators = self
+            .sorted_comparators
+            .lock()
+            .expect("sorted comparator lock poisoned");
+        if comparator.is_null() {
+            comparators.remove(&object);
+        } else {
+            comparators.insert(object, comparator);
+        }
+    }
+
+    /// The comparator of a `TreeSet`/`TreeMap`, or `None` for natural ordering.
+    pub fn sorted_comparator(&self, object: ObjRef) -> Option<ObjRef> {
+        self.sorted_comparators
+            .lock()
+            .expect("sorted comparator lock poisoned")
+            .get(&object)
+            .copied()
+    }
+
+    /// Drop the comparator record for an object (construction starts empty).
+    pub fn clear_sorted_comparator(&self, object: ObjRef) {
+        self.sorted_comparators
+            .lock()
+            .expect("sorted comparator lock poisoned")
+            .remove(&object);
     }
 
     /// Record a `Manifest` or `Attributes` object's main attributes.
