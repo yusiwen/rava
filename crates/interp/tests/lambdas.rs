@@ -742,7 +742,7 @@ fn unsupported_bootstrap_owner_is_a_typed_error() {
 }
 
 #[test]
-fn serializable_alt_metafactory_and_missing_arguments_are_typed_errors() {
+fn serializable_alt_metafactory_is_accepted_and_missing_arguments_are_typed_errors() {
     let fixture = fixture();
 
     // `FLAG_SERIALIZABLE` is accepted: the lambda object itself has no `writeReplace`, so

@@ -26,11 +26,12 @@
 //! already match the target parameter descriptor is a typed
 //! [`crate::InterpError::Lambda`].
 //!
-//! `altMetafactory`'s flag word is parsed: `FLAG_SERIALIZABLE` is a typed error because
-//! serializable lambdas are out of scope, while `FLAG_MARKERS` and `FLAG_BRIDGES` are
-//! accepted and skipped because this representation has no marker-interface or bridge
-//! table. `FLAG_SERIALIZABLE`'s `$deserializeLambda$` path, full `MethodHandle`/`VarHandle`
-//! support, call-site caching and access checks are out of scope.
+//! `altMetafactory`'s flag word is parsed: `FLAG_SERIALIZABLE` is accepted but not
+//! represented (the lambda object is not a generated class and has no `writeReplace`, so
+//! serializing it fails in `ObjectOutputStream`), while `FLAG_MARKERS` and `FLAG_BRIDGES`
+//! are accepted and skipped because this representation has no marker-interface or bridge
+//! table. `$deserializeLambda$`, full `MethodHandle`/`VarHandle` support, call-site caching
+//! and access checks are out of scope.
 
 use rava_classfile::{
     BootstrapArgument, BootstrapMethodEntry, BootstrapMethodHandle, ReferenceKind,

@@ -100,7 +100,7 @@ See [`interpreter-execution.md`](../explanation/interpreter-execution.md) §4.
 
 **Boundary.**
 - No argument adaptation: boxing, widening, casts and generic bridges are typed errors.
-- `FLAG_SERIALIZABLE` is rejected; no call-site cache, `SerializedLambda` or access checks.
+- `FLAG_SERIALIZABLE` is accepted but not represented: no generated class or `writeReplace`, so serialization fails; no call-site cache, `SerializedLambda` or access checks.
 
 See [`interpreter-execution.md`](../explanation/interpreter-execution.md) §4.
 
