@@ -40,8 +40,9 @@ the current gates are wired, not the definitions themselves.
 `rava compat check` is the local C0 gate. It runs four stages in order:
 
 1. **Target lock + jars** — parse `compat/targets.toml`, verify the pinned versions,
-   the jar directory and the jar count against `compat/jars.lock`. Per-jar hashes are
-   checked separately by `bash compat/fetch-jars.sh --check`.
+   the jar directory and the jar count against `compat/jars.lock`. Per-jar hashes,
+   including the built reference-app jar, are checked separately by
+   `bash compat/fetch-jars.sh --check`.
 2. **Manifest --check** — regenerate the surface manifest from the 35 pinned jars and
    compare it byte-for-byte with the committed
    `compat/surface/spring-boot-3.5.16.txt`.
@@ -132,9 +133,10 @@ test spring_annotation_context_starts_and_exposes_the_bean ... ok
 The three acceptance commands (the Boot gate, this Spring smoke and the C2 gate) are
 opt-in in a local checkout because they need the fetched `compat/jars/`; `cargo xtask ci`
 stays jar-free and does not claim C2–C4. CI is not a local checkout: the `acceptance` job
-in [`ci.yml`](../../.github/workflows/ci.yml) fetches the pinned set with
-`bash compat/fetch-jars.sh`, recompiles the Boot fixture from its committed source with
-JDK 17, and runs `boot_nonweb`, `spring_context` and `c2_gate` with their `RAVA_*`
+in [`ci.yml`](../../.github/workflows/ci.yml) checks the Java/Maven toolchain, fetches the
+pinned set with `bash compat/fetch-jars.sh`, proves a clean rebuild reproduces the locked
+reference-app jar, recompiles the Boot fixture from its committed source with JDK 17, and
+runs `boot_nonweb`, `spring_context` and `c2_gate` with their `RAVA_*`
 variables, so a missing jar fails the job instead of skipping it. The Spring run proves
 one real `AnnotationConfigApplicationContext` starts, one `@Bean String` is created, and
 the context closes. It does not prove the broader C3 surface or any Boot/web path. The

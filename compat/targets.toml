@@ -17,7 +17,15 @@ version = "0.1.0"
 main_class = "dev.rava.reference.ReferenceApplication"
 # Deterministic sha256 of reference-app/pom.xml and reference-app/src/, printed by
 # `bash compat/source-hash.sh`. fetch-jars.sh refuses to build against another tree.
-source_sha256 = "cb78ed489b27964b765c0f923b73d759fa1248cf0899e1ad8e91d9e5903d3450"
+source_sha256 = "6f6c9d1a99bcd425e3f18f2f1f80b1d21c6459d2efe4b4fffe90b6bbfea82094"
+
+[reference_app.build]
+# The app jar is byte-reproducible across Java 17 and 25 with the parent-pinned jar
+# plugin: entries are stored, timestamps are fixed and the manifest has no build
+# environment entries. Maven 3.10.2 is the verified build tool; compat/toolchain.sh
+# reports the active versions and the lock checksum is the byte gate.
+maven = "3.10.2"
+java = "17 or 25"
 
 [jars]
 directory = "compat/jars"

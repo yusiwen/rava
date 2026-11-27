@@ -34,12 +34,17 @@ jobs:
         with:
           distribution: temurin
           java-version: '17'
+      - name: Check the jar-build toolchain
+        run: bash compat/toolchain.sh
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.100.0
       - name: Fetch the pinned jars
         timeout-minutes: 8
         run: bash compat/fetch-jars.sh
+      - name: Prove the reference-app jar is reproducible
+        timeout-minutes: 5
+        run: bash compat/check-app-reproducible.sh
       - name: Rebuild the Boot fixture from source
         run: |
           mkdir -p "${{ runner.temp }}/boot-fixture"
