@@ -87,6 +87,37 @@ fn print_stack_trace_prints_the_cause_chain_and_suppressed() {
 }
 
 #[test]
+fn print_stream_overloads_match_the_jdk() {
+    let output = run("demo.PrintAll");
+    assert!(
+        output.status.success(),
+        "PrintAll should exit 0, got {:?}\nstderr:\n{}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "42\n9007199254740993\ntrue\nx\n1.5\n1.5\n1.0\nNaN\nInfinity\nab\nBEAN\nA7Z\n"
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr),
+        "42\ntrue\n1.5\nx\nab\nBEAN\n"
+    );
+}
+
+#[test]
+fn print_object_uses_the_identity_fallback() {
+    let output = run("demo.PrintObject");
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.starts_with("java.lang.Object@"),
+        "expected the Object.toString shape, found {stdout:?}"
+    );
+    assert_eq!(stdout.lines().count(), 1);
+}
+
+#[test]
 fn suppressed_exceptions_round_trip_through_get_suppressed() {
     let output = run("demo.Suppressed");
     assert!(output.status.success());

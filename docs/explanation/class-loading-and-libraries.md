@@ -370,7 +370,7 @@ instead of losing a buffer that flushed only when `main` returned.
 The runner additionally registers the interpreter-owned natives (`Method.invoke`/
 `Constructor.newInstance`, callbacks and streams), because those re-enter the interpreter.
 
-The minimal `PrintStream` and the wrapper `TYPE` fields are examples of state that the
+The `PrintStream` instances and the wrapper `TYPE` fields are examples of state that the
 C1 stubs cannot initialize with `<clinit>` code (there is none):
 `register_all` writes `System.out`/`System.err` into the statics table, and the
 interpreter's `getstatic` falls back to `Shared::static_field_value` for the wrapper

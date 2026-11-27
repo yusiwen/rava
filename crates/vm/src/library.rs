@@ -110,7 +110,7 @@ pub fn register_all(shared: &Shared) -> Result<(), VmError> {
     thread_natives::install_thread_states(shared)
 }
 
-/// Register the minimal `java.io.PrintStream` output surface.
+/// Register the `java.io.PrintStream` `print`/`println`/`write` surface.
 fn register_print_stream(shared: &Shared) {
     shared.register_native(
         PRINT_STREAM_CLASS,
@@ -125,6 +125,37 @@ fn register_print_stream(shared: &Shared) {
         "(Ljava/lang/String;)V",
         print_stream_print_string,
     );
+    // `PrintStream`'s primitive, `char[]` and `Object` overloads; the JDK's text is the
+    // `String.valueOf` text, and the `Object` form goes through the interpreter's
+    // `toString` resolver (installed by the runner, #73).
+    for (name, descriptor, function) in [
+        (
+            "print",
+            "(Z)V",
+            print_stream_print_boolean as crate::NativeFn,
+        ),
+        ("print", "(C)V", print_stream_print_char),
+        ("print", "(I)V", print_stream_print_int),
+        ("print", "(J)V", print_stream_print_long),
+        ("print", "(F)V", print_stream_print_float),
+        ("print", "(D)V", print_stream_print_double),
+        ("print", "([C)V", print_stream_print_chars),
+        ("print", "(Ljava/lang/Object;)V", print_stream_print_object),
+        ("println", "(Z)V", print_stream_println_boolean),
+        ("println", "(C)V", print_stream_println_char),
+        ("println", "(I)V", print_stream_println_int),
+        ("println", "(J)V", print_stream_println_long),
+        ("println", "(F)V", print_stream_println_float),
+        ("println", "(D)V", print_stream_println_double),
+        ("println", "([C)V", print_stream_println_chars),
+        (
+            "println",
+            "(Ljava/lang/Object;)V",
+            print_stream_println_object,
+        ),
+    ] {
+        shared.register_native(PRINT_STREAM_CLASS, name, descriptor, function);
+    }
     // A `PrintStream` over the standard output is a byte sink for logback's console
     // target, which writes its encoded bytes through `write`.
     shared.register_native(PRINT_STREAM_CLASS, "write", "(I)V", print_stream_write);
@@ -236,6 +267,388 @@ fn print_stream_write_range(
         .collect();
     shared.write_output(receiver, &bytes);
     Ok(None)
+}
+
+/// One `PrintStream` scalar conversion. The bytecode's descriptor fixes the kind, so the
+/// helper does not have to guess from the value.
+#[derive(Clone, Copy)]
+enum PrintScalar {
+    Boolean,
+    Char,
+    Int,
+    Long,
+    Float,
+    Double,
+    Chars,
+    Object,
+}
+
+/// Write one `print`/`println` value through [`Shared::write_output`], so `System.err`
+/// keeps its routing and the runner's streaming mode is unchanged.
+fn print_stream_scalar(
+    shared: &Shared,
+    thread: &ThreadState,
+    receiver: ObjRef,
+    args: &[Value],
+    newline: bool,
+    scalar: PrintScalar,
+    method: &'static str,
+) -> Result<Option<Value>, VmError> {
+    require_receiver(receiver, method)?;
+    let text = match scalar {
+        PrintScalar::Boolean => match args.first().copied() {
+            Some(Value::Int(value)) => (if value != 0 { "true" } else { "false" }).to_owned(),
+            _ => return Err(VmError::Native(format!("{method} expects a boolean"))),
+        },
+        PrintScalar::Char => match args.first().copied() {
+            Some(Value::Int(value)) => char::from_u32(u32::from(value as u16))
+                .unwrap_or('\u{FFFD}')
+                .to_string(),
+            _ => return Err(VmError::Native(format!("{method} expects a char"))),
+        },
+        PrintScalar::Int => match args.first().copied() {
+            Some(Value::Int(value)) => value.to_string(),
+            _ => return Err(VmError::Native(format!("{method} expects an int"))),
+        },
+        PrintScalar::Long => match args.first().copied() {
+            Some(Value::Long(value)) => value.to_string(),
+            _ => return Err(VmError::Native(format!("{method} expects a long"))),
+        },
+        PrintScalar::Float => match args.first().copied() {
+            Some(Value::Float(value)) => crate::heap::BoxedPrimitive::Float(value).text(),
+            _ => return Err(VmError::Native(format!("{method} expects a float"))),
+        },
+        PrintScalar::Double => match args.first().copied() {
+            Some(Value::Double(value)) => crate::heap::BoxedPrimitive::Double(value).text(),
+            _ => return Err(VmError::Native(format!("{method} expects a double"))),
+        },
+        PrintScalar::Chars => char_array_text(shared, args, method)?,
+        PrintScalar::Object => match args.first().copied() {
+            Some(Value::Ref(reference)) => string::object_text(shared, thread, reference, method)?,
+            _ => {
+                return Err(VmError::Native(format!(
+                    "{method} expects an Object argument"
+                )));
+            }
+        },
+    };
+    let mut text = text;
+    if newline {
+        text.push('\n');
+    }
+    shared.write_output(receiver, text.as_bytes());
+    Ok(None)
+}
+
+/// A `char[]` argument as text. A null array is the JDK's `NullPointerException`.
+fn char_array_text(
+    shared: &Shared,
+    args: &[Value],
+    method: &'static str,
+) -> Result<String, VmError> {
+    let reference = match args.first().copied() {
+        Some(Value::Ref(reference)) if !reference.is_null() => reference,
+        Some(Value::Ref(_)) => {
+            let throwable = crate::exceptions::new_throwable(
+                shared,
+                "java/lang/NullPointerException",
+                format!("{method}: null char[]"),
+            )?;
+            return Err(VmError::Thrown(throwable));
+        }
+        _ => {
+            return Err(VmError::Native(format!(
+                "{method} expects a char[] argument"
+            )));
+        }
+    };
+    let elements = {
+        let heap = shared.heap();
+        heap.array(reference)
+            .map_err(|error| VmError::Native(format!("{method}: {error}")))?
+            .elements
+            .clone()
+    };
+    Ok(elements
+        .iter()
+        .filter_map(|element| match element {
+            Value::Int(code) => char::from_u32(u32::from(*code as u16)),
+            _ => None,
+        })
+        .collect())
+}
+
+fn print_stream_print_boolean(
+    shared: &Shared,
+    thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    print_stream_scalar(
+        shared,
+        thread,
+        receiver,
+        args,
+        false,
+        PrintScalar::Boolean,
+        "PrintStream.print",
+    )
+}
+fn print_stream_print_char(
+    shared: &Shared,
+    thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    print_stream_scalar(
+        shared,
+        thread,
+        receiver,
+        args,
+        false,
+        PrintScalar::Char,
+        "PrintStream.print",
+    )
+}
+fn print_stream_print_int(
+    shared: &Shared,
+    thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    print_stream_scalar(
+        shared,
+        thread,
+        receiver,
+        args,
+        false,
+        PrintScalar::Int,
+        "PrintStream.print",
+    )
+}
+fn print_stream_print_long(
+    shared: &Shared,
+    thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    print_stream_scalar(
+        shared,
+        thread,
+        receiver,
+        args,
+        false,
+        PrintScalar::Long,
+        "PrintStream.print",
+    )
+}
+fn print_stream_print_float(
+    shared: &Shared,
+    thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    print_stream_scalar(
+        shared,
+        thread,
+        receiver,
+        args,
+        false,
+        PrintScalar::Float,
+        "PrintStream.print",
+    )
+}
+fn print_stream_print_double(
+    shared: &Shared,
+    thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    print_stream_scalar(
+        shared,
+        thread,
+        receiver,
+        args,
+        false,
+        PrintScalar::Double,
+        "PrintStream.print",
+    )
+}
+fn print_stream_print_chars(
+    shared: &Shared,
+    thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    print_stream_scalar(
+        shared,
+        thread,
+        receiver,
+        args,
+        false,
+        PrintScalar::Chars,
+        "PrintStream.print",
+    )
+}
+fn print_stream_print_object(
+    shared: &Shared,
+    thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    print_stream_scalar(
+        shared,
+        thread,
+        receiver,
+        args,
+        false,
+        PrintScalar::Object,
+        "PrintStream.print",
+    )
+}
+fn print_stream_println_boolean(
+    shared: &Shared,
+    thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    print_stream_scalar(
+        shared,
+        thread,
+        receiver,
+        args,
+        true,
+        PrintScalar::Boolean,
+        "PrintStream.println",
+    )
+}
+fn print_stream_println_char(
+    shared: &Shared,
+    thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    print_stream_scalar(
+        shared,
+        thread,
+        receiver,
+        args,
+        true,
+        PrintScalar::Char,
+        "PrintStream.println",
+    )
+}
+fn print_stream_println_int(
+    shared: &Shared,
+    thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    print_stream_scalar(
+        shared,
+        thread,
+        receiver,
+        args,
+        true,
+        PrintScalar::Int,
+        "PrintStream.println",
+    )
+}
+fn print_stream_println_long(
+    shared: &Shared,
+    thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    print_stream_scalar(
+        shared,
+        thread,
+        receiver,
+        args,
+        true,
+        PrintScalar::Long,
+        "PrintStream.println",
+    )
+}
+fn print_stream_println_float(
+    shared: &Shared,
+    thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    print_stream_scalar(
+        shared,
+        thread,
+        receiver,
+        args,
+        true,
+        PrintScalar::Float,
+        "PrintStream.println",
+    )
+}
+fn print_stream_println_double(
+    shared: &Shared,
+    thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    print_stream_scalar(
+        shared,
+        thread,
+        receiver,
+        args,
+        true,
+        PrintScalar::Double,
+        "PrintStream.println",
+    )
+}
+fn print_stream_println_chars(
+    shared: &Shared,
+    thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    print_stream_scalar(
+        shared,
+        thread,
+        receiver,
+        args,
+        true,
+        PrintScalar::Chars,
+        "PrintStream.println",
+    )
+}
+fn print_stream_println_object(
+    shared: &Shared,
+    thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    print_stream_scalar(
+        shared,
+        thread,
+        receiver,
+        args,
+        true,
+        PrintScalar::Object,
+        "PrintStream.println",
+    )
 }
 
 fn print_stream_flush(
