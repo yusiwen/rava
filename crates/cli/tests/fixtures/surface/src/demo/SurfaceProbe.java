@@ -6,11 +6,14 @@ import java.util.Arrays;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.IdentityHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.Spliterator;
+import java.util.TreeSet;
+import java.util.concurrent.CopyOnWriteArraySet;
 import java.util.function.BiPredicate;
 import java.util.function.Predicate;
 
@@ -27,7 +30,7 @@ public final class SurfaceProbe {
     }
 
     /** A value key: equality and hashCode are overridden so a reference comparison fails. */
-    static final class Key {
+    static final class Key implements Comparable<Key> {
         final int value;
 
         Key(int value) {
@@ -42,6 +45,11 @@ public final class SurfaceProbe {
         @Override
         public int hashCode() {
             return 7;
+        }
+
+        @Override
+        public int compareTo(Key other) {
+            return Integer.compare(value, other.value);
         }
     }
 
@@ -78,6 +86,87 @@ public final class SurfaceProbe {
         public void setName(String name) {
             this.name = name;
         }
+    }
+
+    private static List<Object> twoEqualKeys() {
+        List<Object> list = new ArrayList<>();
+        list.add(new Key(1));
+        list.add(new Key(1));
+        return list;
+    }
+
+    /** `HashSet(Collection)` dedupes with Java `equals` (#88). */
+    public static int setCopyDedupes() {
+        return new HashSet<>(twoEqualKeys()).size();
+    }
+
+    /** `LinkedHashSet(Collection)` dedupes with Java `equals` (#88). */
+    public static int linkedSetCopyDedupes() {
+        return new LinkedHashSet<>(twoEqualKeys()).size();
+    }
+
+    /** `CopyOnWriteArraySet(Collection)` dedupes with Java `equals` (#88). */
+    public static int copyOnWriteSetCopyDedupes() {
+        return new CopyOnWriteArraySet<>(twoEqualKeys()).size();
+    }
+
+    /** `TreeSet(Collection)` dedupes with its ordering; the key implements it (#88). */
+    public static int treeSetCopyDedupes() {
+        return new TreeSet<>(twoEqualKeys()).size();
+    }
+
+    /** `Set.addAll` skips an element Java-`equals` to a present one (#88). */
+    public static String setAddAllDedupes() {
+        Set<Object> set = new HashSet<>();
+        set.add(new Key(1));
+        List<Object> source = new ArrayList<>();
+        source.add(new Key(1));
+        source.add(new Key(2));
+        return set.addAll(source) + ":" + set.size();
+    }
+
+    /** `Set.containsAll` matches equal elements (#88). */
+    public static boolean setContainsAllEqual() {
+        Set<Object> set = new HashSet<>();
+        set.add(new Key(1));
+        set.add(new Key(2));
+        List<Object> source = new ArrayList<>();
+        source.add(new Key(1));
+        source.add(new Key(2));
+        return set.containsAll(source);
+    }
+
+    /** `Set.removeAll` removes elements Java-`equals` to the source (#88). */
+    public static String setRemoveAllEqual() {
+        Set<Object> set = new HashSet<>();
+        set.add(new Key(1));
+        set.add(new Key(2));
+        List<Object> source = new ArrayList<>();
+        source.add(new Key(1));
+        return set.removeAll(source) + ":" + set.size();
+    }
+
+    /** `Set.retainAll` keeps elements Java-`equals` to the source (#88). */
+    public static String setRetainAllEqual() {
+        Set<Object> set = new HashSet<>();
+        set.add(new Key(1));
+        set.add(new Key(2));
+        List<Object> source = new ArrayList<>();
+        source.add(new Key(2));
+        return set.retainAll(source) + ":" + set.size();
+    }
+
+    /** `List.containsAll`/`removeAll` use the same Java-`equals` rule (#88). */
+    public static String listBulkEqual() {
+        List<Object> list = new ArrayList<>();
+        list.add(new Key(1));
+        list.add(new Key(2));
+        List<Object> source = new ArrayList<>();
+        source.add(new Key(1));
+        boolean contained = list.containsAll(source);
+        source.clear();
+        source.add(new Key(2));
+        return contained + ":" + list.removeAll(source);
     }
 
     /** `List.contains` calls the element's Java `equals` (collection_equality). */

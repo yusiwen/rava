@@ -156,6 +156,20 @@ fn map_membership_calls_java_equals() {
 }
 
 #[test]
+fn set_copy_constructors_and_bulk_operations_call_java_equals() {
+    let fixture = fixture();
+    assert_eq!(int_value(&fixture, "setCopyDedupes"), 1);
+    assert_eq!(int_value(&fixture, "linkedSetCopyDedupes"), 1);
+    assert_eq!(int_value(&fixture, "copyOnWriteSetCopyDedupes"), 1);
+    assert_eq!(int_value(&fixture, "treeSetCopyDedupes"), 1);
+    assert_eq!(string_value(&fixture, "setAddAllDedupes"), "true:2");
+    assert!(bool_value(&fixture, "setContainsAllEqual"));
+    assert_eq!(string_value(&fixture, "setRemoveAllEqual"), "true:1");
+    assert_eq!(string_value(&fixture, "setRetainAllEqual"), "true:1");
+    assert_eq!(string_value(&fixture, "listBulkEqual"), "true:true");
+}
+
+#[test]
 fn identity_map_stays_reference_based() {
     let fixture = fixture();
     assert_eq!(
