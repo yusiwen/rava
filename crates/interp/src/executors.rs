@@ -80,13 +80,13 @@ fn executors_default_thread_factory(
     Ok(Some(Value::Ref(lambda)))
 }
 
-/// The default factory's `newThread`: a fresh `Thread` object.
+/// The default factory's `newThread`: a fresh, inert `Thread` object.
 ///
-/// The C1 `Thread` has no fields and every `Thread` constructor native is a no-op, so the
-/// runnable passed by the caller cannot be stored; `Thread.start` is a no-op until M5.
-/// The factory contract "return a `Thread`" holds for shape and identity, and a caller that
-/// only inspects the result proceeds. M5 adds thread state (including the runnable) in one
-/// place; this native is not the seam.
+/// The C1 `Thread` has no fields and the constructor natives are no-ops, so the runnable
+/// passed by the caller is dropped: the result has the `Thread` shape but does not wrap
+/// the task, and `Thread.start` does nothing until M5. A caller that only checks the type
+/// or identity proceeds; a caller that expects `start` to run the task does not. M5 adds
+/// thread state (including the runnable) in one place; this native is not the seam.
 fn executors_new_thread(
     shared: &Shared,
     _thread: &ThreadState,

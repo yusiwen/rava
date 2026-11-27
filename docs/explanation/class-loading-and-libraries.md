@@ -317,15 +317,25 @@ Rendering the startup log line is real work, not formatting: Boot wraps it in a
 manifest/package surface in `crates/vm/src/manifest.rs`, not a Boot special case.
 
 The M4.5 boundary is honest about the seams: the VM is single-threaded until M5
-(`Thread.start` does not run the task, `CountDownLatch.await` and
-`LinkedBlockingQueue.put`/`take` fail only when they would block, no executor factory
-creates workers); a missing class literal throws the JVM's catchable
-`NoClassDefFoundError`; an omitted C1 superclass ends a resolution walk rather than
-inventing members; Java stack traces are not recorded, so `Throwable.getStackTrace`
-returns an empty array; and the full auto-configuration graph is beyond the gate. The
-gate runs the built CLI with the fixture classes plus every pinned jar, under a 64 MiB
-child stack and a timeout, and asserts exit 0 and `boot:started`
+(`Thread.start` does not run the task and `Thread.isAlive` answers true for every Thread
+object, `CountDownLatch.await` and `LinkedBlockingQueue.put`/`take` fail only when they
+would block, no executor factory creates workers); a missing class literal throws the
+JVM's catchable `NoClassDefFoundError`; an omitted C1 superclass ends a resolution walk
+rather than inventing members; Java stack traces are not recorded, so
+`Throwable.getStackTrace` returns an empty array; and the full auto-configuration graph is
+beyond the gate. The gate runs the built CLI with the fixture classes plus every pinned
+jar, under a 64 MiB child stack and a timeout, and asserts exit 0 and `boot:started`
 (`RAVA_BOOT_ACCEPTANCE=1 cargo test -p rava-cli --test boot_nonweb`).
+
+`StackWalker.walk(Function)` calls its function with an empty stream. A frame records the
+class and bytecode, not the method name a `StackFrame` reports, so Spring Boot's
+`StackWalker` probe finds no `main` frame, deduces a null main class and prints
+`application` in the startup line; `StackWalker$StackFrame` is absent.
+
+A handler gap with no modelled Java exception to throw — a missing native, a native's typed
+`VmError` — aborts the run with that error instead of a catchable exception. The failures
+that do have a class (`NoClassDefFoundError`, `URISyntaxException`) are thrown as catchable
+objects.
 
 ## 6. Native dispatch: registry before `Code`
 
