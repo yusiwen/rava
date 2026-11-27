@@ -115,8 +115,13 @@ pub fn register_natives(shared: &Shared) {
     // `Properties` extends `Hashtable`, so the `Hashtable` entries serve a `Properties`
     // receiver through the superclass walk; only its own constructors and property access
     // are distinct.
-    for descriptor in ["()V", "(Ljava/util/Properties;)V", "(I)V"] {
-        shared.register_native(PROPERTIES_CLASS, "<init>", descriptor, map_init);
+    for descriptor in [
+        "()V",
+        "(Ljava/util/Properties;)V",
+        "(I)V",
+        "(Ljava/util/Map;)V",
+    ] {
+        shared.register_native_if_declared(PROPERTIES_CLASS, "<init>", descriptor, map_init);
     }
     shared.register_native(
         PROPERTIES_CLASS,
@@ -193,10 +198,10 @@ pub fn register_natives(shared: &Shared) {
 
 /// Register the map surface for one concrete map class.
 fn register_map_surface(shared: &Shared, class: &'static str) {
-    shared.register_native(class, "<init>", "()V", map_init);
-    shared.register_native(class, "<init>", "(I)V", map_init_capacity);
-    shared.register_native(class, "<init>", "(IF)V", map_init_threshold);
-    shared.register_native(class, "<init>", "(Ljava/util/Map;)V", map_init_from);
+    shared.register_native_if_declared(class, "<init>", "()V", map_init);
+    shared.register_native_if_declared(class, "<init>", "(I)V", map_init_capacity);
+    shared.register_native_if_declared(class, "<init>", "(IF)V", map_init_threshold);
+    shared.register_native_if_declared(class, "<init>", "(Ljava/util/Map;)V", map_init_from);
     shared.register_native(class, "size", "()I", hash_map_size);
     shared.register_native(class, "isEmpty", "()Z", hash_map_is_empty);
     shared.register_native(

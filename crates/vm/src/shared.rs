@@ -2310,6 +2310,38 @@ impl Shared {
     ///
     /// Read-only introspection for the registry-vs-C1-stub guard test. The runtime never
     /// calls it; the copy is small (a few thousand entries) and only a test pays for it.
+    /// Register `name`/`descriptor` only when the C1 stub declares it.
+    ///
+    /// Constructor families (throwables, collection capacity forms) share one handler
+    /// across classes whose stubs declare different constructors. Registering every
+    /// descriptor for every class leaves keys that bytecode can never resolve; the class
+    /// metadata is the authority, so a dead entry is never installed. Only C1 owners use
+    /// this helper.
+    pub fn register_native_if_declared(
+        &self,
+        owner: &str,
+        name: &str,
+        descriptor: &str,
+        function: NativeFn,
+    ) {
+        let declared = self
+            .load_library_class(owner)
+            .ok()
+            .and_then(|class| self.entry(class))
+            .map(|entry| {
+                entry
+                    .file
+                    .find_method(name, descriptor)
+                    .ok()
+                    .flatten()
+                    .is_some()
+            })
+            .unwrap_or(false);
+        if declared {
+            self.register_native(owner, name, descriptor, function);
+        }
+    }
+
     pub fn registered_natives(&self) -> Vec<(String, String, String)> {
         let mut keys: Vec<(String, String, String)> = self
             .natives

@@ -78,7 +78,7 @@ pub fn register_natives(shared: &Shared) {
             "(Ljava/lang/String;Ljava/lang/Throwable;)V",
             "(Ljava/lang/Throwable;)V",
         ] {
-            shared.register_native(class, "<init>", descriptor, throwable_init);
+            shared.register_native_if_declared(class, "<init>", descriptor, throwable_init);
         }
     }
     for (name, descriptor, function) in [

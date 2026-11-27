@@ -39,7 +39,7 @@ impl RandomState {
 pub fn register_natives(shared: &Shared) {
     for class in [RANDOM_CLASS, SECURE_RANDOM_CLASS] {
         shared.register_native(class, "<init>", "()V", random_init);
-        shared.register_native(class, "<init>", "(J)V", random_init_seed);
+        shared.register_native_if_declared(class, "<init>", "(J)V", random_init_seed);
         shared.register_native(class, "nextInt", "()I", random_next_int);
         shared.register_native(class, "nextInt", "(I)I", random_next_int_bound);
         shared.register_native(class, "nextLong", "()J", random_next_long);

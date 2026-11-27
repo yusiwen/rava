@@ -23,13 +23,13 @@ const REFERENCE_CLASS: &str = "java/lang/ref/Reference";
 const REFERENCE_QUEUE_CLASS: &str = "java/lang/ref/ReferenceQueue";
 
 pub fn register_natives(shared: &Shared) {
-    shared.register_native(
+    shared.register_native_if_declared(
         REFERENCE_CLASS,
         "<init>",
         "(Ljava/lang/Object;)V",
         reference_init,
     );
-    shared.register_native(
+    shared.register_native_if_declared(
         REFERENCE_CLASS,
         "<init>",
         "(Ljava/lang/Object;Ljava/lang/ref/ReferenceQueue;)V",
@@ -75,8 +75,13 @@ pub fn register_natives(shared: &Shared) {
         );
     }
 
-    shared.register_native(REFERENCE_QUEUE_CLASS, "<init>", "()V", reference_queue_init);
-    shared.register_native(
+    shared.register_native_if_declared(
+        REFERENCE_QUEUE_CLASS,
+        "<init>",
+        "()V",
+        reference_queue_init,
+    );
+    shared.register_native_if_declared(
         REFERENCE_QUEUE_CLASS,
         "<init>",
         "(I)V",
