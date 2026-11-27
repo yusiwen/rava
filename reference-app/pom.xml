@@ -26,6 +26,10 @@
     <java.version>17</java.version>
     <maven.compiler.release>17</maven.compiler.release>
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+    <!-- The jar is a pinned compatibility artifact. Fixed entry timestamps, stored
+         (uncompressed) entries and no build-environment manifest entries make its bytes
+         independent of the build JDK; do not add toolchain-dependent entries. -->
+    <project.build.outputTimestamp>1980-02-01T00:00:00Z</project.build.outputTimestamp>
   </properties>
 
   <dependencies>
@@ -44,8 +48,14 @@
         <artifactId>maven-jar-plugin</artifactId>
         <configuration>
           <archive>
+            <!-- Store entries: deflate output differs between JDKs even when the class
+                 bytes do not. -->
+            <compress>false</compress>
             <manifest>
               <mainClass>dev.rava.reference.ReferenceApplication</mainClass>
+              <!-- `Build-Jdk-Spec`/`Created-By` would pin the build JDK, not the app. -->
+              <addDefaultEntries>false</addDefaultEntries>
+              <addBuildEnvironmentEntries>false</addBuildEnvironmentEntries>
             </manifest>
           </archive>
         </configuration>

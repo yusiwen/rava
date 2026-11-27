@@ -157,6 +157,8 @@ The pinned target and jar set are checked with:
 ```sh
 cargo run -p rava-cli -- compat target
 bash compat/fetch-jars.sh --check
+bash compat/toolchain.sh
+bash compat/check-app-reproducible.sh
 ```
 
 The static surface manifest is generated and checked with:
@@ -217,7 +219,10 @@ See [`stdlib/README.md`](stdlib/README.md) and
 contain.
 
 `bash compat/fetch-jars.sh` (re)fetches the jars from Maven Central and needs
-`JAVA_HOME` and Maven; `--check` verifies the existing directory without fetching.
+`JAVA_HOME` and Maven; `--check` verifies the existing directory without fetching,
+including the reference application's jar. `bash compat/toolchain.sh` reports the Java
+and Maven versions, and `bash compat/check-app-reproducible.sh` rebuilds the app jar from
+clean and proves it matches the locked checksum byte for byte.
 
 ## License
 
