@@ -67,19 +67,21 @@ records access order, so a successful `get` and an update of an existing key mov
 to the end, which iteration then observes.
 
 Member search is per container, not one VM-wide rule. `List`/`Set` queries (`contains`,
-`indexOf`, `lastIndexOf`, `remove(Object)`, `Set.equals`) and the `Map` key/value operations
-(`get`, `containsKey`, `containsValue`, `put`, `putIfAbsent`, `computeIfAbsent`,
-`getOrDefault`, `remove`) compare through the probe's Java `equals`, via the
-interpreter-side overrides in `crates/interp/src/collection_equality.rs`; a `put` with an
-equal key keeps the stored key and replaces the value. `IdentityHashMap` keeps reference
-identity, including a `Map`-typed call: the override checks the receiver's runtime class.
-`TreeSet`/`TreeMap` stay insertion-ordered and compare with `equals`, not a comparator.
+`indexOf`, `lastIndexOf`, `remove(Object)`, `Set.equals`), the set copy constructors and
+the `addAll`/`containsAll`/`removeAll`/`retainAll` bulk operations compare through the
+probe's Java `equals`, via the interpreter-side overrides in
+`crates/interp/src/collection_equality.rs`; the `Map` key/value operations (`get`,
+`containsKey`, `containsValue`, `put`, `putIfAbsent`, `computeIfAbsent`, `getOrDefault`,
+`remove`) follow the same rule, and a `put` with an equal key keeps the stored key and
+replaces the value. `IdentityHashMap` keeps reference identity, including a `Map`-typed
+call: the override checks the receiver's runtime class. `TreeSet`/`TreeMap` stay
+insertion-ordered and compare with `equals`, not a comparator.
 
 The `rava-vm` natives underneath still use the older rule — strings by content, boxed
 primitives by per-kind value, everything else by identity — and the runner installs the
-overrides after them, so a VM-only test sees the VM layer. A set copy constructor
-(`new HashSet<>(collection)`) still copies with that VM rule and keeps two equal elements;
-the bulk set operations are tracked separately from the per-element queries above.
+overrides after them, so a VM-only test sees the VM layer. Map copy constructors still
+copy with the VM rule; the set copy constructors and the bulk operations are covered by
+the overrides above.
 
 ## 5. Text formatting
 

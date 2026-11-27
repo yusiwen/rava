@@ -20,8 +20,8 @@
 //! Map key and value operations follow the same rule for the listed operations; `put`
 //! keeps the stored key object when an equal key arrives, and `IdentityHashMap` is the
 //! exception (reference identity, including a `Map`-typed call, which checks the receiver's
-//! runtime class). Map copy constructors and the set bulk operations still copy with the
-//! `rava-vm` rule; they are tracked separately.
+//! runtime class). The set copy constructors and the `Collection` bulk operations use the
+//! same Java-`equals` rule; map copy constructors still copy with the `rava-vm` rule.
 
 use rava_vm::collections::{
     ARRAY_DEQUE_CLASS, ARRAY_LIST_CLASS, CONCURRENT_LINKED_DEQUE_CLASS,
@@ -112,6 +112,50 @@ pub fn register_natives(shared: &Shared) {
         "(Ljava/lang/Object;)Z",
         list_add_if_absent,
     );
+    // A set copy constructor dedupes with Java `equals`; the VM's `set_init` uses its own
+    // rule. Register on every set class that declares the `Collection` constructor.
+    for class in [
+        HASH_SET_CLASS,
+        LINKED_HASH_SET_CLASS,
+        TREE_SET_CLASS,
+        COPY_ON_WRITE_ARRAY_SET_CLASS,
+    ] {
+        shared.register_native(
+            class,
+            "<init>",
+            "(Ljava/util/Collection;)V",
+            set_copy_constructor,
+        );
+    }
+    // The VM implements the bulk operations with `values_equal`; the JDK uses the
+    // collection's element `equals`. Register at every declaration site a virtual call can
+    // resolve to, for both container shapes.
+    for class in LIST_TYPES.into_iter().chain(SET_TYPES) {
+        shared.register_native(
+            class,
+            "addAll",
+            "(Ljava/util/Collection;)Z",
+            collection_add_all,
+        );
+        shared.register_native(
+            class,
+            "containsAll",
+            "(Ljava/util/Collection;)Z",
+            collection_contains_all,
+        );
+        shared.register_native(
+            class,
+            "removeAll",
+            "(Ljava/util/Collection;)Z",
+            collection_remove_all,
+        );
+        shared.register_native(
+            class,
+            "retainAll",
+            "(Ljava/util/Collection;)Z",
+            collection_retain_all,
+        );
+    }
     // `AbstractSet.equals` is the JDK's size + contained-elements check; the C1 stub has no
     // `Code`, and the operation needs Java `equals` on the elements.
     for class in ["java/util/AbstractSet", "java/util/Set"] {
@@ -773,6 +817,216 @@ fn list_add_if_absent(
         .map_err(|error| VmError::Native(error.to_string()))?
         .push(value);
     Ok(Some(Value::Int(1)))
+}
+
+/// The elements of a list or set receiver, cloned so no heap lock is held while Java
+/// `equals` runs.
+fn collection_values(
+    shared: &Shared,
+    reference: ObjRef,
+    method: &'static str,
+) -> Result<Vec<Value>, VmError> {
+    if reference.is_null() {
+        return Err(VmError::Native(format!("{method}: null collection")));
+    }
+    match shared.heap().get(reference) {
+        Ok(HeapObject::List(list)) => Ok(list.elements.clone()),
+        Ok(HeapObject::Set(set)) => Ok(set.elements.clone()),
+        Ok(_) => Err(VmError::Native(format!(
+            "{method} receiver is not a java.util.Collection"
+        ))),
+        Err(error) => Err(VmError::Native(error.to_string())),
+    }
+}
+
+/// Replace a list's or set's elements, keeping the receiver's identity.
+fn replace_collection(
+    shared: &Shared,
+    receiver: ObjRef,
+    values: Vec<Value>,
+    method: &'static str,
+) -> Result<(), VmError> {
+    let mut heap = shared.heap();
+    match heap.get(receiver) {
+        Ok(HeapObject::List(_)) => {
+            let list = heap
+                .list_mut(receiver)
+                .map_err(|error| VmError::Native(error.to_string()))?;
+            list.clear();
+            list.extend(values);
+            Ok(())
+        }
+        Ok(HeapObject::Set(_)) => {
+            let set = heap
+                .set_mut(receiver)
+                .map_err(|error| VmError::Native(error.to_string()))?;
+            set.clear();
+            set.extend(values);
+            Ok(())
+        }
+        Ok(_) => Err(VmError::Native(format!(
+            "{method} receiver is not a java.util.Collection"
+        ))),
+        Err(error) => Err(VmError::Native(error.to_string())),
+    }
+}
+
+/// `Set(Collection)`: clear the receiver and add each source element only when no element
+/// already added is Java-`equals` to it. First-occurrence order is kept; `TreeSet` stays
+/// insertion-ordered (its documented boundary).
+fn set_copy_constructor(
+    shared: &Shared,
+    thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let source = match args.first().copied() {
+        Some(Value::Ref(reference)) if !reference.is_null() => reference,
+        _ => {
+            return Err(VmError::Native(
+                "Set.<init> expects a non-null Collection".to_owned(),
+            ));
+        }
+    };
+    let values = collection_values(shared, source, "Set.<init>")?;
+    let mut unique = Vec::with_capacity(values.len());
+    for value in values {
+        let present = contains(shared, thread, &unique, value).map_err(interp_to_vm)?;
+        if !present {
+            unique.push(value);
+        }
+    }
+    replace_collection(shared, receiver, unique, "Set.<init>")?;
+    Ok(None)
+}
+
+/// `Collection.addAll(Collection)`: append for a list; add only absent elements for a set,
+/// both with Java `equals`. Returns whether the receiver changed.
+fn collection_add_all(
+    shared: &Shared,
+    thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let (source, is_set) = collection_argument(shared, receiver, args, "Collection.addAll")?;
+    let incoming = collection_values(shared, source, "Collection.addAll")?;
+    let existing = collection_values(shared, receiver, "Collection.addAll")?;
+    if is_set {
+        let mut merged = existing.clone();
+        for value in incoming {
+            let present = contains(shared, thread, &merged, value).map_err(interp_to_vm)?;
+            if !present {
+                merged.push(value);
+            }
+        }
+        let changed = merged.len() != existing.len();
+        if changed {
+            replace_collection(shared, receiver, merged, "Collection.addAll")?;
+        }
+        Ok(Some(Value::Int(i32::from(changed))))
+    } else {
+        // `List.addAll` appends every element, including duplicates of the receiver.
+        let changed = !incoming.is_empty();
+        if changed {
+            let mut merged = existing;
+            merged.extend(incoming);
+            replace_collection(shared, receiver, merged, "Collection.addAll")?;
+        }
+        Ok(Some(Value::Int(i32::from(changed))))
+    }
+}
+
+/// `Collection.containsAll(Collection)`: every source element is present, using the source
+/// element as the `equals` probe (the JDK's `c.contains` direction).
+fn collection_contains_all(
+    shared: &Shared,
+    thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let (source, _) = collection_argument(shared, receiver, args, "Collection.containsAll")?;
+    let wanted = collection_values(shared, source, "Collection.containsAll")?;
+    let elements = collection_values(shared, receiver, "Collection.containsAll")?;
+    for probe in wanted {
+        if !contains(shared, thread, &elements, probe).map_err(interp_to_vm)? {
+            return Ok(Some(Value::Int(0)));
+        }
+    }
+    Ok(Some(Value::Int(1)))
+}
+
+/// `Collection.removeAll(Collection)`: drop every receiver element the argument contains.
+/// The JDK calls `c.contains(element)`, so the receiver element is the probe.
+fn collection_remove_all(
+    shared: &Shared,
+    thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let (source, _) = collection_argument(shared, receiver, args, "Collection.removeAll")?;
+    let source = collection_values(shared, source, "Collection.removeAll")?;
+    let elements = collection_values(shared, receiver, "Collection.removeAll")?;
+    let original = elements.len();
+    let mut kept = Vec::with_capacity(original);
+    for element in elements {
+        if !contains(shared, thread, &source, element).map_err(interp_to_vm)? {
+            kept.push(element);
+        }
+    }
+    let changed = kept.len() != original;
+    if changed {
+        replace_collection(shared, receiver, kept, "Collection.removeAll")?;
+    }
+    Ok(Some(Value::Int(i32::from(changed))))
+}
+
+/// `Collection.retainAll(Collection)`: keep only the receiver elements the argument
+/// contains; the receiver element is the probe, as in `removeAll`.
+fn collection_retain_all(
+    shared: &Shared,
+    thread: &ThreadState,
+    _loader: LoaderId,
+    receiver: ObjRef,
+    args: &[Value],
+) -> Result<Option<Value>, VmError> {
+    let (source, _) = collection_argument(shared, receiver, args, "Collection.retainAll")?;
+    let source = collection_values(shared, source, "Collection.retainAll")?;
+    let elements = collection_values(shared, receiver, "Collection.retainAll")?;
+    let original = elements.len();
+    let mut kept = Vec::with_capacity(original);
+    for element in elements {
+        if contains(shared, thread, &source, element).map_err(interp_to_vm)? {
+            kept.push(element);
+        }
+    }
+    let changed = kept.len() != original;
+    if changed {
+        replace_collection(shared, receiver, kept, "Collection.retainAll")?;
+    }
+    Ok(Some(Value::Int(i32::from(changed))))
+}
+
+/// The argument collection and whether the receiver is a set, for the bulk operations.
+fn collection_argument(
+    shared: &Shared,
+    receiver: ObjRef,
+    args: &[Value],
+    method: &'static str,
+) -> Result<(ObjRef, bool), VmError> {
+    let source = match args.first().copied() {
+        Some(Value::Ref(reference)) if !reference.is_null() => reference,
+        _ => {
+            return Err(VmError::Native(format!(
+                "{method} expects a non-null Collection"
+            )));
+        }
+    };
+    let is_set = matches!(shared.heap().get(receiver), Ok(HeapObject::Set(_)));
+    Ok((source, is_set))
 }
 
 /// `Set.equals(Object)`: same size and the same elements.
