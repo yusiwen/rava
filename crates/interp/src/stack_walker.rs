@@ -43,12 +43,6 @@ pub fn register_natives(shared: &Shared) {
     );
     shared.register_native(
         STACK_WALKER_CLASS,
-        "getInstance",
-        "(Ljava/lang/StackWalker$Option;I)Ljava/lang/StackWalker;",
-        stack_walker_get_instance,
-    );
-    shared.register_native(
-        STACK_WALKER_CLASS,
         "walk",
         "(Ljava/util/function/Function;)Ljava/lang/Object;",
         stack_walker_walk,

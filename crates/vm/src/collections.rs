@@ -669,7 +669,7 @@ fn register_collection_factories(shared: &Shared) {
 /// declare the same methods, so they share the implementations.
 fn register_list_surface(shared: &Shared, class: &'static str) {
     shared.register_native(class, "<init>", "()V", array_list_init);
-    shared.register_native(class, "<init>", "(I)V", array_list_init_capacity);
+    shared.register_native_if_declared(class, "<init>", "(I)V", array_list_init_capacity);
     shared.register_native(class, "size", "()I", array_list_size);
     shared.register_native(class, "isEmpty", "()Z", array_list_is_empty);
     shared.register_native(class, "add", "(Ljava/lang/Object;)Z", array_list_add);
@@ -736,7 +736,7 @@ fn register_set_natives(shared: &Shared) {
             ("<init>", "(IF)V"),
             ("<init>", "(Ljava/util/Collection;)V"),
         ] {
-            shared.register_native(class, name, descriptor, set_init);
+            shared.register_native_if_declared(class, name, descriptor, set_init);
         }
     }
     // `TreeSet(Comparator)` keeps the comparator out of the set shape; this VM's sets are
@@ -3187,7 +3187,7 @@ fn enumeration_next(
 /// Register a `Deque` surface over the list shape.
 fn register_deque_natives(shared: &Shared, class: &'static str) {
     shared.register_native(class, "<init>", "()V", array_list_init);
-    shared.register_native(class, "<init>", "(I)V", array_list_init_capacity);
+    shared.register_native_if_declared(class, "<init>", "(I)V", array_list_init_capacity);
     shared.register_native(
         class,
         "<init>",

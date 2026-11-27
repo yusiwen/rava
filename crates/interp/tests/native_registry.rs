@@ -7,12 +7,10 @@
 //! the registry the runner installs and compares it with `stdlib/c1/classes`, so a wrong
 //! descriptor fails CI instead of a user program (issue #70).
 //!
-//! Scope is **dispatchable methods**, the entries javac can name. Constructor entries are
-//! skipped: a constructor the stub does not declare cannot be invoked (`new` and
-//! `Constructor.newInstance` both resolve through the class metadata), so a dead
-//! constructor alias is cleanup, not a first-use abort. `$`-prefixed entries are addressed
-//! by native lambda targets, not by javac; the tests below pin the lambda targets that
-//! matter.
+//! Scope includes constructors: a registration for a constructor the stub does not declare
+//! is dead even though `new` fails earlier through the class metadata, and the M4.5
+//! registry carried 49 such entries (#80). `$`-prefixed entries are addressed by native
+//! lambda targets, not by javac; the tests below pin the lambda targets that matter.
 //!
 //! Two allowances keep the guard honest without pinning every historical quirk:
 //!
@@ -165,10 +163,24 @@ fn every_registered_native_matches_a_c1_stub_descriptor() {
             // metadata to compare against.
             continue;
         };
-        if name == "<init>" || name.starts_with('$') {
+        if name.starts_with('$') {
             continue;
         }
         if methods.contains(&(name.clone(), descriptor.clone())) {
+            continue;
+        }
+        if name == "<init>" {
+            // A constructor is never inherited, so a descriptor the owner does not declare
+            // has no resolution path at all.
+            failures.push(format!(
+                "{owner}.<init>{descriptor} (the stub declares {})",
+                methods
+                    .iter()
+                    .filter(|(declared, _)| declared == "<init>")
+                    .map(|(_, stub_descriptor)| stub_descriptor.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
             continue;
         }
         if !methods.iter().any(|(declared, _)| declared == name) {
@@ -189,7 +201,10 @@ fn every_registered_native_matches_a_c1_stub_descriptor() {
         });
         if correct_registered {
             // A dead alias: the lookup resolves the correct descriptor, so the extra
-            // registration cannot abort a Java call.
+            // registration cannot abort a Java call. `Set.of`/`List.of` are the documented
+            // case: both owners register both return descriptors so an erased
+            // `invokeinterface` resolves, while each stub declares only its own return type
+            // (`register_collection_factories`).
             continue;
         }
         failures.push(format!(

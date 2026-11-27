@@ -302,11 +302,12 @@ database and sample the offset at the printed instant; an unknown id is a typed 
 
 What the gate exercises is measured, not assumed: a debug build exposes an opt-in
 `RAVA_NATIVE_CENSUS` hook in the native table, and `scripts/native-census.sh` runs this
-gate under it. The 2026-11-26 baseline is **2,132 registered natives, 581 distinct natives
-called, 1,551 never called**; of the 585 registrations the M4.5 commit added, **109 (18.6%)
-are called** and **476 are neither called by the gate nor covered by another test**. The
-per-module tests for the interpreter-side surface and the M5 boundary are
-`crates/cli/tests/surface.rs` and `crates/cli/tests/m5_boundary.rs`.
+gate under it. The 2026-11-27 census is **2,104 registered natives, 593 distinct natives
+called, 1,511 never called**; the M4.5 commit added 585 of the registered keys, of which
+**109 (18.6%) are called** and **476 are neither called by the gate nor covered by another
+test**. #80 removed 49 dead constructor keys, and #73 added the manifest/package surface the
+rendered startup line calls. The per-module tests for the interpreter-side surface and the
+M5 boundary are `crates/cli/tests/surface.rs` and `crates/cli/tests/m5_boundary.rs`.
 
 Rendering the startup log line is real work, not formatting: Boot wraps it in a
 `LogMessage` and formats it through `String.valueOf`, so the run parses each
