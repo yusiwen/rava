@@ -1,14 +1,16 @@
 # diagnostics — stream routing, streaming output and throwable traces
 
-`demo.OutErr`, `demo.Hang`, `demo.Trace` and `demo.Suppressed` are ordinary Java compiled
-with `javac --release 17`. `crates/cli/tests/diagnostics.rs` runs them through the built CLI
-and asserts (#79):
+`demo.OutErr`, `demo.Hang`, `demo.Trace`, `demo.Suppressed`, `demo.PrintAll` and
+`demo.PrintObject` are ordinary Java compiled with `javac --release 17`.
+`crates/cli/tests/diagnostics.rs` runs them through the built CLI and asserts (#79, #90):
 
 - `System.err` reaches the process's stderr and `System.out` its stdout;
 - output written before a hang survives the kill (the runner streams instead of buffering);
 - `printStackTrace()` prints the `Caused by:` chain and `Suppressed:` entries, with no
   frames (the VM records no Java frames);
-- `addSuppressed`/`getSuppressed` round-trip.
+- `addSuppressed`/`getSuppressed` round-trip;
+- every `PrintStream` `print`/`println` overload (primitives, `char[]`, an Object with a
+  `toString` override, and the identity fallback) prints the JDK's text on both streams.
 
 Committed files:
 
