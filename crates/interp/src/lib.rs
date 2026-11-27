@@ -50,6 +50,7 @@ pub mod objects;
 pub mod proxy;
 pub mod reflect_invoke;
 pub mod service_loader;
+pub mod sorted_collections;
 pub mod stack_walker;
 pub mod streams;
 pub mod unsafe_natives;
@@ -93,6 +94,7 @@ pub fn register_all(shared: &Shared) -> Result<(), VmError> {
     object_text::register(shared);
     service_loader::register_natives(shared);
     collection_equality::register_natives(shared);
+    sorted_collections::register_natives(shared);
     functional::register_natives(shared);
     interface_defaults::register_natives(shared);
     iterables::register_natives(shared);

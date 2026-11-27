@@ -170,6 +170,36 @@ fn set_copy_constructors_and_bulk_operations_call_java_equals() {
 }
 
 #[test]
+fn tree_collections_sort_and_map_copies_call_java_equals() {
+    let fixture = fixture();
+    assert_eq!(string_value(&fixture, "treeSetComparatorOrder"), "3 2 1");
+    assert_eq!(string_value(&fixture, "treeSetNaturalCopy"), "1 2 3");
+    assert_eq!(
+        string_value(&fixture, "treeSetFirstLastComparator"),
+        "3:1:true"
+    );
+    assert_eq!(string_value(&fixture, "treeSetSortedCopy"), "3 1:true");
+    assert_eq!(string_value(&fixture, "treeSetAddAllComparator"), "3 2 1");
+    assert_eq!(string_value(&fixture, "treeSetRejectsNonComparable"), "CCE");
+    assert_eq!(string_value(&fixture, "treeSetEmptyFirst"), "NSEE");
+    assert_eq!(string_value(&fixture, "treeMapComparatorOrder"), "3 2 1");
+    assert_eq!(
+        string_value(&fixture, "treeMapFirstLastComparator"),
+        "3:1:true"
+    );
+    assert_eq!(string_value(&fixture, "treeMapNaturalCopy"), "1 3");
+    assert_eq!(
+        string_value(&fixture, "treeMapInheritsComparator"),
+        "3 1:true"
+    );
+    assert_eq!(string_value(&fixture, "treeMapPutAllComparator"), "3 2 1");
+    assert_eq!(string_value(&fixture, "treeMapNullKey"), "NPE");
+    assert_eq!(int_value(&fixture, "hashMapCopyDedupes"), 1);
+    assert_eq!(int_value(&fixture, "linkedHashMapCopyDedupes"), 1);
+    assert_eq!(int_value(&fixture, "hashtableCopyDedupes"), 1);
+}
+
+#[test]
 fn identity_map_stays_reference_based() {
     let fixture = fixture();
     assert_eq!(
